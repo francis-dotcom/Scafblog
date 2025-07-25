@@ -1,0 +1,105 @@
+---
+slug: how-to-convert-latex-to-word-without-losing-formatting
+title: How to Convert LaTeX to Word Without Losing Formatting
+authors: [francis]
+tags: [latex, pandoc, formatting, docx, conversion]
+date: 2025-07-23
+---
+
+# ✨ How to Convert LaTeX to Word Without Losing Formatting
+
+LaTeX is a powerful typesetting system loved by researchers, academics, and technical writers for its precision and control. However, many find themselves needing to convert their beautifully formatted LaTeX documents into Microsoft Word format—especially when collaborating, submitting to non-LaTeX-compliant journals, or applying APA 7 style. In this post, you'll learn exactly how to do it cleanly and efficiently.
+
+---
+
+## 📌 Why Convert LaTeX to Word?
+
+- **Collaboration**: Many co-authors or editors prefer Word.
+- **Submissions**: Some journals, conferences, or universities require `.docx` submissions.
+- **Formatting**: Word is often easier for non-technical formatting and real-time feedback.
+
+## ⚠️ Common Challenges
+
+- References and citations not appearing
+- Tables and figures misaligned or broken
+- Math equations not converting cleanly
+- Loss of APA or journal-specific formatting
+
+---
+
+## 🛠️ Recommended Tool: Pandoc
+
+Pandoc is a universal document converter that can translate `.tex` files to `.docx` while preserving structure and references.
+
+### 🔧 Prerequisites
+
+- Install [Pandoc](https://pandoc.org/installing.html)
+- Install LaTeX distribution (e.g., [TinyTeX](https://yihui.org/tinytex/))
+- Optional: Install a `.csl` citation style file for APA 7 or other formats
+
+---
+
+## 🧭 Step-by-Step Conversion
+
+### 🔹 Step 1: Basic Command
+
+```bash
+pandoc myfile.tex -s -o output.docx
+```
+
+### 🔹 Step 2: Convert via Markdown (for cleaner formatting)
+
+```bash
+pandoc myfile.tex -o temp.md
+pandoc temp.md -o final.docx
+```
+
+### 🔹 Step 3: Add Citations and APA Style
+
+```bash
+pandoc myfile.tex \
+  --from=latex \
+  --to=docx \
+  --output=paper.docx \
+  --citeproc \
+  --bibliography=references.bib \
+  --csl=apa.csl
+```
+
+> Make sure `references.bib` and `apa.csl` are in your working directory.
+
+---
+
+## 💡 Tips for Better Results
+
+- Use `\includegraphics` with `.png`, `.jpg`, or `.pdf` images
+- Write clean section headers (`\section`, `\subsection`)
+- Stick to standard LaTeX citation commands (e.g., `\autocite{}`, `\parencite{}`)
+- Avoid custom macros if possible
+
+---
+
+## 🧯 Troubleshooting Guide
+
+| 🚨 Issue              | ✅ Fix                                               |
+| --------------------- | ---------------------------------------------------- |
+| Citations not showing | Use `--citeproc` and check `.bib` path               |
+| Math not converting   | Use `--mathjax` or convert to image before exporting |
+| Table layout breaks   | Use basic `tabular` environments                     |
+| Styles missing        | Apply Word style templates post-conversion           |
+
+---
+
+## 🔄 Alternatives
+
+- **Overleaf**: Use Overleaf’s "Download as Word" export (beta)
+- **LaTeX2RTF**: Older, limited tool for basic conversions
+- **Manual Copy-Paste**: Only for very short documents
+
+---
+
+## 🎯 Final Thoughts
+
+Converting LaTeX to Word is no longer painful if you use the right tools and prepare your document cleanly. Pandoc provides a powerful, customizable pathway that can preserve your content, citations, and structure.
+
+Let us know in the comments what worked for you—or if you want us to cover converting LaTeX to Google Docs or Markdown next!
