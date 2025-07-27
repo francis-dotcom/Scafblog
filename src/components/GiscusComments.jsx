@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState, Suspense } from "react";
 
-const Giscus = React.lazy(() => import('@giscus/react'));
+const Giscus = React.lazy(() => import("@giscus/react"));
 
 export default function GiscusComments() {
   const containerRef = useRef(null);
@@ -15,7 +15,7 @@ export default function GiscusComments() {
         }
       },
       {
-        rootMargin: '200px', // Pre-load just before it's in view
+        rootMargin: "200px", // Pre-load just before it's in view
       }
     );
 
@@ -35,7 +35,7 @@ export default function GiscusComments() {
             repoId="R_kgDOPLlzgQ"
             category="Blog Comments"
             categoryId="DIC_kwDOPLlzgc4Cta5V"
-            mapping="pathname"
+            mapping="url"
             strict="0"
             reactionsEnabled="1"
             emitMetadata="0"
