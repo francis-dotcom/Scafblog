@@ -1,19 +1,2467 @@
 ---
-slug: build-globalconnect-financial-microservices-architecture-tutorial
-title: "How to Build GlobalConnect Financial Services. A Complete Multi-Region Microservices Architecture Tutorial"
-authors: [francis]
-tags:
-  [
-    aws,
-    microservices,
-    multi-region,
-    disaster-recovery,
-    financial-services,
-    enterprise-architecture,
-    tutorial,
-    eks,
-    rds,
-    dynamodb,
-  ]
-date: 2025-07-27
+# Building GlobalConnect: A Complete Guide to Multi-Region Financial Microservices on AWS
+
+<div className="hero-callout">
+  <span className="bulb">🏗️</span>
+  <strong>
+    The step-by-step blueprint for building enterprise-grade, multi-region financial services infrastructure that scales to millions of transactions.
+  </strong>
+</div>
+
+## Prerequisites & What You'll Build 🎯
+
+By the end of this tutorial, you'll have deployed a production-ready financial services platform spanning **3 AWS regions** with **40+ microservices**, complete disaster recovery, and enterprise-grade security.
+
+<div className="prerequisites-grid">
+  <div className="prereq-card technical">
+    <h4>🛠️ Technical Requirements</h4>
+    <ul>
+      <li>AWS Account with admin access</li>
+      <li>Terraform v1.0+ installed</li>
+      <li>kubectl and eksctl CLI tools</li>
+      <li>Docker Desktop running</li>
+      <li>Basic Kubernetes knowledge</li>
+    </ul>
+  </div>
+  
+  <div className="prereq-card time">
+    <h4>⏱️ Time Investment</h4>
+    <ul>
+      <li><strong>Total:</strong> 8-12 hours</li>
+      <li><strong>Phase 1-2:</strong> 3-4 hours (Infrastructure)</li>
+      <li><strong>Phase 3-4:</strong> 3-4 hours (Services)</li>
+      <li><strong>Phase 5-6:</strong> 2-4 hours (Monitoring & DR)</li>
+    </ul>
+  </div>
+  
+  <div className="prereq-card cost">
+    <h4>💰 AWS Costs</h4>
+    <ul>
+      <li><strong>Development:</strong> $200-400/month</li>
+      <li><strong>Production-scale:</strong> $2,000-5,000/month</li>
+      <li><strong>Free tier eligible:</strong> Some services</li>
+      <li><strong>Cost optimization:</strong> Included in tutorial</li>
+    </ul>
+  </div>
+</div>
+
+:::tip TUTORIAL APPROACH
+This tutorial follows **infrastructure-as-code** principles with **production-ready configurations**. Every component includes security hardening, monitoring, and disaster recovery considerations.
+:::
+
+## Architecture Overview 🏛️
+
+<div className="architecture-summary">
+  <div className="arch-stats">
+    <div className="arch-stat">
+      <div className="number">3</div>
+      <div className="label">AWS Regions</div>
+    </div>
+    <div className="arch-stat">
+      <div className="number">40+</div>
+      <div className="label">Microservices</div>
+    </div>
+    <div className="arch-stat">
+      <div className="number">15min</div>
+      <div className="label">RTO Target</div>
+    </div>
+    <div className="arch-stat">
+      <div className="number">99.99%</div>
+      <div className="label">Availability</div>
+    </div>
+  </div>
+</div>
+
+### 🗺️ **Regional Strategy**
+
+<div className="region-strategy">
+  <div className="strategy-region primary">
+    <h4>🇺🇸 US-East-1 (Primary)</h4>
+    <p><strong>Role:</strong> Main trading operations and customer-facing services</p>
+    <p><strong>Services:</strong> All 40+ microservices running at full capacity</p>
+    <p><strong>Data:</strong> Primary databases with real-time replication</p>
+  </div>
+  
+  <div className="strategy-region secondary">
+    <h4>🌊 US-West-2 (Secondary)</h4>
+    <p><strong>Role:</strong> Hot standby + West Coast low-latency operations</p>
+    <p><strong>Services:</strong> Critical services running, others in standby</p>
+    <p><strong>Data:</strong> Read replicas with <5min RPO</p>
+  </div>
+  
+  <div className="strategy-region tertiary">
+    <h4>🇪🇺 EU-West-1 (Compliance)</h4>
+    <p><strong>Role:</strong> European operations with GDPR compliance</p>
+    <p><strong>Services:</strong> EU-specific services + data residency</p>
+    <p><strong>Data:</strong> Isolated EU data with local encryption keys</p>
+  </div>
+</div>
+
 ---
+
+## Phase 1: Foundation - AWS Multi-Region Setup 🏗️
+
+### Step 1.1: AWS CLI & Profile Configuration
+
+First, set up your AWS environment with separate profiles for each region:
+
+```bash
+# Install AWS CLI (if not already installed)
+# macOS
+brew install awscli
+
+# Linux
+curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+unzip awscliv2.zip && sudo ./aws/install
+
+# Configure AWS profiles for each region
+aws configure --profile globalconnect-primary
+# AWS Access Key ID: [your-key]
+# AWS Secret Access Key: [your-secret]
+# Default region name: us-east-1
+# Default output format: json
+
+aws configure --profile globalconnect-secondary
+# Region: us-west-2
+
+aws configure --profile globalconnect-eu
+# Region: eu-west-1
+```
+
+### Step 1.2: Terraform Infrastructure Setup
+
+Create the foundational infrastructure using Terraform:
+
+```bash
+# Install Terraform
+brew install terraform  # macOS
+# OR
+wget https://releases.hashicorp.com/terraform/1.6.0/terraform_1.6.0_linux_amd64.zip
+
+# Create project structure
+mkdir -p globalconnect-infrastructure/{modules,environments}
+cd globalconnect-infrastructure
+```
+
+<div className="file-structure">
+
+**📁 Project Structure:**
+
+```
+globalconnect-infrastructure/
+├── main.tf
+├── variables.tf
+├── outputs.tf
+├── terraform.tfvars
+├── modules/
+│   ├── vpc/
+│   ├── eks/
+│   ├── rds/
+│   └── security/
+└── environments/
+    ├── dev/
+    ├── staging/
+    └── prod/
+```
+
+</div>
+
+### Step 1.3: Core VPC Configuration
+
+Create the multi-region VPC setup:
+
+```hcl
+# main.tf
+terraform {
+  required_version = ">= 1.0"
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+  }
+}
+
+# Provider configurations for each region
+provider "aws" {
+  alias  = "us_east_1"
+  region = "us-east-1"
+  profile = "globalconnect-primary"
+
+  default_tags {
+    tags = {
+      Project     = "GlobalConnect"
+      Environment = var.environment
+      ManagedBy   = "Terraform"
+    }
+  }
+}
+
+provider "aws" {
+  alias  = "us_west_2"
+  region = "us-west-2"
+  profile = "globalconnect-secondary"
+
+  default_tags {
+    tags = {
+      Project     = "GlobalConnect"
+      Environment = var.environment
+      ManagedBy   = "Terraform"
+    }
+  }
+}
+
+provider "aws" {
+  alias  = "eu_west_1"
+  region = "eu-west-1"
+  profile = "globalconnect-eu"
+
+  default_tags {
+    tags = {
+      Project     = "GlobalConnect"
+      Environment = var.environment
+      ManagedBy   = "Terraform"
+    }
+  }
+}
+
+# Primary VPC (US-East-1)
+module "primary_vpc" {
+  source = "terraform-aws-modules/vpc/aws"
+  version = "~> 5.0"
+
+  providers = {
+    aws = aws.us_east_1
+  }
+
+  name = "globalconnect-primary-vpc"
+  cidr = "10.1.0.0/16"
+
+  azs = ["us-east-1a", "us-east-1b", "us-east-1c"]
+
+  # Subnets
+  private_subnets  = ["10.1.1.0/24", "10.1.2.0/24", "10.1.3.0/24"]
+  public_subnets   = ["10.1.101.0/24", "10.1.102.0/24", "10.1.103.0/24"]
+  database_subnets = ["10.1.201.0/24", "10.1.202.0/24", "10.1.203.0/24"]
+
+  # NAT Gateway configuration
+  enable_nat_gateway = true
+  enable_vpn_gateway = false
+  single_nat_gateway = false  # Multi-AZ for HA
+
+  # DNS
+  enable_dns_hostnames = true
+  enable_dns_support   = true
+
+  # VPC Flow Logs for security monitoring
+  enable_flow_log                      = true
+  create_flow_log_cloudwatch_log_group = true
+  create_flow_log_cloudwatch_iam_role  = true
+
+  tags = {
+    Region = "primary"
+    Role   = "trading-operations"
+  }
+}
+
+# Secondary VPC (US-West-2) - Similar configuration
+module "secondary_vpc" {
+  source = "terraform-aws-modules/vpc/aws"
+  version = "~> 5.0"
+
+  providers = {
+    aws = aws.us_west_2
+  }
+
+  name = "globalconnect-secondary-vpc"
+  cidr = "10.2.0.0/16"
+
+  azs = ["us-west-2a", "us-west-2b", "us-west-2c"]
+
+  private_subnets  = ["10.2.1.0/24", "10.2.2.0/24", "10.2.3.0/24"]
+  public_subnets   = ["10.2.101.0/24", "10.2.102.0/24", "10.2.103.0/24"]
+  database_subnets = ["10.2.201.0/24", "10.2.202.0/24", "10.2.203.0/24"]
+
+  enable_nat_gateway = true
+  single_nat_gateway = false
+
+  enable_dns_hostnames = true
+  enable_dns_support   = true
+
+  enable_flow_log                      = true
+  create_flow_log_cloudwatch_log_group = true
+  create_flow_log_cloudwatch_iam_role  = true
+
+  tags = {
+    Region = "secondary"
+    Role   = "disaster-recovery"
+  }
+}
+
+# EU VPC (EU-West-1) - GDPR Compliant
+module "eu_vpc" {
+  source = "terraform-aws-modules/vpc/aws"
+  version = "~> 5.0"
+
+  providers = {
+    aws = aws.eu_west_1
+  }
+
+  name = "globalconnect-eu-vpc"
+  cidr = "10.3.0.0/16"
+
+  azs = ["eu-west-1a", "eu-west-1b", "eu-west-1c"]
+
+  private_subnets  = ["10.3.1.0/24", "10.3.2.0/24", "10.3.3.0/24"]
+  public_subnets   = ["10.3.101.0/24", "10.3.102.0/24", "10.3.103.0/24"]
+  database_subnets = ["10.3.201.0/24", "10.3.202.0/24", "10.3.203.0/24"]
+
+  enable_nat_gateway = true
+  single_nat_gateway = false
+
+  enable_dns_hostnames = true
+  enable_dns_support   = true
+
+  enable_flow_log                      = true
+  create_flow_log_cloudwatch_log_group = true
+  create_flow_log_cloudwatch_iam_role  = true
+
+  tags = {
+    Region = "eu"
+    Role   = "gdpr-compliance"
+    DataResidency = "eu-only"
+  }
+}
+```
+
+### Step 1.4: Deploy Foundation
+
+```bash
+# Initialize and validate Terraform
+terraform init
+terraform validate
+terraform plan
+
+# Deploy infrastructure
+terraform apply
+```
+
+<div className="progress-indicator">
+  <div className="progress-step completed">
+    <span className="step-number">1</span>
+    <span className="step-title">Multi-Region VPCs</span>
+  </div>
+  <div className="progress-step">
+    <span className="step-number">2</span>
+    <span className="step-title">EKS Clusters</span>
+  </div>
+  <div className="progress-step">
+    <span className="step-number">3</span>
+    <span className="step-title">Microservices</span>
+  </div>
+</div>
+
+---
+
+## Phase 2: Kubernetes Infrastructure - EKS Clusters 🚢
+
+### Step 2.1: Install Kubernetes Tools
+
+```bash
+# Install eksctl (AWS EKS CLI)
+# macOS
+brew install eksctl
+
+# Linux
+curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
+sudo mv /tmp/eksctl /usr/local/bin
+
+# Install kubectl
+brew install kubectl  # macOS
+# OR for Linux:
+curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+
+# Install Helm (Kubernetes package manager)
+brew install helm  # macOS
+```
+
+### Step 2.2: EKS Cluster Configuration
+
+Create production-ready EKS clusters with proper security and scaling:
+
+```yaml
+# eks-primary-cluster.yaml
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+
+metadata:
+  name: globalconnect-primary
+  region: us-east-1
+  version: "1.28"
+
+# VPC Configuration (use existing VPC from Terraform)
+vpc:
+  id: "${VPC_ID}" # Will be replaced with actual VPC ID
+  subnets:
+    private:
+      us-east-1a: { id: "${PRIVATE_SUBNET_1A}" }
+      us-east-1b: { id: "${PRIVATE_SUBNET_1B}" }
+      us-east-1c: { id: "${PRIVATE_SUBNET_1C}" }
+    public:
+      us-east-1a: { id: "${PUBLIC_SUBNET_1A}" }
+      us-east-1b: { id: "${PUBLIC_SUBNET_1B}" }
+      us-east-1c: { id: "${PUBLIC_SUBNET_1C}" }
+
+# IAM settings
+iam:
+  withOIDC: true
+  serviceAccounts:
+    - metadata:
+        name: aws-load-balancer-controller
+        namespace: kube-system
+      wellKnownPolicies:
+        awsLoadBalancerController: true
+    - metadata:
+        name: cluster-autoscaler
+        namespace: kube-system
+      wellKnownPolicies:
+        autoScaler: true
+
+# Node Groups
+managedNodeGroups:
+  - name: trading-nodes
+    instanceType: c5.2xlarge # High-performance for trading workloads
+    desiredCapacity: 3
+    minSize: 2
+    maxSize: 10
+
+    # Security
+    ami: auto
+    amiFamily: AmazonLinux2
+
+    # Networking
+    privateNetworking: true
+
+    # Scaling
+    iam:
+      attachPolicyARNs:
+        - arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+        - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+
+    labels:
+      role: trading
+      environment: production
+
+    tags:
+      nodegroup-role: trading-operations
+
+  - name: general-nodes
+    instanceType: m5.large
+    desiredCapacity: 4
+    minSize: 2
+    maxSize: 20
+
+    privateNetworking: true
+
+    labels:
+      role: general
+      environment: production
+
+    tags:
+      nodegroup-role: general-workloads
+
+# Logging
+cloudWatch:
+  clusterLogging:
+    enableTypes: ["*"]
+
+# Add-ons
+addons:
+  - name: vpc-cni
+    version: latest
+  - name: coredns
+    version: latest
+  - name: kube-proxy
+    version: latest
+  - name: aws-ebs-csi-driver
+    version: latest
+```
+
+### Step 2.3: Deploy EKS Clusters
+
+```bash
+# Get VPC details from Terraform output
+export VPC_ID=$(terraform output -raw primary_vpc_id)
+export PRIVATE_SUBNET_1A=$(terraform output -raw primary_private_subnets | jq -r '.[0]')
+# ... (get other subnet IDs)
+
+# Substitute variables in cluster config
+envsubst < eks-primary-cluster.yaml > eks-primary-cluster-filled.yaml
+
+# Create primary cluster
+eksctl create cluster -f eks-primary-cluster-filled.yaml
+
+# Create secondary cluster (similar process)
+eksctl create cluster --name=globalconnect-secondary \
+  --region=us-west-2 \
+  --version=1.28 \
+  --nodes=3 \
+  --node-type=m5.large \
+  --managed
+
+# Create EU cluster
+eksctl create cluster --name=globalconnect-eu \
+  --region=eu-west-1 \
+  --version=1.28 \
+  --nodes=3 \
+  --node-type=m5.large \
+  --managed
+```
+
+### Step 2.4: Configure kubectl Contexts
+
+```bash
+# Update kubeconfig for all clusters
+aws eks --region us-east-1 update-kubeconfig --name globalconnect-primary --alias primary
+aws eks --region us-west-2 update-kubeconfig --name globalconnect-secondary --alias secondary
+aws eks --region eu-west-1 update-kubeconfig --name globalconnect-eu --alias eu
+
+# Verify access
+kubectl get nodes --context=primary
+kubectl get nodes --context=secondary
+kubectl get nodes --context=eu
+
+# Set primary as default context
+kubectl config use-context primary
+```
+
+<div className="progress-indicator">
+  <div className="progress-step completed">
+    <span className="step-number">1</span>
+    <span className="step-title">Multi-Region VPCs</span>
+  </div>
+  <div className="progress-step completed">
+    <span className="step-number">2</span>
+    <span className="step-title">EKS Clusters</span>
+  </div>
+  <div className="progress-step">
+    <span className="step-number">3</span>
+    <span className="step-title">Microservices</span>
+  </div>
+</div>
+
+---
+
+## Phase 3: Core Services Deployment 🔧
+
+### Step 3.1: Install Service Mesh (Istio)
+
+```bash
+# Install Istio
+curl -L https://istio.io/downloadIstio | sh -
+export PATH="$PATH:$PWD/istio-1.19.3/bin"
+
+# Install Istio on primary cluster
+kubectl config use-context primary
+istioctl install --set values.global.meshID=mesh1 --set values.global.network=primary-network
+
+# Enable automatic sidecar injection
+kubectl label namespace default istio-injection=enabled
+
+# Install on secondary cluster
+kubectl config use-context secondary
+istioctl install --set values.global.meshID=mesh1 --set values.global.network=secondary-network
+
+# Install on EU cluster
+kubectl config use-context eu
+istioctl install --set values.global.meshID=mesh1 --set values.global.network=eu-network
+```
+
+### Step 3.2: Deploy Event Streaming (Kafka)
+
+```bash
+# Add Helm repositories
+helm repo add bitnami https://charts.bitnami.com/bitnami
+helm repo add strimzi https://strimzi.io/charts/
+helm repo update
+
+# Create namespace
+kubectl create namespace kafka --context=primary
+
+# Deploy Kafka using Strimzi operator (production-ready)
+helm install strimzi-kafka-operator strimzi/strimzi-kafka-operator \
+  --namespace kafka \
+  --context=primary
+```
+
+Create Kafka cluster configuration:
+
+```yaml
+# kafka-cluster.yaml
+apiVersion: kafka.strimzi.io/v1beta2
+kind: Kafka
+metadata:
+  name: globalconnect-kafka
+  namespace: kafka
+spec:
+  kafka:
+    version: 3.5.0
+    replicas: 3
+
+    listeners:
+      - name: plain
+        port: 9092
+        type: internal
+        tls: false
+      - name: tls
+        port: 9093
+        type: internal
+        tls: true
+
+    config:
+      offsets.topic.replication.factor: 3
+      transaction.state.log.replication.factor: 3
+      transaction.state.log.min.isr: 2
+      default.replication.factor: 3
+      min.insync.replicas: 2
+      inter.broker.protocol.version: "3.5"
+
+    storage:
+      type: jbod
+      volumes:
+        - id: 0
+          type: persistent-claim
+          size: 100Gi
+          deleteClaim: false
+          class: gp3
+
+    resources:
+      requests:
+        memory: 2Gi
+        cpu: 500m
+      limits:
+        memory: 4Gi
+        cpu: 1000m
+
+  zookeeper:
+    replicas: 3
+    storage:
+      type: persistent-claim
+      size: 10Gi
+      deleteClaim: false
+      class: gp3
+
+    resources:
+      requests:
+        memory: 1Gi
+        cpu: 200m
+      limits:
+        memory: 2Gi
+        cpu: 500m
+
+  entityOperator:
+    topicOperator: {}
+    userOperator: {}
+```
+
+Deploy Kafka:
+
+```bash
+kubectl apply -f kafka-cluster.yaml --context=primary
+```
+
+### Step 3.3: Deploy Core Microservices
+
+Create the trading engine service:
+
+```yaml
+# services/trading-engine/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: trading-engine
+  namespace: default
+  labels:
+    app: trading-engine
+    version: v1
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: trading-engine
+      version: v1
+  template:
+    metadata:
+      labels:
+        app: trading-engine
+        version: v1
+      annotations:
+        sidecar.istio.io/inject: "true"
+    spec:
+      serviceAccountName: trading-engine-sa
+      containers:
+        - name: trading-engine
+          image: your-registry/trading-engine:v1.0.0
+          ports:
+            - containerPort: 8080
+              name: http
+            - containerPort: 8090
+              name: grpc
+
+          env:
+            - name: KAFKA_BROKERS
+              value: "globalconnect-kafka-kafka-bootstrap.kafka.svc.cluster.local:9092"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: database-credentials
+                  key: url
+            - name: REDIS_URL
+              value: "redis-master.redis.svc.cluster.local:6379"
+            - name: ENVIRONMENT
+              value: "production"
+            - name: REGION
+              value: "us-east-1"
+
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "500m"
+            limits:
+              memory: "1Gi"
+              cpu: "1000m"
+
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 10
+
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1001
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: trading-engine
+  labels:
+    app: trading-engine
+spec:
+  ports:
+    - port: 8080
+      targetPort: 8080
+      name: http
+    - port: 8090
+      targetPort: 8090
+      name: grpc
+  selector:
+    app: trading-engine
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: trading-engine-sa
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::ACCOUNT:role/TradingEngineRole
+```
+
+Deploy microservices:
+
+```bash
+# Deploy to primary cluster
+kubectl apply -f services/trading-engine/ --context=primary
+
+# Deploy to secondary cluster (with modifications for standby mode)
+kubectl apply -f services/trading-engine/ --context=secondary
+
+# Deploy to EU cluster (with GDPR configurations)
+kubectl apply -f services/trading-engine/ --context=eu
+```
+
+### Step 3.4: Deploy Additional Core Services
+
+```bash
+# Create all service namespaces
+kubectl create namespace trading --context=primary
+kubectl create namespace payments --context=primary
+kubectl create namespace compliance --context=primary
+kubectl create namespace customer --context=primary
+
+# Deploy all microservices (you would have similar deployments for each)
+services=(
+  "risk-management"
+  "payment-processor"
+  "fraud-detection"
+  "customer-identity"
+  "market-data"
+  "portfolio-management"
+  "notification-service"
+  "audit-trail"
+  "regulatory-reporting"
+)
+
+for service in "${services[@]}"; do
+  kubectl apply -f services/$service/ --context=primary
+  kubectl apply -f services/$service/ --context=secondary
+  kubectl apply -f services/$service/ --context=eu
+done
+```
+
+<div className="progress-indicator">
+  <div className="progress-step completed">
+    <span className="step-number">1</span>
+    <span className="step-title">Multi-Region VPCs</span>
+  </div>
+  <div className="progress-step completed">
+    <span className="step-number">2</span>
+    <span className="step-title">EKS Clusters</span>
+  </div>
+  <div className="progress-step completed">
+    <span className="step-number">3</span>
+    <span className="step-title">Microservices</span>
+  </div>
+</div>
+
+---
+
+## Phase 4: Database Layer & Storage 🗄️
+
+### Step 4.1: Deploy PostgreSQL with Multi-Region Replication
+
+```hcl
+# Add to main.tf
+resource "aws_db_subnet_group" "primary" {
+  provider = aws.us_east_1
+  name     = "globalconnect-primary-subnet-group"
+  subnet_ids = module.primary_vpc.database_subnets
+
+  tags = {
+    Name = "GlobalConnect Primary DB subnet group"
+  }
+}
+
+resource "aws_db_instance" "primary" {
+  provider = aws.us_east_1
+
+  identifier = "globalconnect-primary-db"
+
+  # Engine configuration
+  engine         = "postgres"
+  engine_version = "15.4"
+  instance_class = "db.r6g.2xlarge"  # Production-grade
+
+  # Storage
+  allocated_storage     = 100
+  max_allocated_storage = 1000
+  storage_type         = "gp3"
+  storage_encrypted    = true
+  kms_key_id          = aws_kms_key.primary_db.arn
+
+  # Database configuration
+  db_name  = "globalconnect"
+  username = var.db_username
+  password = var.db_password
+  port     = 5432
+
+  # High Availability
+  multi_az               = true
+  backup_retention_period = 30
+  backup_window          = "03:00-04:00"
+  maintenance_window     = "sun:04:00-sun:05:00"
+
+  # Security
+  vpc_security_group_ids = [aws_security_group.database.id]
+  db_subnet_group_name   = aws_db_subnet_group.primary.name
+
+  # Monitoring
+  monitoring_interval = 60
+  monitoring_role_arn = aws_iam_role.rds_monitoring.arn
+
+  # Performance Insights
+  performance_insights_enabled = true
+  performance_insights_retention_period = 7
+
+  # Deletion protection for production
+  deletion_protection = true
+  skip_final_snapshot = false
+  final_snapshot_identifier = "globalconnect-primary-final-snapshot"
+
+  tags = {
+    Environment = "production"
+    Role       = "primary-database"
+  }
+}
+
+# Read replica in secondary region
+resource "aws_db_instance" "secondary_replica" {
+  provider = aws.us_west_2
+
+  identifier = "globalconnect-secondary-replica"
+
+  # Replica configuration
+  replicate_source_db = aws_db_instance.primary.id
+
+  # Instance configuration
+  instance_class = "db.r6g.2xlarge"
+
+  # Security
+  vpc_security_group_ids = [aws_security_group.database_secondary.id]
+
+  # Monitoring
+  monitoring_interval = 60
+  monitoring_role_arn = aws_iam_role.rds_monitoring_secondary.arn
+
+  tags = {
+    Environment = "production"
+    Role       = "secondary-replica"
+  }
+}
+```
+
+### Step 4.2: Deploy DynamoDB Global Tables
+
+```hcl
+# DynamoDB Global Tables for real-time data
+resource "aws_dynamodb_table" "trading_positions" {
+  provider = aws.us_east_1
+
+  name           = "trading-positions"
+  billing_mode   = "PAY_PER_REQUEST"
+  hash_key       = "user_id"
+  range_key      = "position_id"
+  stream_enabled = true
+  stream_view_type = "NEW_AND_OLD_IMAGES"
+
+  attribute {
+    name = "user_id"
+    type = "S"
+  }
+
+  attribute {
+    name = "position_id"
+    type = "S"
+  }
+
+  attribute {
+    name = "symbol"
+    type = "S"
+  }
+
+  global_secondary_index {
+    name            = "symbol-index"
+    hash_key        = "symbol"
+    projection_type = "ALL"
+  }
+
+  # Enable point-in-time recovery
+  point_in_time_recovery {
+    enabled = true
+  }
+
+  # Server-side encryption
+  server_side_encryption {
+    enabled = true
+    kms_key_id = aws_kms_key.dynamodb.arn
+  }
+
+  tags = {
+    Environment = "production"
+    Service     = "trading"
+  }
+}
+
+# Replica table in secondary region
+resource "aws_dynamodb_table" "trading_positions_replica" {
+  provider = aws.us_west_2
+
+  name           = "trading-positions"
+  billing_mode   = "PAY_PER_REQUEST"
+  hash_key       = "user_id"
+  range_key      = "position_id"
+  stream_enabled = true
+  stream_view_type = "NEW_AND_OLD_IMAGES"
+
+  attribute {
+    name = "user_id"
+    type = "S"
+  }
+
+  attribute {
+    name = "position_id"
+    type = "S"
+  }
+
+  attribute {
+    name = "symbol"
+    type = "S"
+  }
+
+  global_secondary_index {
+    name            = "symbol-index"
+    hash_key        = "symbol"
+    projection_type = "ALL"
+  }
+
+  point_in_time_recovery {
+    enabled = true
+  }
+
+  server_side_encryption {
+    enabled = true
+    kms_key_id = aws_kms_key.dynamodb_secondary.arn
+  }
+
+  tags = {
+    Environment = "production"
+    Service     = "trading"
+    Region      = "secondary"
+  }
+}
+
+# Global table configuration
+resource "aws_dynamodb_global_table" "trading_positions" {
+  depends_on = [
+    aws_dynamodb_table.trading_positions,
+    aws_dynamodb_table.trading_positions_replica
+  ]
+
+  name = "trading-positions"
+
+  replica {
+    region_name = "us-east-1"
+  }
+
+  replica {
+    region_name = "us-west-2"
+  }
+}
+```
+
+### Step 4.3: Deploy Redis Cluster for Caching
+
+```bash
+# Deploy Redis using Helm
+helm repo add bitnami https://charts.bitnami.com/bitnami
+helm repo update
+
+# Create namespace
+kubectl create namespace redis --context=primary
+
+# Deploy Redis cluster
+helm install redis bitnami/redis-cluster \
+  --namespace redis \
+  --context=primary \
+  --set cluster.nodes=6 \
+  --set cluster.replicas=1 \
+  --set persistence.enabled=true \
+  --set persistence.size=20Gi \
+  --set persistence.storageClass=gp3 \
+  --set auth.enabled=true \
+  --set auth.password="$(openssl rand -base64 32)"
+
+# Deploy Redis in secondary region
+kubectl create namespace redis --context=secondary
+helm install redis bitnami/redis-cluster \
+  --namespace redis \
+  --context=secondary \
+  --set cluster.nodes=6 \
+  --set cluster.replicas=1 \
+  --set persistence.enabled=true \
+  --set persistence.size=20Gi
+```
+
+### Step 4.4: Configure Database Secrets
+
+```bash
+# Create database connection secrets
+kubectl create secret generic database-credentials \
+  --from-literal=url="postgresql://username:password@globalconnect-primary-db.region.rds.amazonaws.com:5432/globalconnect" \
+  --context=primary
+
+kubectl create secret generic database-credentials \
+  --from-literal=url="postgresql://username:password@globalconnect-secondary-replica.region.rds.amazonaws.com:5432/globalconnect" \
+  --context=secondary
+
+# Create Redis credentials
+REDIS_PASSWORD=$(kubectl get secret redis -o jsonpath="{.data.redis-password}" --context=primary | base64 --decode)
+kubectl create secret generic redis-credentials \
+  --from-literal=password="$REDIS_PASSWORD" \
+  --context=primary
+```
+
+---
+
+## Phase 5: Monitoring & Observability 📊
+
+### Step 5.1: Deploy Prometheus & Grafana Stack
+
+```bash
+# Add Prometheus Helm repository
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+helm repo add grafana https://grafana.github.io/helm-charts
+helm repo update
+
+# Create monitoring namespace
+kubectl create namespace monitoring --context=primary
+
+# Deploy Prometheus Operator
+helm install prometheus-operator prometheus-community/kube-prometheus-stack \
+  --namespace monitoring \
+  --context=primary \
+  --set prometheus.prometheusSpec.storageSpec.volumeClaimTemplate.spec.storageClassName=gp3 \
+  --set prometheus.prometheusSpec.storageSpec.volumeClaimTemplate.spec.resources.requests.storage=50Gi \
+  --set prometheus.prometheusSpec.retention=30d \
+  --set grafana.adminPassword="$(openssl rand -base64 32)"
+```
+
+### Step 5.2: Configure Custom Metrics for Financial Services
+
+```yaml
+# monitoring/trading-metrics.yaml
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: trading-engine-metrics
+  namespace: monitoring
+  labels:
+    app: trading-engine
+spec:
+  selector:
+    matchLabels:
+      app: trading-engine
+  endpoints:
+    - port: metrics
+      interval: 15s
+      path: /metrics
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: trading-alerts
+  namespace: monitoring
+spec:
+  groups:
+    - name: trading.rules
+      rules:
+        - alert: HighTradeLatency
+          expr: histogram_quantile(0.95, trading_engine_trade_duration_seconds) > 0.1
+          for: 2m
+          labels:
+            severity: warning
+            service: trading-engine
+          annotations:
+            summary: "High trade execution latency detected"
+            description: "95th percentile trade latency is {{ $value }}s"
+
+        - alert: TradingEngineDown
+          expr: up{job="trading-engine"} == 0
+          for: 1m
+          labels:
+            severity: critical
+            service: trading-engine
+          annotations:
+            summary: "Trading engine is down"
+            description: "Trading engine has been down for more than 1 minute"
+
+        - alert: HighErrorRate
+          expr: rate(trading_engine_errors_total[5m]) > 0.01
+          for: 5m
+          labels:
+            severity: warning
+            service: trading-engine
+          annotations:
+            summary: "High error rate in trading engine"
+            description: "Error rate is {{ $value }} errors per second"
+```
+
+Deploy monitoring configuration:
+
+```bash
+kubectl apply -f monitoring/trading-metrics.yaml --context=primary
+```
+
+### Step 5.3: Configure Distributed Tracing with Jaeger
+
+```bash
+# Deploy Jaeger
+kubectl create namespace jaeger --context=primary
+
+# Deploy Jaeger operator
+kubectl apply -f https://github.com/jaegertracing/jaeger-operator/releases/download/v1.48.0/jaeger-operator.yaml -n jaeger --context=primary
+
+# Create Jaeger instance
+cat <<EOF | kubectl apply -f - --context=primary
+apiVersion: jaegertracing.io/v1
+kind: Jaeger
+metadata:
+  name: globalconnect-jaeger
+  namespace: jaeger
+spec:
+  strategy: production
+  storage:
+    type: elasticsearch
+    elasticsearch:
+      nodeCount: 3
+      storage:
+        storageClassName: gp3
+        size: 20Gi
+  collector:
+    maxReplicas: 5
+    resources:
+      limits:
+        cpu: 200m
+        memory: 256Mi
+EOF
+```
+
+### Step 5.4: Set Up Log Aggregation with Fluentd
+
+```bash
+# Deploy Fluentd for log collection
+helm repo add fluent https://fluent.github.io/helm-charts
+helm repo update
+
+kubectl create namespace logging --context=primary
+
+helm install fluentd fluent/fluentd \
+  --namespace logging \
+  --context=primary \
+  --set output.cloudWatch.enabled=true \
+  --set output.cloudWatch.region=us-east-1 \
+  --set output.cloudWatch.logGroupName=/aws/eks/globalconnect/logs
+```
+
+---
+
+## Phase 6: Security & Compliance 🔒
+
+### Step 6.1: Implement Pod Security Standards
+
+```yaml
+# security/pod-security-policy.yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: trading
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: deny-all-ingress
+  namespace: trading
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-trading-engine
+  namespace: trading
+spec:
+  podSelector:
+    matchLabels:
+      app: trading-engine
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: api-gateway
+      ports:
+        - protocol: TCP
+          port: 8080
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              name: kafka
+      ports:
+        - protocol: TCP
+          port: 9092
+    - to: []
+      ports:
+        - protocol: TCP
+          port: 5432 # PostgreSQL
+        - protocol: TCP
+          port: 6379 # Redis
+```
+
+### Step 6.2: Configure Vault for Secrets Management
+
+```bash
+# Deploy HashiCorp Vault
+helm repo add hashicorp https://helm.releases.hashicorp.com
+helm repo update
+
+kubectl create namespace vault --context=primary
+
+helm install vault hashicorp/vault \
+  --namespace vault \
+  --context=primary \
+  --set server.ha.enabled=true \
+  --set server.ha.replicas=3 \
+  --set server.dataStorage.enabled=true \
+  --set server.dataStorage.size=10Gi \
+  --set server.dataStorage.storageClass=gp3 \
+  --set ui.enabled=true
+```
+
+Initialize and configure Vault:
+
+```bash
+# Initialize Vault
+kubectl exec vault-0 -n vault --context=primary -- vault operator init
+
+# Configure Kubernetes auth
+kubectl exec vault-0 -n vault --context=primary -- vault auth enable kubernetes
+
+# Create policy for trading services
+kubectl exec vault-0 -n vault --context=primary -- vault policy write trading-policy - <<EOF
+path "secret/data/trading/*" {
+  capabilities = ["read"]
+}
+path "database/creds/trading-role" {
+  capabilities = ["read"]
+}
+EOF
+```
+
+### Step 6.3: Implement Compliance Scanning
+
+```bash
+# Deploy Falco for runtime security
+helm repo add falcosecurity https://falcosecurity.github.io/charts
+helm repo update
+
+kubectl create namespace falco --context=primary
+
+helm install falco falcosecurity/falco \
+  --namespace falco \
+  --context=primary \
+  --set falco.grpc.enabled=true \
+  --set falco.grpcOutput.enabled=true
+
+# Deploy OPA Gatekeeper for policy enforcement
+kubectl apply -f https://raw.githubusercontent.com/open-policy-agent/gatekeeper/release-3.14/deploy/gatekeeper.yaml --context=primary
+```
+
+Create compliance policies:
+
+```yaml
+# security/require-security-context.yaml
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  name: requiresecuritycontext
+spec:
+  crd:
+    spec:
+      names:
+        kind: RequireSecurityContext
+      validation:
+        openAPIV3Schema:
+          type: object
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package requiresecuritycontext
+
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.containers[_]
+          not container.securityContext.runAsNonRoot
+          msg := "Container must run as non-root user"
+        }
+
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.containers[_]
+          not container.securityContext.readOnlyRootFilesystem
+          msg := "Container must have read-only root filesystem"
+        }
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: RequireSecurityContext
+metadata:
+  name: must-have-security-context
+spec:
+  match:
+    kinds:
+      - apiGroups: ["apps"]
+        kinds: ["Deployment"]
+    namespaces: ["trading", "payments", "compliance"]
+```
+
+Deploy compliance policies:
+
+```bash
+kubectl apply -f security/require-security-context.yaml --context=primary
+```
+
+---
+
+## Phase 7: Disaster Recovery & Backup 🔄
+
+### Step 7.1: Configure Automated Backups
+
+```yaml
+# backup/velero-backup.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: velero-backup-config
+  namespace: velero
+data:
+  backup-schedule.yaml: |
+    apiVersion: velero.io/v1
+    kind: Schedule
+    metadata:
+      name: daily-backup
+      namespace: velero
+    spec:
+      schedule: "0 1 * * *"  # Daily at 1 AM
+      template:
+        includedNamespaces:
+        - trading
+        - payments
+        - compliance
+        - kafka
+        - redis
+        includedResources:
+        - '*'
+        excludedResources:
+        - events
+        - events.events.k8s.io
+        ttl: 720h  # 30 days
+        storageLocation: default
+        snapshotVolumes: true
+```
+
+### Step 7.2: Deploy Velero for Kubernetes Backup
+
+```bash
+# Install Velero CLI
+wget https://github.com/vmware-tanzu/velero/releases/download/v1.12.0/velero-v1.12.0-linux-amd64.tar.gz
+tar -xvf velero-v1.12.0-linux-amd64.tar.gz
+sudo mv velero-v1.12.0-linux-amd64/velero /usr/local/bin/
+
+# Create S3 bucket for backups
+aws s3 mb s3://globalconnect-backup-primary --region us-east-1
+aws s3 mb s3://globalconnect-backup-secondary --region us-west-2
+
+# Install Velero
+velero install \
+    --provider aws \
+    --plugins velero/velero-plugin-for-aws:v1.8.0 \
+    --bucket globalconnect-backup-primary \
+    --backup-location-config region=us-east-1 \
+    --snapshot-location-config region=us-east-1 \
+    --secret-file ./credentials-velero \
+    --use-volume-snapshots=true \
+    --context=primary
+```
+
+### Step 7.3: Implement Database Backup Strategy
+
+```bash
+# Create database backup script
+cat <<'EOF' > backup-database.sh
+#!/bin/bash
+set -e
+
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+DB_HOST="globalconnect-primary-db.region.rds.amazonaws.com"
+DB_NAME="globalconnect"
+S3_BUCKET="globalconnect-db-backups"
+
+# Create backup
+pg_dump -h $DB_HOST -U $DB_USER -d $DB_NAME | gzip > /tmp/backup_${TIMESTAMP}.sql.gz
+
+# Upload to S3
+aws s3 cp /tmp/backup_${TIMESTAMP}.sql.gz s3://${S3_BUCKET}/daily/
+
+# Cleanup local backup
+rm /tmp/backup_${TIMESTAMP}.sql.gz
+
+# Cleanup old backups (keep 30 days)
+aws s3 ls s3://${S3_BUCKET}/daily/ | \
+  awk '{print $4}' | \
+  head -n -30 | \
+  xargs -I {} aws s3 rm s3://${S3_BUCKET}/daily/{}
+
+echo "Database backup completed: backup_${TIMESTAMP}.sql.gz"
+EOF
+
+chmod +x backup-database.sh
+```
+
+### Step 7.4: Configure Cross-Region Replication
+
+```yaml
+# disaster-recovery/cross-region-sync.yaml
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: config-sync
+  namespace: kube-system
+spec:
+  schedule: "*/15 * * * *" # Every 15 minutes
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+            - name: config-sync
+              image: bitnami/kubectl:latest
+              command:
+                - /bin/bash
+                - -c
+                - |
+                  # Sync critical configurations to secondary region
+                  kubectl get configmaps -n trading -o yaml --context=primary | \
+                    kubectl apply -f - --context=secondary
+
+                  kubectl get secrets -n trading -o yaml --context=primary | \
+                    kubectl apply -f - --context=secondary
+
+                  echo "Configuration sync completed"
+          restartPolicy: OnFailure
+```
+
+---
+
+## Phase 8: Performance Optimization 🚀
+
+### Step 8.1: Configure Horizontal Pod Autoscaler
+
+```yaml
+# autoscaling/trading-engine-hpa.yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: trading-engine-hpa
+  namespace: trading
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: trading-engine
+  minReplicas: 3
+  maxReplicas: 50
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+    - type: Pods
+      pods:
+        metric:
+          name: trading_requests_per_second
+        target:
+          type: AverageValue
+          averageValue: "100"
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+        - type: Pods
+          value: 4
+          periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 60
+```
+
+### Step 8.2: Implement Vertical Pod Autoscaler
+
+```bash
+# Install VPA
+git clone https://github.com/kubernetes/autoscaler.git
+cd autoscaler/vertical-pod-autoscaler/
+./hack/vpa-install.sh --context=primary
+```
+
+```yaml
+# autoscaling/trading-engine-vpa.yaml
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: trading-engine-vpa
+  namespace: trading
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: trading-engine
+  updatePolicy:
+    updateMode: "Auto"
+  resourcePolicy:
+    containerPolicies:
+      - containerName: trading-engine
+        minAllowed:
+          cpu: 100m
+          memory: 128Mi
+        maxAllowed:
+          cpu: 2
+          memory: 4Gi
+        controlledResources: ["cpu", "memory"]
+```
+
+### Step 8.3: Configure Cluster Autoscaler
+
+```yaml
+# autoscaling/cluster-autoscaler.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cluster-autoscaler
+  namespace: kube-system
+  labels:
+    app: cluster-autoscaler
+spec:
+  selector:
+    matchLabels:
+      app: cluster-autoscaler
+  template:
+    metadata:
+      labels:
+        app: cluster-autoscaler
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8085"
+    spec:
+      serviceAccountName: cluster-autoscaler
+      containers:
+        - image: k8s.gcr.io/autoscaling/cluster-autoscaler:v1.28.0
+          name: cluster-autoscaler
+          resources:
+            limits:
+              cpu: 100m
+              memory: 300Mi
+            requests:
+              cpu: 100m
+              memory: 300Mi
+          command:
+            - ./cluster-autoscaler
+            - --v=4
+            - --stderrthreshold=info
+            - --cloud-provider=aws
+            - --skip-nodes-with-local-storage=false
+            - --expander=least-waste
+            - --node-group-auto-discovery=asg:tag=k8s.io/cluster-autoscaler/enabled,k8s.io/cluster-autoscaler/globalconnect-primary
+            - --balance-similar-node-groups
+            - --skip-nodes-with-system-pods=false
+          env:
+            - name: AWS_REGION
+              value: us-east-1
+          volumeMounts:
+            - name: ssl-certs
+              mountPath: /etc/ssl/certs/ca-certificates.crt
+              readOnly: true
+          imagePullPolicy: "Always"
+      volumes:
+        - name: ssl-certs
+          hostPath:
+            path: "/etc/ssl/certs/ca-bundle.crt"
+```
+
+---
+
+## Phase 9: Testing & Validation ✅
+
+### Step 9.1: Deploy Load Testing Infrastructure
+
+```bash
+# Install K6 for load testing
+curl https://github.com/grafana/k6/releases/download/v0.46.0/k6-v0.46.0-linux-amd64.tar.gz -L | tar xvz --strip-components 1
+sudo mv k6 /usr/local/bin/
+```
+
+```javascript
+// load-tests/trading-load-test.js
+import http from "k6/http";
+import { check, sleep } from "k6";
+import { Rate } from "k6/metrics";
+
+export let errorRate = new Rate("errors");
+
+export let options = {
+  stages: [
+    { duration: "2m", target: 100 }, // Ramp up to 100 users
+    { duration: "5m", target: 100 }, // Stay at 100 users
+    { duration: "2m", target: 200 }, // Ramp up to 200 users
+    { duration: "5m", target: 200 }, // Stay at 200 users
+    { duration: "2m", target: 0 }, // Ramp down to 0 users
+  ],
+  thresholds: {
+    http_req_duration: ["p(95)<500"], // 95% of requests must complete below 500ms
+    errors: ["rate<0.01"], // Error rate must be below 1%
+  },
+};
+
+const BASE_URL = "https://api.globalconnect.com";
+
+export default function () {
+  // Simulate trading operations
+  let loginResponse = http.post(`${BASE_URL}/auth/login`, {
+    email: "trader@example.com",
+    password: "password123",
+  });
+
+  check(loginResponse, {
+    "login successful": (r) => r.status === 200,
+  }) || errorRate.add(1);
+
+  if (loginResponse.status === 200) {
+    let token = loginResponse.json("token");
+    let headers = { Authorization: `Bearer ${token}` };
+
+    // Get market data
+    let marketData = http.get(`${BASE_URL}/market/prices`, { headers });
+    check(marketData, {
+      "market data retrieved": (r) => r.status === 200,
+    }) || errorRate.add(1);
+
+    // Place a trade
+    let tradeResponse = http.post(
+      `${BASE_URL}/trades`,
+      {
+        symbol: "AAPL",
+        quantity: 100,
+        type: "market",
+        side: "buy",
+      },
+      { headers }
+    );
+
+    check(tradeResponse, {
+      "trade placed successfully": (r) => r.status === 201,
+    }) || errorRate.add(1);
+
+    // Get portfolio
+    let portfolio = http.get(`${BASE_URL}/portfolio`, { headers });
+    check(portfolio, {
+      "portfolio retrieved": (r) => r.status === 200,
+    }) || errorRate.add(1);
+  }
+
+  sleep(1);
+}
+```
+
+Run load tests:
+
+```bash
+k6 run load-tests/trading-load-test.js
+```
+
+### Step 9.2: Chaos Engineering with Chaos Monkey
+
+```bash
+# Install Chaos Monkey for Kubernetes
+helm repo add chaos-mesh https://charts.chaos-mesh.org
+helm repo update
+
+kubectl create namespace chaos-engineering --context=primary
+
+helm install chaos-mesh chaos-mesh/chaos-mesh \
+  --namespace chaos-engineering \
+  --context=primary \
+  --set chaosDaemon.runtime=containerd \
+  --set chaosDaemon.socketPath=/run/containerd/containerd.sock \
+  --set dashboard.securityMode=false
+```
+
+```yaml
+# chaos-tests/pod-failure-experiment.yaml
+apiVersion: chaos-mesh.org/v1alpha1
+kind: PodChaos
+metadata:
+  name: trading-engine-failure
+  namespace: chaos-engineering
+spec:
+  action: pod-failure
+  mode: one
+  duration: "60s"
+  selector:
+    namespaces:
+      - trading
+    labelSelectors:
+      app: trading-engine
+  scheduler:
+    cron: "0 */2 * * *" # Run every 2 hours
+---
+apiVersion: chaos-mesh.org/v1alpha1
+kind: NetworkChaos
+metadata:
+  name: database-latency
+  namespace: chaos-engineering
+spec:
+  action: delay
+  mode: all
+  selector:
+    namespaces:
+      - trading
+    labelSelectors:
+      app: trading-engine
+  delay:
+    latency: "100ms"
+    correlation: "100"
+    jitter: "0ms"
+  direction: to
+  target:
+    mode: all
+    selector:
+      namespaces:
+        - default
+      labelSelectors:
+        app: postgres
+  duration: "5m"
+```
+
+### Step 9.3: Implement Health Checks
+
+```yaml
+# monitoring/health-checks.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: health-check-script
+  namespace: monitoring
+data:
+  health-check.sh: |
+    #!/bin/bash
+
+    # Check trading engine health
+    TRADING_HEALTH=$(curl -s -o /dev/null -w "%{http_code}" http://trading-engine:8080/health)
+    if [ $TRADING_HEALTH -ne 200 ]; then
+      echo "CRITICAL: Trading engine health check failed"
+      exit 2
+    fi
+
+    # Check database connectivity
+    if ! pg_isready -h postgres -p 5432; then
+      echo "CRITICAL: Database is not ready"
+      exit 2
+    fi
+
+    # Check Kafka connectivity
+    if ! kafka-broker-api-versions --bootstrap-server kafka:9092 &>/dev/null; then
+      echo "CRITICAL: Kafka is not accessible"
+      exit 2
+    fi
+
+    # Check Redis connectivity
+    if ! redis-cli -h redis ping &>/dev/null; then
+      echo "CRITICAL: Redis is not accessible"
+      exit 2
+    fi
+
+    echo "OK: All services are healthy"
+    exit 0
+```
+
+---
+
+## Phase 10: Go-Live Checklist & Operations 🎯
+
+### Step 10.1: Pre-Production Checklist
+
+```bash
+# Create go-live checklist script
+cat <<'EOF' > scripts/go-live-checklist.sh
+#!/bin/bash
+set -e
+
+echo "🚀 GlobalConnect Go-Live Checklist"
+echo "=================================="
+
+# Check cluster health
+echo "✅ Checking cluster health..."
+kubectl get nodes --context=primary
+kubectl get nodes --context=secondary
+kubectl get nodes --context=eu
+
+# Check all services are running
+echo "✅ Checking service status..."
+kubectl get pods -A --context=primary | grep -v Running | wc -l
+if [ $? -eq 0 ]; then
+  echo "All pods are running in primary cluster"
+fi
+
+# Check database connectivity
+echo "✅ Checking database connectivity..."
+kubectl exec -it $(kubectl get pods -l app=trading-engine -o jsonpath='{.items[0].metadata.name}' --context=primary) -- \
+  psql -h $DB_HOST -U $DB_USER -d $DB_NAME -c "SELECT 1;"
+
+# Check Kafka topics
+echo "✅ Checking Kafka topics..."
+kubectl exec -it globalconnect-kafka-0 -n kafka --context=primary -- \
+  kafka-topics --bootstrap-server localhost:9092 --list
+
+# Check monitoring systems
+echo "✅ Checking monitoring..."
+curl -s http://prometheus-server/api/v1/query?query=up | jq '.data.result | length'
+
+# Check backup systems
+echo "✅ Checking backup status..."
+velero backup get --context=primary
+
+# Performance baseline test
+echo "✅ Running performance baseline..."
+k6 run --quiet --summary-trend-stats="min,med,max,p(95)" load-tests/baseline-test.js
+
+echo "🎉 Go-live checklist completed!"
+EOF
+
+chmod +x scripts/go-live-checklist.sh
+```
+
+### Step 10.2: Operational Playbooks
+
+````markdown
+# operations/incident-response-playbook.md
+
+## Incident Response Playbook
+
+### Severity Levels
+
+**P0 - Critical (Trading Halt)**
+
+- Trading engine completely down
+- Database unavailable
+- Security breach detected
+- Response time: < 5 minutes
+
+**P1 - High (Degraded Service)**
+
+- Elevated error rates (>1%)
+- High latency (>500ms p95)
+- Single region failure
+- Response time: < 15 minutes
+
+**P2 - Medium (Performance Impact)**
+
+- Moderate latency increase
+- Non-critical service degradation
+- Response time: < 1 hour
+
+### Response Procedures
+
+#### P0 - Trading Engine Down
+
+1. **Immediate Actions (0-5 minutes)**
+
+   ```bash
+   # Check cluster status
+   kubectl get pods -l app=trading-engine --context=primary
+
+   # Check recent events
+   kubectl get events --sort-by='.lastTimestamp' --context=primary
+
+   # Scale up replicas immediately
+   kubectl scale deployment trading-engine --replicas=10 --context=primary
+   ```
+````
+
+2. **Failover to Secondary Region (5-10 minutes)**
+
+   ```bash
+   # Activate secondary region
+   kubectl patch deployment trading-engine \
+     -p '{"spec":{"replicas":5}}' \
+     --context=secondary
+
+   # Update load balancer
+   aws elbv2 modify-target-group --target-group-arn $TG_ARN \
+     --health-check-path /health
+   ```
+
+3. **Communication (10-15 minutes)**
+   - Notify stakeholders via Slack
+   - Update status page
+   - Prepare customer communication
+
+#### Database Failover Procedure
+
+```bash
+# Promote read replica to primary
+aws rds promote-read-replica \
+  --db-instance-identifier globalconnect-secondary-replica
+
+# Update application configuration
+kubectl patch configmap database-config \
+  -p '{"data":{"primary_host":"new-primary-endpoint"}}' \
+  --context=primary
+
+# Restart affected services
+kubectl rollout restart deployment/trading-engine --context=primary
+```
+
+### Monitoring & Alerting
+
+#### Key Metrics Dashboard
+
+- Trading engine latency (p95, p99)
+- Trade throughput (trades/second)
+- Error rates by service
+- Database connection pool utilization
+- Kafka consumer lag
+- Active user sessions
+- Revenue per minute
+
+#### Alert Thresholds
+
+```yaml
+# Critical Alerts
+trading_engine_down: 0 replicas available
+database_connections_exhausted: >95% pool utilization
+kafka_consumer_lag: >10,000 messages behind
+trade_error_rate: >0.5% over 5 minutes
+
+# Warning Alerts
+high_latency: p95 >200ms over 5 minutes
+memory_pressure: >85% memory utilization
+disk_space_low: <20% available storage
+certificate_expiry: <30 days until expiration
+```
+
+### Runbook Templates
+
+#### High Memory Usage
+
+```bash
+# 1. Identify memory consumers
+kubectl top pods --sort-by=memory --context=primary
+
+# 2. Check for memory leaks
+kubectl logs -f deployment/trading-engine --context=primary | grep -i "memory\|oom"
+
+# 3. Scale horizontally if needed
+kubectl scale deployment trading-engine --replicas=8 --context=primary
+
+# 4. Restart pods showing memory issues
+kubectl rollout restart deployment/trading-engine --context=primary
+```
+
+#### Database Performance Issues
+
+```bash
+# 1. Check active connections
+psql -h $DB_HOST -c "SELECT count(*) FROM pg_stat_activity;"
+
+# 2. Identify slow queries
+psql -h $DB_HOST -c "SELECT query, query_start, state FROM pg_stat_activity WHERE state = 'active' ORDER BY query_start;"
+
+# 3. Check for locks
+psql -h $DB_HOST -c "SELECT blocked_locks.pid AS blocked_pid, blocked_activity.usename AS blocked_user, blocking_locks.pid AS blocking_pid, blocking_activity.usename AS blocking_user FROM pg_catalog.pg_locks blocked_locks JOIN pg_catalog.pg_stat_activity blocked_activity ON blocked_activity.pid = blocked_locks.pid JOIN pg_catalog.pg_locks blocking_locks ON blocking_locks.locktype = blocked_locks.locktype AND blocking_locks.DATABASE IS NOT DISTINCT FROM blocked_locks.DATABASE AND blocking_locks.relation IS NOT DISTINCT FROM blocked_locks.relation WHERE NOT blocked_locks.GRANTED;"
+
+# 4. Restart read replicas if needed
+aws rds reboot-db-instance --db-instance-identifier globalconnect-secondary-replica
+```
+
+````
+
+### Step 10.3: Operational Dashboards
+
+Create comprehensive monitoring dashboards:
+
+```yaml
+# monitoring/grafana-dashboard-config.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: trading-dashboard
+  namespace: monitoring
+data:
+  dashboard.json: |
+    {
+      "dashboard": {
+        "title": "GlobalConnect Trading Platform",
+        "panels": [
+          {
+            "title": "Trade Execution Latency",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "histogram_quantile(0.95, trading_engine_trade_duration_seconds_bucket)",
+                "legendFormat": "95th Percentile"
+              },
+              {
+                "expr": "histogram_quantile(0.99, trading_engine_trade_duration_seconds_bucket)",
+                "legendFormat": "99th Percentile"
+              }
+            ],
+            "yAxes": [
+              {
+                "label": "Seconds",
+                "max": 1
+              }
+            ],
+            "alert": {
+              "conditions": [
+                {
+                  "query": {
+                    "queryType": "",
+                    "refId": "A"
+                  },
+                  "reducer": {
+                    "type": "last",
+                    "params": []
+                  },
+                  "evaluator": {
+                    "params": [0.1],
+                    "type": "gt"
+                  }
+                }
+              ],
+              "executionErrorState": "alerting",
+              "noDataState": "no_data",
+              "frequency": "30s",
+              "handler": 1,
+              "name": "High Trade Latency",
+              "message": "Trade execution latency is above acceptable threshold"
+            }
+          },
+          {
+            "title": "Trading Volume",
+            "type": "stat",
+            "targets": [
+              {
+                "expr": "sum(rate(trading_engine_trades_total[5m]))",
+                "legendFormat": "Trades/sec"
+              }
+            ]
+          },
+          {
+            "title": "Active Users",
+            "type": "stat",
+            "targets": [
+              {
+                "expr": "trading_engine_active_sessions",
+                "legendFormat": "Active Sessions"
+              }
+            ]
+          },
+          {
+            "title": "Error Rate by Service",
+            "type": "table",
+            "targets": [
+              {
+                "expr": "sum by (service) (rate(http_requests_total{status=~\"5..\"}[5m])) / sum by (service) (rate(http_requests_total[5m]))",
+                "format": "table"
+              }
+            ]
+          }
+        ]
+      }
+    }
+````
+
+### Step 10.4: Documentation & Knowledge Transfer
+
+Create comprehensive documentation:
+
+```markdown
+# docs/architecture-overview.md
+
+## GlobalConnect Architecture Overview
+
+### System Components
+
+#### Core Services
+
+- **Trading Engine**: High-frequency trading execution
+- **Risk Management**: Real-time position and exposure monitoring
+- **Market Data Service**: Live market feed processing
+- **Portfolio Management**: Position tracking and reporting
+- **Payment Processor**: Settlement and money movement
+- **Customer Identity**: Authentication and KYC
+- **Fraud Detection**: ML-based anomaly detection
+- **Audit Trail**: Immutable transaction logging
+- **Regulatory Reporting**: Compliance data aggregation
+
+#### Infrastructure Components
+
+- **EKS Clusters**: Kubernetes orchestration across 3 regions
+- **RDS PostgreSQL**: Primary transactional database
+- **DynamoDB**: High-speed position data
+- **ElastiCache Redis**: Session and market data caching
+- **Apache Kafka**: Event streaming backbone
+- **Istio Service Mesh**: Traffic management and security
+- **Prometheus/Grafana**: Monitoring and alerting
+- **Vault**: Secrets management
+- **Velero**: Backup and disaster recovery
+
+### Data Flow Architecture
+```
+
+Client Request → API Gateway → Load Balancer → Trading Engine → Risk Engine
+↓
+Market Data Feed → Kafka → Multiple Consumers → Database Updates
+↓  
+Trade Execution → Audit Trail → Regulatory Reporting → External APIs
+
+```
+
+### Security Model
+- Zero-trust network architecture
+- mTLS between all services
+- Pod security policies enforced
+- Secrets encrypted at rest and in transit
+- Regular security scanning and compliance audits
+- RBAC with principle of least privilege
+
+### Scalability Patterns
+- Horizontal pod autoscaling based on CPU, memory, and custom metrics
+- Cluster autoscaling for node capacity
+- Database read replicas for query distribution
+- CDN for static content delivery
+- Kafka partitioning for parallel processing
+
+### Disaster Recovery
+- RTO: 15 minutes
+- RPO: 5 minutes
+- Multi-region active-passive setup
+- Automated failover procedures
+- Regular DR testing schedule
+```
+
+## Step 10.5: Cost Optimization
+
+Implement cost monitoring and optimization:
+
+```bash
+# Install AWS Cost Explorer CLI
+pip install aws-cost-explorer
+
+# Create cost monitoring script
+cat <<'EOF' > scripts/cost-monitoring.sh
+#!/bin/bash
+
+# Get current month costs by service
+aws ce get-cost-and-usage \
+  --time-period Start=2025-07-01,End=2025-07-31 \
+  --granularity MONTHLY \
+  --metrics BlendedCost \
+  --group-by Type=DIMENSION,Key=SERVICE
+
+# Get EKS-specific costs
+aws ce get-cost-and-usage \
+  --time-period Start=2025-07-01,End=2025-07-31 \
+  --granularity DAILY \
+  --metrics BlendedCost \
+  --filter file://eks-cost-filter.json
+
+# Alert if costs exceed threshold
+CURRENT_COST=$(aws ce get-cost-and-usage --time-period Start=2025-07-01,End=2025-07-31 --granularity MONTHLY --metrics BlendedCost | jq -r '.ResultsByTime[0].Total.BlendedCost.Amount')
+
+if (( $(echo "$CURRENT_COST > 5000" | bc -l) )); then
+  echo "WARNING: Monthly costs ($CURRENT_COST) exceed threshold"
+  # Send alert to Slack/email
+fi
+EOF
+```
+
+Cost optimization strategies:
+
+```yaml
+# cost-optimization/scheduled-scaling.yaml
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: scale-down-non-trading-hours
+spec:
+  schedule: "0 18 * * 1-5" # 6 PM weekdays
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+            - name: scaler
+              image: bitnami/kubectl:latest
+              command:
+                - /bin/bash
+                - -c
+                - |
+                  # Scale down non-critical services after market close
+                  kubectl scale deployment risk-management --replicas=2
+                  kubectl scale deployment portfolio-management --replicas=1
+                  kubectl scale deployment notification-service --replicas=1
+
+                  # Scale down node groups
+                  aws autoscaling update-auto-scaling-group \
+                    --auto-scaling-group-name eks-general-nodes \
+                    --min-size 1 --desired-capacity 2
+          restartPolicy: OnFailure
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: scale-up-trading-hours
+spec:
+  schedule: "30 8 * * 1-5" # 8:30 AM weekdays
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+            - name: scaler
+              image: bitnami/kubectl:latest
+              command:
+                - /bin/bash
+                - -c
+                - |
+                  # Scale up for market open
+                  kubectl scale deployment risk-management --replicas=5
+                  kubectl scale deployment portfolio-management --replicas=3
+                  kubectl scale deployment notification-service --replicas=3
+
+                  # Scale up node groups
+                  aws autoscaling update-auto-scaling-group \
+                    --auto-scaling-group-name eks-general-nodes \
+                    --min-size 2 --desired-capacity 6
+          restartPolicy: OnFailure
+```
+
+## Conclusion & Next Steps 🎉
+
+Congratulations! You've successfully built and deployed a production-ready, multi-region financial services platform on AWS. Your GlobalConnect system now includes:
+
+### ✅ What You've Accomplished
+
+**Infrastructure & Platform**
+
+- Multi-region AWS infrastructure spanning 3 regions
+- Production-grade EKS clusters with auto-scaling
+- Highly available databases with cross-region replication
+- Enterprise-grade security and compliance controls
+
+**Microservices Architecture**
+
+- 40+ microservices for complete trading operations
+- Event-driven architecture with Apache Kafka
+- Service mesh with Istio for traffic management
+- Comprehensive monitoring and observability
+
+**Operations & Reliability**
+
+- Automated backup and disaster recovery
+- 99.99% availability SLA capability
+- 15-minute RTO and 5-minute RPO
+- Comprehensive incident response procedures
+
+**Security & Compliance**
+
+- Zero-trust security model
+- Encrypted data at rest and in transit
+- Automated compliance scanning
+- Audit trails for regulatory requirements
+
+### 🚀 Recommended Next Steps
+
+1. **Advanced Features**
+
+   - Implement machine learning for fraud detection
+   - Add algorithmic trading capabilities
+   - Integrate with external market data providers
+   - Build mobile trading applications
+
+2. **Enhanced Monitoring**
+
+   - Custom business metrics dashboards
+   - Predictive alerting with ML
+   - User experience monitoring
+   - Cost optimization automation
+
+3. **Compliance & Regulations**
+
+   - SOC 2 Type II certification
+   - PCI DSS compliance implementation
+   - Regional regulatory adaptations
+   - Enhanced audit logging
+
+4. **Performance Optimization**
+   - Implement caching strategies
+   - Database query optimization
+   - CDN integration for global users
+   - Advanced auto-scaling policies
+
+### 📚 Additional Resources
+
+- [AWS Well-Architected Framework](https://aws.amazon.com/architecture/well-architected/)
+- [Kubernetes Production Best Practices](https://kubernetes.io/docs/setup/best-practices/)
+- [Financial Services on AWS](https://aws.amazon.com/financial-services/)
+- [CNCF Cloud Native Security](https://www.cncf.io/reports/cloud-native-security-whitepaper/)
+
+### 🛠️ Maintenance Tasks
+
+**Daily**
+
+- Monitor system health and performance
+- Review security alerts and logs
+- Check backup completion status
+- Validate auto-scaling behavior
+
+**Weekly**
+
+- Review cost optimization opportunities
+- Update security patches
+- Conduct disaster recovery tests
+- Performance baseline comparisons
+
+**Monthly**
+
+- Security compliance audits
+- Capacity planning reviews
+- Infrastructure cost analysis
+- Documentation updates
+
+### 💡 Pro Tips
+
+1. **Start Small**: Begin with a subset of services and gradually expand
+2. **Automate Everything**: Infrastructure, deployments, testing, and operations
+3. **Monitor Proactively**: Set up comprehensive alerting before issues occur
+4. **Test Regularly**: Chaos engineering and disaster recovery testing
+5. **Document Thoroughly**: Keep runbooks and architecture docs current
+6. **Security First**: Implement security controls from day one
+7. **Cost Awareness**: Monitor and optimize costs continuously
+
+Your GlobalConnect platform is now ready to handle millions of trades with enterprise-grade reliability, security, and scalability. The foundation you've built provides a solid base for future growth and feature development.
+
+Happy trading! 📈
