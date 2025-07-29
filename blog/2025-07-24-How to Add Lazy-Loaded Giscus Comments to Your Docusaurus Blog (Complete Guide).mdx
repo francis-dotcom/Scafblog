@@ -6,7 +6,7 @@ tags: [docusaurus, giscus, comments, performance, tutorial, github-discussions]
 date: 2025-07-25
 ---
 
-import GiscusComments from '@site/src/components/GiscusComments';
+import GiscusComments from "@site/src/components/GiscusComments";
 
 # 🧠 Complete Guide: Adding Lazy-Loaded Giscus Comments to Your Docusaurus Blog
 
@@ -15,12 +15,13 @@ import GiscusComments from '@site/src/components/GiscusComments';
 Adding a comment system to your Docusaurus blog doesn't have to slow down your site or cost money. In this comprehensive tutorial, I'll walk you through integrating **Giscus** (GitHub Discussions-powered comments) with **performance optimization** using lazy loading.
 
 :::info What You'll Learn
+
 - Set up GitHub Discussions for your blog
 - Configure Giscus comment system
 - Implement performance-optimized lazy loading
 - Handle common integration challenges
 - Create a maintainable comment system
-:::
+  :::
 
 <!--truncate-->
 
@@ -29,6 +30,7 @@ Adding a comment system to your Docusaurus blog doesn't have to slow down your s
 Before diving in, let me explain why I chose Giscus after evaluating multiple options:
 
 ### ✅ **Giscus Advantages**
+
 - **100% Free** — No hosting costs, no database needed
 - **Privacy-focused** — No tracking, all data stored in GitHub
 - **Developer-friendly** — Markdown support, GitHub integration
@@ -37,26 +39,29 @@ Before diving in, let me explain why I chose Giscus after evaluating multiple op
 
 ### 📊 **Comparison with Alternatives**
 
-| Feature | Giscus | Disqus | Utterances | Custom Solution |
-|---------|--------|--------|------------|-----------------|
-| Cost | Free | Freemium | Free | Development time |
-| Privacy | Excellent | Poor | Good | Depends |
-| Spam protection | GitHub auth | Built-in | GitHub auth | Custom |
-| Performance | Lazy-loadable | Heavy | Light | Optimizable |
-| Maintenance | None | None | None | High |
+| Feature         | Giscus        | Disqus   | Utterances  | Custom Solution  |
+| --------------- | ------------- | -------- | ----------- | ---------------- |
+| Cost            | Free          | Freemium | Free        | Development time |
+| Privacy         | Excellent     | Poor     | Good        | Depends          |
+| Spam protection | GitHub auth   | Built-in | GitHub auth | Custom           |
+| Performance     | Lazy-loadable | Heavy    | Light       | Optimizable      |
+| Maintenance     | None          | None     | None        | High             |
 
 ---
 
 ## 🏗️ **Project Overview and Goals**
 
 ### **What We're Building**
+
 A **performance-optimized comment system** that:
+
 - Only loads when users scroll near it
 - Integrates seamlessly with Docusaurus
 - Stores comments in GitHub Discussions
 - Supports reactions and threaded conversations
 
 ### **Technical Approach**
+
 - **Giscus** for GitHub Discussions integration
 - **React.lazy()** for code splitting
 - **IntersectionObserver** for lazy loading
@@ -67,6 +72,7 @@ A **performance-optimized comment system** that:
 ## 📋 **Prerequisites**
 
 Before starting, ensure you have:
+
 - ✅ A Docusaurus blog (v2.0+)
 - ✅ A public GitHub repository
 - ✅ Node.js and npm installed
@@ -78,9 +84,10 @@ Before starting, ensure you have:
 
 ### **1.1 Enable GitHub Discussions**
 
-**❓ Question I had:** *"Where exactly do I enable Discussions on GitHub?"*
+**❓ Question I had:** _"Where exactly do I enable Discussions on GitHub?"_
 
 **📍 Solution:**
+
 1. Go to your GitHub repository
 2. Click the **Settings** tab (top navigation)
 3. Scroll to **Features** section in the left sidebar
@@ -94,16 +101,18 @@ https://github.com/[your-username]/[your-repo]/settings
 
 :::warning Common Issue
 If you don't see the **Discussions** option, make sure:
+
 - Your repository is **public** (required for Giscus)
 - You have **admin permissions** on the repo
 - Your GitHub account has **Discussions** feature enabled
-:::
+  :::
 
 ### **1.2 Create a Discussion Category**
 
-**❓ Question I had:** *"Do I need a special category for blog comments?"*
+**❓ Question I had:** _"Do I need a special category for blog comments?"_
 
 **📍 Solution:**
+
 1. Go to your repository's **Discussions** tab
 2. Look for **Categories** in the sidebar
 3. Click **"New category"**
@@ -114,6 +123,7 @@ If you don't see the **Discussions** option, make sure:
 5. Click **Create category**
 
 **🎯 Why Announcements format?**
+
 - Only maintainers and Giscus can create new discussions
 - Prevents spam and off-topic discussions
 - Maintains organized comment threads
@@ -128,9 +138,10 @@ Navigate to: **👉 [https://giscus.app](https://giscus.app)**
 
 ### **2.2 Repository Configuration**
 
-**❓ Challenge I faced:** *"Giscus says my repo doesn't meet criteria"*
+**❓ Challenge I faced:** _"Giscus says my repo doesn't meet criteria"_
 
 **📍 Requirements checklist:**
+
 - ✅ Repository is **public**
 - ✅ **Giscus app is installed** (we'll do this next)
 - ✅ **Discussions feature** is enabled
@@ -155,50 +166,57 @@ Without installing the Giscus app, visitors won't be able to comment! The commen
 Back on [giscus.app](https://giscus.app), configure:
 
 **Repository:**
+
 ```
 [your-username]/[your-repo-name]
 ```
 
 **Page ↔️ Discussions Mapping:**
+
 - Choose: **"Discussion title contains page pathname"**
 - This creates unique discussions for each blog post
 
 **Discussion Category:**
+
 - Select: **"Blog Comments"** (the category we created)
 
 **Features:**
+
 - ✅ Enable reactions for the main post
 - ✅ Emit discussion metadata
 - Choose placement: **"Place comment box above comments"**
 
 **Theme:**
+
 - Select: **"Preferred color scheme"** (matches your site's theme)
 
 ### **2.5 Copy Configuration Values**
 
-**❓ Question I had:** *"Where do I find the repoId and categoryId?"*
+**❓ Question I had:** _"Where do I find the repoId and categoryId?"_
 
 After configuring, Giscus generates a script tag like this:
 
 ```html
-<script src="https://giscus.app/client.js"
-        data-repo="[your-username]/[your-repo]"
-        data-repo-id="R_kgDO..."
-        data-category="Blog Comments"
-        data-category-id="DIC_kwDO..."
-        data-mapping="pathname"
-        data-strict="0"
-        data-reactions-enabled="1"
-        data-emit-metadata="0"
-        data-input-position="bottom"
-        data-theme="preferred_color_scheme"
-        data-lang="en"
-        crossorigin="anonymous"
-        async>
-</script>
+<script
+  src="https://giscus.app/client.js"
+  data-repo="[your-username]/[your-repo]"
+  data-repo-id="R_kgDO..."
+  data-category="Blog Comments"
+  data-category-id="DIC_kwDO..."
+  data-mapping="pathname"
+  data-strict="0"
+  data-reactions-enabled="1"
+  data-emit-metadata="0"
+  data-input-position="bottom"
+  data-theme="preferred_color_scheme"
+  data-lang="en"
+  crossorigin="anonymous"
+  async
+></script>
 ```
 
 **📝 Save these values:**
+
 - `data-repo-id` → Your repository ID
 - `data-category-id` → Your category ID
 
@@ -221,7 +239,7 @@ Check your `package.json`:
 ```json
 {
   "dependencies": {
-    "@giscus/react": "^2.3.0",
+    "@giscus/react": "^2.3.0"
     // ... other dependencies
   }
 }
@@ -233,9 +251,10 @@ Check your `package.json`:
 
 ### **4.1 Understanding the Performance Challenge**
 
-**❓ Question I had:** *"Why not just import Giscus directly in my blog posts?"*
+**❓ Question I had:** _"Why not just import Giscus directly in my blog posts?"_
 
 **📍 The Problem:**
+
 - Direct imports load Giscus immediately when the page loads
 - Most users never scroll to comments
 - This wastes bandwidth and slows initial page load
@@ -268,7 +287,7 @@ export default function GiscusComments() {
       },
       {
         // Load when comment section is 200px away from viewport
-        rootMargin: "200px"
+        rootMargin: "200px",
       }
     );
 
@@ -284,7 +303,13 @@ export default function GiscusComments() {
   return (
     <div ref={containerRef} style={{ minHeight: "200px" }}>
       {shouldLoad ? (
-        <Suspense fallback={<div style={{ padding: "20px", textAlign: "center" }}>Loading comments...</div>}>
+        <Suspense
+          fallback={
+            <div style={{ padding: "20px", textAlign: "center" }}>
+              Loading comments...
+            </div>
+          }
+        >
           <Giscus
             repo="[your-username]/[your-repo]"
             repoId="[your-repo-id]"
@@ -301,13 +326,15 @@ export default function GiscusComments() {
           />
         </Suspense>
       ) : (
-        <div style={{ 
-          padding: "40px", 
-          textAlign: "center", 
-          color: "#666",
-          border: "1px dashed #ddd",
-          borderRadius: "8px"
-        }}>
+        <div
+          style={{
+            padding: "40px",
+            textAlign: "center",
+            color: "#666",
+            border: "1px dashed #ddd",
+            borderRadius: "8px",
+          }}
+        >
           💬 Comments will load when you scroll here...
         </div>
       )}
@@ -322,21 +349,21 @@ export default function GiscusComments() {
 
 ```jsx
 // Replace these with your values from giscus.app
-repo="your-username/your-repo"              // e.g., "francis-dotcom/blog"
-repoId="your-repo-id"                       // e.g., "R_kgDOPLlzgQ"
-categoryId="your-category-id"               // e.g., "DIC_kwDOPLlzgc4Cta5V"
+repo = "your-username/your-repo"; // e.g., "francis-dotcom/blog"
+repoId = "your-repo-id"; // e.g., "R_kgDOPLlzgQ"
+categoryId = "your-category-id"; // e.g., "DIC_kwDOPLlzgc4Cta5V"
 ```
 
 ### **4.4 Component Features Explained**
 
-| Feature | Purpose | Benefit |
-|---------|---------|---------|
-| `useRef(containerRef)` | Reference to comment container | Enables IntersectionObserver |
-| `useState(shouldLoad)` | Track if Giscus should load | Controls lazy loading |
-| `IntersectionObserver` | Detect when container is near viewport | Performance optimization |
-| `React.lazy()` | Code splitting for Giscus | Reduces initial bundle size |
-| `Suspense` | Loading state management | Better UX during load |
-| `rootMargin: "200px"` | Pre-load buffer distance | Smooth user experience |
+| Feature                | Purpose                                | Benefit                      |
+| ---------------------- | -------------------------------------- | ---------------------------- |
+| `useRef(containerRef)` | Reference to comment container         | Enables IntersectionObserver |
+| `useState(shouldLoad)` | Track if Giscus should load            | Controls lazy loading        |
+| `IntersectionObserver` | Detect when container is near viewport | Performance optimization     |
+| `React.lazy()`         | Code splitting for Giscus              | Reduces initial bundle size  |
+| `Suspense`             | Loading state management               | Better UX during load        |
+| `rootMargin: "200px"`  | Pre-load buffer distance               | Smooth user experience       |
 
 ---
 
@@ -355,7 +382,7 @@ tags: [tutorial, docusaurus]
 date: 2025-07-25
 ---
 
-import GiscusComments from '@site/src/components/GiscusComments';
+import GiscusComments from "@site/src/components/GiscusComments";
 
 # My Awesome Blog Post
 
@@ -380,7 +407,9 @@ Originally put the import **after** the markdown content:
 
 Content here...
 
-import GiscusComments from '@site/src/components/GiscusComments';
+import GiscusComments from "@site/src/components/GiscusComments";
+
+;
 ```
 
 **✅ Correct Approach:**
@@ -392,16 +421,14 @@ For better user experience, add context around the comment section:
 
 ```mdx
 ---
-
 ## 💬 Join the Discussion
 
 Have thoughts on this topic? Questions about the implementation? I'd love to hear from you!
 
-> 💡 **Note:** You'll need to sign in with GitHub to leave a comment. 
+> 💡 **Note:** You'll need to sign in with GitHub to leave a comment.
 > Don't have an account? [Join GitHub](https://github.com/join) — it's free and takes 10 seconds.
 
 <GiscusComments />
-
 ---
 
 ## 📬 Stay Updated
@@ -437,6 +464,7 @@ npm run start
 ### **6.4 Performance Validation**
 
 **🔍 Check Core Web Vitals:**
+
 - **Lighthouse audit** should show improved loading performance
 - **Network tab** should show Giscus loads only when needed
 - **Bundle analyzer** should show Giscus code is split separately
@@ -447,28 +475,32 @@ npm run start
 
 ### **Issue 1: "Sign in to comment" appears but clicking does nothing**
 
-**❓ My question:** *"Why can't people comment even though the box appears?"*
+**❓ My question:** _"Why can't people comment even though the box appears?"_
 
 **🔍 Diagnosis:**
+
 - Giscus app not installed on repository
 - Repository is private instead of public
 - Discussions not enabled
 
 **✅ Solution:**
+
 1. Verify Giscus app installation at [github.com/apps/giscus](https://github.com/apps/giscus)
 2. Ensure repository is public
 3. Double-check Discussions are enabled in repo settings
 
 ### **Issue 2: Comments not loading at all**
 
-**❓ My question:** *"The placeholder shows but Giscus never loads"*
+**❓ My question:** _"The placeholder shows but Giscus never loads"_
 
 **🔍 Diagnosis:**
+
 - Incorrect `repoId` or `categoryId`
 - JavaScript errors in browser console
 - IntersectionObserver not triggering
 
 **✅ Solution:**
+
 ```jsx
 // Add debugging to your component
 useEffect(() => {
@@ -482,26 +514,31 @@ useEffect(() => {
     },
     { rootMargin: "200px" }
   );
-  
+
   if (containerRef.current) {
     observer.observe(containerRef.current);
   }
-  
+
   return () => observer.disconnect();
 }, []);
 ```
 
 ### **Issue 3: Comments loading too slowly**
 
-**❓ My question:** *"Can I make comments load faster?"*
+**❓ My question:** _"Can I make comments load faster?"_
 
 **✅ Solutions:**
+
 ```jsx
 // Reduce rootMargin for later loading
-{ rootMargin: "50px" }
+{
+  rootMargin: "50px";
+}
 
 // Or increase for earlier loading
-{ rootMargin: "500px" }
+{
+  rootMargin: "500px";
+}
 
 // Or disable lazy loading entirely for testing
 const [shouldLoad, setShouldLoad] = useState(true);
@@ -524,7 +561,7 @@ Add custom CSS in `src/css/custom.css`:
 }
 
 /* Dark mode adjustments */
-[data-theme='dark'] .giscus-frame {
+[data-theme="dark"] .giscus-frame {
   border-color: var(--ifm-color-emphasis-600);
 }
 ```
@@ -569,20 +606,20 @@ useEffect(() => {
     ([entry]) => {
       if (entry.isIntersecting) {
         // Analytics tracking
-        if (typeof gtag !== 'undefined') {
-          gtag('event', 'comments_viewed', {
-            event_category: 'engagement',
-            event_label: window.location.pathname
+        if (typeof gtag !== "undefined") {
+          gtag("event", "comments_viewed", {
+            event_category: "engagement",
+            event_label: window.location.pathname,
           });
         }
-        
+
         setShouldLoad(true);
         observer.disconnect();
       }
     },
     { rootMargin: "200px" }
   );
-  
+
   // ... rest of observer setup
 }, []);
 ```
@@ -595,13 +632,13 @@ Test different comment positions:
 // Component prop for position
 export default function GiscusComments({ position = "bottom" }) {
   // ... existing code
-  
+
   const commentStyle = {
     bottom: { marginTop: "40px" },
     top: { marginBottom: "40px" },
-    sidebar: { position: "sticky", top: "100px" }
+    sidebar: { position: "sticky", top: "100px" },
   }[position];
-  
+
   return (
     <div ref={containerRef} style={commentStyle}>
       {/* ... existing JSX */}
@@ -618,12 +655,12 @@ After implementing lazy-loaded Giscus comments, here's what I measured:
 
 ### **Before vs After Metrics**
 
-| Metric | Before | After | Improvement |
-|--------|--------|--------|-------------|
-| Initial page load | 2.1s | 1.8s | 14% faster |
-| Bundle size | 850KB | 780KB | 70KB smaller |
-| Time to Interactive | 3.2s | 2.9s | 9% improvement |
-| Comments load time | N/A | 0.8s | When needed |
+| Metric              | Before | After | Improvement    |
+| ------------------- | ------ | ----- | -------------- |
+| Initial page load   | 2.1s   | 1.8s  | 14% faster     |
+| Bundle size         | 850KB  | 780KB | 70KB smaller   |
+| Time to Interactive | 3.2s   | 2.9s  | 9% improvement |
+| Comments load time  | N/A    | 0.8s  | When needed    |
 
 ### **Core Web Vitals Impact**
 
@@ -639,6 +676,7 @@ After implementing lazy-loaded Giscus comments, here's what I measured:
 
 **🎯 Learning Objectives:**
 By the end of this tutorial, students will:
+
 - Understand GitHub Discussions integration
 - Implement performance optimization techniques
 - Handle React lazy loading and Suspense
@@ -652,6 +690,7 @@ By the end of this tutorial, students will:
 4. **Exercise 4:** Debug a broken configuration
 
 **🤔 Discussion Questions:**
+
 - When would you choose Giscus over Disqus?
 - How does lazy loading impact SEO?
 - What are the trade-offs of requiring GitHub authentication?
@@ -659,6 +698,7 @@ By the end of this tutorial, students will:
 ### **For Self-Learners**
 
 **✅ Progress Checklist:**
+
 - [ ] GitHub Discussions enabled and configured
 - [ ] Giscus app installed and working
 - [ ] Basic component created and integrated
@@ -667,6 +707,7 @@ By the end of this tutorial, students will:
 - [ ] Performance improvements measured
 
 **🧪 Experiment Ideas:**
+
 - Try different `rootMargin` values
 - Implement comment count display
 - Add social sharing alongside comments
@@ -679,11 +720,13 @@ By the end of this tutorial, students will:
 ### **Regular Maintenance Tasks**
 
 **Monthly:**
+
 - Check for Giscus package updates: `npm update @giscus/react`
 - Review comment moderation in GitHub Discussions
 - Monitor performance metrics
 
 **Quarterly:**
+
 - Audit comment engagement analytics
 - Review and update comment guidelines
 - Test comment functionality across devices
@@ -691,6 +734,7 @@ By the end of this tutorial, students will:
 ### **Handling Comment Moderation**
 
 **In GitHub Discussions:**
+
 1. Navigate to your repo → Discussions → Blog Comments
 2. Find problematic comments
 3. Use GitHub's moderation tools:
@@ -700,6 +744,7 @@ By the end of this tutorial, students will:
    - Lock discussions
 
 **Best Practices:**
+
 - Set clear commenting guidelines
 - Respond to comments promptly
 - Use reactions to acknowledge feedback
@@ -712,6 +757,7 @@ By the end of this tutorial, students will:
 Congratulations! You now have a **high-performance, privacy-focused comment system** integrated into your Docusaurus blog. Here's what you've accomplished:
 
 ### **✅ What You Built**
+
 - GitHub Discussions-powered commenting
 - Performance-optimized lazy loading
 - Seamless Docusaurus integration
@@ -721,6 +767,7 @@ Congratulations! You now have a **high-performance, privacy-focused comment syst
 ### **🚀 Next Level Features**
 
 Consider adding:
+
 - **Newsletter integration** below comments
 - **Social sharing buttons** above comments
 - **Related posts** suggestions
@@ -741,6 +788,12 @@ Consider adding:
 I'd love to hear about your implementation! Did you face any challenges not covered here? Any creative customizations you'd like to share?
 
 <GiscusComments />
+<Newsletter
+  title="🚀 Enjoyed this post?"
+  description="Join our community and get weekly updates!"
+  buttonText="Join Now"
+  theme="secondary"
+/>
 
 ---
 
