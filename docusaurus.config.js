@@ -138,7 +138,7 @@ const config = {
             ],
           },
         ],
-        copyright: `Copyright © ${new Date().getFullYear()} ScafBlog. Built with Docusaurus.`,
+        copyright: `Copyright © ${new Date().getFullYear()}. ScafBlog. Built by CYQUADTECH with Docusaurus .`,
       },
       prism: {
         theme: prismThemes.github,
