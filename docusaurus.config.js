@@ -281,7 +281,7 @@ const config = {
               // ADD GET TRAINED TO FOOTER TOO
               {
                 label: "Get Trained",
-                to: "/get-trained",
+                to: "/get-trained/index.mdx",
               },
             ],
           },
