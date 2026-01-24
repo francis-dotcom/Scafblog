@@ -929,7 +929,8 @@ async function interactiveMode() {
     const content = formatBlogPost({
       title,
       slug,
-      date: new Date().toISOString().split("T")[0],
+      // date: new Date().toISOString().split("T")[0],
+      date: new Date().toISOString(),
       tags: tags.slice(0, 4),
       authors: ["francis"],
       content: aiContent,
