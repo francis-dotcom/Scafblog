@@ -573,6 +573,7 @@ import { logger } from "./lib/logger.mjs";
 import { validateConfig } from "./lib/configValidator.mjs";
 import { RateLimiter } from "./lib/rateLimiter.mjs";
 import { buildPerspectivePrompt } from "./lib/promptBuilder.mjs";
+import { buildCustomTopicPrompt } from "./lib/custompromptBuilder.mjs";
 
 import {
   generateBlogPost as formatBlogPost,
@@ -721,21 +722,181 @@ async function interactiveMode() {
 
   /* STEP 1 — SELECT TOPIC */
 
+  // const { topicIndex } = await inquirer.prompt([
+  //   {
+  //     type: "list",
+  //     name: "topicIndex",
+  //     message: "Select a topic:",
+  //     choices: feedsConfig.topics.map((t, i) => ({
+  //       name: `${t.name} (${t.feeds.length} feeds, ${t.keywords.length} keywords)`,
+  //       value: i,
+  //     })),
+  //   },
+  // ]);
+
+  // const topic = feedsConfig.topics[topicIndex];
+  // logger.info(`📚 Topic: ${topic.name}\n`);
+  //
+  //
+  /* STEP 1 — SELECT TOPIC */
+
+  const choices = feedsConfig.topics.map((t, i) => ({
+    name: `${t.name} (${t.feeds.length} feeds, ${t.keywords.length} keywords)`,
+    value: i,
+  }));
+
+  choices.push({
+    name: "⌨️  Type my own topic",
+    value: "custom",
+  });
+
   const { topicIndex } = await inquirer.prompt([
     {
       type: "list",
       name: "topicIndex",
-      message: "Select a topic:",
-      choices: feedsConfig.topics.map((t, i) => ({
-        name: `${t.name} (${t.feeds.length} feeds, ${t.keywords.length} keywords)`,
-        value: i,
-      })),
+      message: "Select a topic or type your own:",
+      choices,
     },
   ]);
 
-  const topic = feedsConfig.topics[topicIndex];
-  logger.info(`📚 Topic: ${topic.name}\n`);
+  // if (topicIndex === "custom") {
+  //   const { customName, customKeywords } = await inquirer.prompt([
+  //     {
+  //       type: "input",
+  //       name: "customName",
+  //       message: "What topic are you interested in?",
+  //     },
+  //     {
+  //       type: "input",
+  //       name: "customKeywords",
+  //       message: "Enter keywords to search for (comma-separated):",
+  //       validate: (input) =>
+  //         input.trim().length > 0 || "Please enter at least one keyword",
+  //     },
+  //   ]);
 
+  //   const allFeeds = [...new Set(feedsConfig.topics.flatMap((t) => t.feeds))];
+
+  //   topic = {
+  //     name: customName,
+  //     keywords: customKeywords.split(",").map((k) => k.trim().toLowerCase()),
+  //     feeds: allFeeds,
+  //   };
+  // } else {
+  //   topic = feedsConfig.topics[topicIndex];
+  // }
+
+  // logger.info(`\n📚 Topic: ${topic.name}`);
+  // logger.info(`🏷️  Keywords: ${topic.keywords.join(", ")}\n`);
+  //
+  //
+
+  // CUSTOM TOPIC — generate directly without feeds
+  if (topicIndex === "custom") {
+    const { title, description, keywords } = await inquirer.prompt([
+      {
+        type: "input",
+        name: "title",
+        message: "Blog post title:",
+        validate: (input) => input.trim().length > 0 || "Please enter a title",
+      },
+      {
+        type: "input",
+        name: "description",
+        message: "What should this post be about? (describe in detail):",
+        validate: (input) =>
+          input.trim().length > 0 || "Please enter a description",
+      },
+      {
+        type: "input",
+        name: "keywords",
+        message: "Tags/keywords (comma-separated):",
+        default: "tech",
+      },
+    ]);
+
+    const tags = keywords.split(",").map((k) => k.trim().toLowerCase());
+
+    console.log("\n📄 Your Blog Post:");
+    console.log(`   Title: ${title}`);
+    console.log(`   About: ${description}`);
+    console.log(`   Tags: ${tags.join(", ")}`);
+    console.log(
+      `   Estimated cost: ~$${((CONFIG.MAX_TOKENS / 1000) * 0.00015).toFixed(4)}\n`,
+    );
+
+    const { confirm } = await inquirer.prompt([
+      {
+        type: "confirm",
+        name: "confirm",
+        message: "Generate this blog post?",
+        default: true,
+      },
+    ]);
+
+    if (!confirm) {
+      logger.info("❌ Cancelled.");
+      return;
+    }
+
+    const slug = slugify(title, { lower: true, strict: true });
+    const filename = `${new Date().toISOString().split("T")[0]}-${slug}.mdx`;
+
+    logger.info(`\n✍️  Generating ${filename}...`);
+
+    // Use the custom prompt builder
+    const prompt = buildCustomTopicPrompt({
+      title,
+      description,
+      keywords: tags,
+      testMode: TEST_MODE,
+    });
+
+    await openaiLimiter.wait();
+
+    const response = await withRetry(() =>
+      openai.chat.completions.create({
+        model: CONFIG.MODEL,
+        temperature: 0.6,
+        max_tokens: CONFIG.MAX_TOKENS,
+        messages: [
+          {
+            role: "system",
+            content: TEST_MODE
+              ? "You generate short technical test output."
+              : "You are a senior engineer writing rigorous technical briefings.",
+          },
+          { role: "user", content: prompt },
+        ],
+      }),
+    );
+
+    const aiContent = response.choices[0].message.content;
+
+    const content = formatBlogPost({
+      title,
+      slug,
+      date: new Date().toISOString().split("T")[0],
+      tags: tags.slice(0, 4),
+      authors: ["francis"],
+      content: aiContent,
+      sourceUrl: null,
+      excerpt: description.slice(0, 150),
+      readTime: calculateReadTime(aiContent),
+    });
+
+    await fs.writeFile(path.join(CONFIG.OUTPUT_DIR, filename), content, "utf8");
+
+    logger.success(`\n🎉 Created: ${filename}`);
+    logger.info(`📂 Location: ${path.join(CONFIG.OUTPUT_DIR, filename)}`);
+    return; // Exit here — don't continue to feed-based flow
+  }
+
+  // PREDEFINED TOPIC — use feeds
+  // const topic = feedsConfig.topics[topicIndex];
+  const topic = feedsConfig.topics[topicIndex];
+  logger.info(`\n📚 Topic: ${topic.name}`);
+  logger.info(`🏷️  Keywords: ${topic.keywords.join(", ")}\n`);
   /* STEP 2 — FETCH ALL FEEDS FOR TOPIC */
 
   logger.info("📡 Fetching feeds...");
