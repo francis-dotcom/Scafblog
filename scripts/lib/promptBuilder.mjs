@@ -125,9 +125,33 @@
 
 // The goal: A technical deep-dive that reads like a cohesive essay, not a checklist.
 
+// PARAGRAPH FORMATTING (CRITICAL)
+// - Each paragraph MUST be 3-5 sentences maximum
+// - ALWAYS use double line breaks between paragraphs
+// - NEVER write walls of text — break ideas into digestible chunks
+// - Each paragraph should cover ONE main idea
+// - Use short paragraphs for emphasis and readability
+// - Vary paragraph length to create rhythm (some 2-3 sentences, some 4-5)
+
+// Example of CORRECT formatting:
+// """
+// The first concept is explained here. This builds on itself naturally. The paragraph ends with a transition.
+
+// The next idea starts fresh. It connects to the previous paragraph but covers new ground. More detail follows.
+
+// A third paragraph continues the flow. Each chunk is digestible.
+// """
+
+// Example of INCORRECT formatting (DO NOT DO THIS):
+// """
+// Everything crammed into one massive block of text that goes on and on without any breaks making it impossible to read and understand because there are no natural stopping points and the reader gets lost in the wall of words...
+// """
+
 // STYLE RULES
 // DO:
 // - Write in clear, logical paragraphs with smooth transitions
+// - Break content into short, focused paragraphs (3-5 sentences each)
+// - Add blank lines between every paragraph for readability
 // - Maintain rigor without academic verbosity
 // - Use active voice
 // - Define acronyms on first use
@@ -139,10 +163,12 @@
 // - make unsubstantiated performance claims
 // - rely on non-technical analogies
 // - produce wall-of-text sections
+// - write paragraphs longer than 5 sentences
 
 // OUTPUT FORMAT
 // - Start with a single # title on the first line — this MUST be your own unique, compelling title (NOT the original article title)
-// - Continuous prose in Markdown
+// - Continuous prose in Markdown with clear paragraph breaks
+// - Double line breaks between EVERY paragraph (this is essential)
 // - Code blocks with language tags (\`\`\`python, \`\`\`sql, etc.)
 // - LaTeX math using $...$ (inline) or $$...$$ (display)
 // - Tables for comparison data where appropriate
@@ -157,18 +183,22 @@
 // FINAL CHECK (INTERNAL)
 // Before finalizing, ensure:
 // - The title is UNIQUE and NOT from the source article
+// - Every paragraph is 3-5 sentences max with blank lines between
+// - No walls of text anywhere
 // - An experienced engineer would learn something new
 // - Claims are backed by technical reasoning
 // - Scope is tight and controlled
 // - Theory and practice are balanced
 // - The narrative flows naturally without relying on headings as signposts
 
+// FINAL REMINDER: INSERT BLANK LINES BETWEEN PARAGRAPHS. THIS IS MANDATORY.
+
 // Topic focus: ${topicName}
 // Keywords to emphasize naturally: ${matchedKeywords.join(", ")}
 // Tone: Rigorous, analytical, engineer-to-engineer
 // `;
 // }
-//
+
 import { logger } from "./logger.mjs";
 
 /**
@@ -261,68 +291,48 @@ CODE & MATH STANDARDS
 - Use LaTeX for equations; explain variables on first use
 - Use pseudocode only where full code is unnecessarily verbose
 
-STRUCTURAL REQUIREMENT (Narrative Flow)
-Write as a continuous technical narrative without section headings or numbered divisions.
-The article must read as coherent, flowing prose where each paragraph naturally leads to the next.
+THEME LABELS (MANDATORY)
+Each paragraph MUST have a ### theme label on its own line.
+Generate theme labels dynamically based on the content — make them specific and descriptive.
 
-The narrative must progress through these phases IN ORDER, using smooth transitions:
+FORMAT:
+### [Auto-Generated Theme Label]
 
-1. Problem introduction → Establish the real-world problem, why existing solutions fail, what constraints matter
-2. Technical framing → Precisely define what you're solving, bound the scope explicitly, state assumptions
-3. Mechanism deep-dive → Explain how it works, walk through the critical path, justify design choices
-4. System design → Describe components, interactions, data flow, integration points
-5. Failure analysis → Cover what breaks, degradation patterns, edge cases, security implications
-6. Performance characteristics → Analyze complexity, bottlenecks, scalability limits, concrete metrics
-7. Practitioner guidance → When to use this, implementation checklist, operational considerations
-8. References (optional) → End with 3-5 key papers or production writeups
+Paragraph text here. Develops the theme fully. 2-5 sentences that explore this specific idea.
 
-Transition techniques:
-- Bridging sentences: "Understanding this mechanism requires examining the underlying architecture..."
-- Contextual pivots: "While the core algorithm handles the common case, production systems face several failure modes..."
-- Progressive disclosure: "With the design established, the question becomes: how does this perform at scale?"
-- Natural sequencing: "This leads directly to the performance characteristics..."
+### [Next Auto-Generated Theme Label]
 
-DO NOT use:
-- Numbered sections (## 1. Problem...)
-- Section headings (## Core Mechanism)
-- Bullet-point section titles
-- Listicle-style organization
+Next paragraph here. New theme. Continues the narrative flow.
 
-DO use:
-- Paragraph breaks for logical separation
-- **Bold text** sparingly for key terms (first introduction only)
-- Code blocks and equations where they improve clarity
-- Tables for comparative data
+THEME LABEL RULES:
+- Generate labels that reflect YOUR specific analysis (not generic like "Introduction" or "Conclusion")
+- Labels should be intriguing and technical (e.g., "The Memory Bandwidth Bottleneck", "Why Consensus Fails at Scale")
+- One ### label = one paragraph = one focused idea
+- Blank line before and after each paragraph
+- 8-12 themed paragraphs total
 
-The goal: A technical deep-dive that reads like a cohesive essay, not a checklist.
-
-PARAGRAPH FORMATTING (CRITICAL)
-- Each paragraph MUST be 3-5 sentences maximum
-- ALWAYS use double line breaks between paragraphs
-- NEVER write walls of text — break ideas into digestible chunks
-- Each paragraph should cover ONE main idea
-- Use short paragraphs for emphasis and readability
-- Vary paragraph length to create rhythm (some 2-3 sentences, some 4-5)
-
-Example of CORRECT formatting:
+EXAMPLE OUTPUT:
 """
-The first concept is explained here. This builds on itself naturally. The paragraph ends with a transition.
+# Rethinking Cache Invalidation in Distributed Systems
 
-The next idea starts fresh. It connects to the previous paragraph but covers new ground. More detail follows.
+### The Staleness Problem Nobody Talks About
 
-A third paragraph continues the flow. Each chunk is digestible.
-"""
+Cache invalidation is often cited as one of the hardest problems in computer science. But the real challenge isn't invalidation itself — it's detecting when invalidation is needed. Most systems fail silently, serving stale data without any indication of drift.
 
-Example of INCORRECT formatting (DO NOT DO THIS):
-"""
-Everything crammed into one massive block of text that goes on and on without any breaks making it impossible to read and understand because there are no natural stopping points and the reader gets lost in the wall of words...
+### Why TTL-Based Expiration Falls Short
+
+Time-to-live strategies assume uniform data volatility. In practice, some keys change every second while others remain static for months. A single TTL value either over-invalidates stable data or under-invalidates volatile entries.
+
+### Event-Driven Invalidation Architecture
+
+The alternative is propagating change events through the system. When source data updates, a message triggers cache purges across all nodes. This requires reliable message delivery and careful handling of out-of-order events.
 """
 
 STYLE RULES
 DO:
 - Write in clear, logical paragraphs with smooth transitions
-- Break content into short, focused paragraphs (3-5 sentences each)
-- Add blank lines between every paragraph for readability
+- Each paragraph covers ONE theme (matches its label)
+- Add blank lines between every paragraph
 - Maintain rigor without academic verbosity
 - Use active voice
 - Define acronyms on first use
@@ -335,32 +345,30 @@ DO NOT:
 - rely on non-technical analogies
 - produce wall-of-text sections
 - write paragraphs longer than 5 sentences
+- use generic theme labels like "Introduction" or "Background"
 
 OUTPUT FORMAT
-- Start with a single # title on the first line — this MUST be your own unique, compelling title (NOT the original article title)
-- Continuous prose in Markdown with clear paragraph breaks
-- Double line breaks between EVERY paragraph (this is essential)
-- Code blocks with language tags (\`\`\`python, \`\`\`sql, etc.)
-- LaTeX math using $...$ (inline) or $$...$$ (display)
+- Line 1: Single # title (your own unique title)
+- Then: Series of ### theme labels, each followed by one paragraph
+- Blank line before and after each paragraph
+- Code blocks with language tags where needed
+- LaTeX math using $...$ or $$...$$
 - Tables for comparison data where appropriate
-- No other heading hierarchy besides the title
 
 TITLE REQUIREMENTS (CRITICAL)
 - Create your OWN unique title — do NOT copy or paraphrase the source article title
 - Title should reflect YOUR analysis and perspective
 - Make it specific, engaging, and technical
-- Example: If source is "Google releases new AI tool", your title might be "Dissecting Transformer Inference Optimization in Production ML Systems"
 
 FINAL CHECK (INTERNAL)
 Before finalizing, ensure:
 - The title is UNIQUE and NOT from the source article
-- Every paragraph is 3-5 sentences max with blank lines between
+- Every paragraph has a ### theme label above it
+- Theme labels are specific and descriptive (not generic)
+- Each paragraph is 2-5 sentences
+- Blank lines separate all paragraphs
 - No walls of text anywhere
 - An experienced engineer would learn something new
-- Claims are backed by technical reasoning
-- Scope is tight and controlled
-- Theory and practice are balanced
-- The narrative flows naturally without relying on headings as signposts
 
 Topic focus: ${topicName}
 Keywords to emphasize naturally: ${matchedKeywords.join(", ")}
