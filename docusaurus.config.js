@@ -60,8 +60,6 @@ const config = {
         },
         blog: {
           showReadingTime: true,
-          blogSidebarTitle: "Recent posts",
-          blogSidebarCount: 5,
           feedOptions: {
             type: ["rss", "atom"],
             xslt: true,
