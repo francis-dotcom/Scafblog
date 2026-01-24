@@ -662,6 +662,49 @@ async function withRetry(fn) {
 
 /* -------------------- GENERATION -------------------- */
 
+// async function generateBlogPost(item, matchedKeywords, topicName) {
+//   const prompt = buildPerspectivePrompt({
+//     item,
+//     topicName,
+//     matchedKeywords,
+//     testMode: TEST_MODE,
+//   });
+
+//   await openaiLimiter.wait();
+
+//   const response = await withRetry(() =>
+//     openai.chat.completions.create({
+//       model: CONFIG.MODEL,
+//       temperature: 0.6,
+//       max_tokens: CONFIG.MAX_TOKENS,
+//       messages: [
+//         {
+//           role: "system",
+//           content: TEST_MODE
+//             ? "You generate short technical test output."
+//             : "You are a senior engineer writing rigorous technical briefings.",
+//         },
+//         { role: "user", content: prompt },
+//       ],
+//     }),
+//   );
+
+//   const aiContent = response.choices[0].message.content;
+
+//   return formatBlogPost({
+//     title: item.title,
+//     slug: slugify(item.title, { lower: true, strict: true }),
+//     date: new Date().toISOString().split("T")[0],
+//     tags: matchedKeywords.slice(0, 4),
+//     authors: ["francis"],
+//     content: aiContent,
+//     sourceUrl: item.link,
+//     excerpt: item.contentSnippet?.slice(0, 150),
+//     readTime: calculateReadTime(aiContent),
+//   });
+// }
+//
+//
 async function generateBlogPost(item, matchedKeywords, topicName) {
   const prompt = buildPerspectivePrompt({
     item,
@@ -691,16 +734,26 @@ async function generateBlogPost(item, matchedKeywords, topicName) {
 
   const aiContent = response.choices[0].message.content;
 
+  // Extract title from first line (# Title), use original as fallback
+  const lines = aiContent.split("\n").filter((line) => line.trim());
+  let generatedTitle = item.title; // fallback
+  let contentWithoutTitle = aiContent;
+
+  if (lines[0]?.startsWith("#")) {
+    generatedTitle = lines[0].replace(/^#\s*/, "").trim();
+    contentWithoutTitle = lines.slice(1).join("\n").trim();
+  }
+
   return formatBlogPost({
-    title: item.title,
-    slug: slugify(item.title, { lower: true, strict: true }),
+    title: generatedTitle,
+    slug: slugify(generatedTitle, { lower: true, strict: true }),
     date: new Date().toISOString().split("T")[0],
     tags: matchedKeywords.slice(0, 4),
     authors: ["francis"],
-    content: aiContent,
+    content: contentWithoutTitle,
     sourceUrl: item.link,
     excerpt: item.contentSnippet?.slice(0, 150),
-    readTime: calculateReadTime(aiContent),
+    readTime: calculateReadTime(contentWithoutTitle),
   });
 }
 
