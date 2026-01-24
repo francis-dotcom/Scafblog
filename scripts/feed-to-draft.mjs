@@ -140,7 +140,7 @@
 //   return formatBlogPost({
 //     title: item.title,
 //     slug: slugify(item.title, { lower: true, strict: true }),
-//     date: new Date().toISOString().split("T")[0],
+//     date: new Date().toISOString(),
 //     tags: matchedKeywords.slice(0, 4),
 //     authors: ["francis"],
 //     content: aiContent,
@@ -161,7 +161,7 @@
 //   }
 
 //   const slug = slugify(item.title, { lower: true, strict: true });
-//   const filename = `${new Date().toISOString().split("T")[0]}-${slug}.mdx`;
+//   const filename = `${new Date().toISOString()}-${slug}.mdx`;
 
 //   logger.info(`✍️  Generating ${filename}`);
 
@@ -454,7 +454,7 @@
 //   return formatBlogPost({
 //     title: item.title,
 //     slug: slugify(item.title, { lower: true, strict: true }),
-//     date: new Date().toISOString().split("T")[0],
+//     date: new Date().toISOString(),
 //     tags: matchedKeywords.slice(0, 4),
 //     authors: ["francis"],
 //     content: aiContent,
@@ -475,7 +475,7 @@
 //   }
 
 //   const slug = slugify(item.title, { lower: true, strict: true });
-//   const filename = `${new Date().toISOString().split("T")[0]}-${slug}.mdx`;
+//   const filename = `${new Date().toISOString()}-${slug}.mdx`;
 
 //   logger.info(`✍️  Generating ${filename}`);
 
@@ -694,7 +694,7 @@ async function withRetry(fn) {
 //   return formatBlogPost({
 //     title: item.title,
 //     slug: slugify(item.title, { lower: true, strict: true }),
-//     date: new Date().toISOString().split("T")[0],
+//     date: new Date().toISOString(),
 //     tags: matchedKeywords.slice(0, 4),
 //     authors: ["francis"],
 //     content: aiContent,
@@ -747,7 +747,7 @@ async function generateBlogPost(item, matchedKeywords, topicName) {
   return formatBlogPost({
     title: generatedTitle,
     slug: slugify(generatedTitle, { lower: true, strict: true }),
-    date: new Date().toISOString().split("T")[0],
+    date: new Date().toISOString(),
     tags: matchedKeywords.slice(0, 4),
     authors: ["francis"],
     content: contentWithoutTitle,
@@ -893,7 +893,7 @@ async function interactiveMode() {
     }
 
     const slug = slugify(title, { lower: true, strict: true });
-    const filename = `${new Date().toISOString().split("T")[0]}-${slug}.mdx`;
+    const filename = `${new Date().toISOString()}-${slug}.mdx`;
 
     logger.info(`\n✍️  Generating ${filename}...`);
 
@@ -929,7 +929,7 @@ async function interactiveMode() {
     const content = formatBlogPost({
       title,
       slug,
-      // date: new Date().toISOString().split("T")[0],
+      // date: new Date().toISOString(),
       date: new Date().toISOString(),
       tags: tags.slice(0, 4),
       authors: ["francis"],
@@ -1033,7 +1033,7 @@ async function interactiveMode() {
   /* STEP 7 — GENERATE */
 
   const slug = slugify(selected.item.title, { lower: true, strict: true });
-  const filename = `${new Date().toISOString().split("T")[0]}-${slug}.mdx`;
+  const filename = `${new Date().toISOString()}-${slug}.mdx`;
 
   logger.info(`\n✍️  Generating ${filename}...`);
 
@@ -1160,7 +1160,7 @@ async function autoMode() {
         }
 
         const slug = slugify(item.title, { lower: true, strict: true });
-        const filename = `${new Date().toISOString().split("T")[0]}-${slug}.mdx`;
+        const filename = `${new Date().toISOString()}-${slug}.mdx`;
 
         logger.info(`✍️  Generating ${filename}`);
 

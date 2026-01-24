@@ -57,6 +57,7 @@
 // DO NOT:
 // - summarize the article
 // - restate the headline
+// - use the original article title verbatim
 // - explain basic concepts
 // - write generic AI or cloud commentary
 
@@ -140,14 +141,22 @@
 // - produce wall-of-text sections
 
 // OUTPUT FORMAT
+// - Start with a single # title on the first line — this MUST be your own unique, compelling title (NOT the original article title)
 // - Continuous prose in Markdown
 // - Code blocks with language tags (\`\`\`python, \`\`\`sql, etc.)
 // - LaTeX math using $...$ (inline) or $$...$$ (display)
 // - Tables for comparison data where appropriate
-// - No heading hierarchy except for the article title (single # at top)
+// - No other heading hierarchy besides the title
+
+// TITLE REQUIREMENTS (CRITICAL)
+// - Create your OWN unique title — do NOT copy or paraphrase the source article title
+// - Title should reflect YOUR analysis and perspective
+// - Make it specific, engaging, and technical
+// - Example: If source is "Google releases new AI tool", your title might be "Dissecting Transformer Inference Optimization in Production ML Systems"
 
 // FINAL CHECK (INTERNAL)
 // Before finalizing, ensure:
+// - The title is UNIQUE and NOT from the source article
 // - An experienced engineer would learn something new
 // - Claims are backed by technical reasoning
 // - Scope is tight and controlled
@@ -159,7 +168,7 @@
 // Tone: Rigorous, analytical, engineer-to-engineer
 // `;
 // }
-
+//
 import { logger } from "./logger.mjs";
 
 /**
@@ -287,9 +296,33 @@ DO use:
 
 The goal: A technical deep-dive that reads like a cohesive essay, not a checklist.
 
+PARAGRAPH FORMATTING (CRITICAL)
+- Each paragraph MUST be 3-5 sentences maximum
+- ALWAYS use double line breaks between paragraphs
+- NEVER write walls of text — break ideas into digestible chunks
+- Each paragraph should cover ONE main idea
+- Use short paragraphs for emphasis and readability
+- Vary paragraph length to create rhythm (some 2-3 sentences, some 4-5)
+
+Example of CORRECT formatting:
+"""
+The first concept is explained here. This builds on itself naturally. The paragraph ends with a transition.
+
+The next idea starts fresh. It connects to the previous paragraph but covers new ground. More detail follows.
+
+A third paragraph continues the flow. Each chunk is digestible.
+"""
+
+Example of INCORRECT formatting (DO NOT DO THIS):
+"""
+Everything crammed into one massive block of text that goes on and on without any breaks making it impossible to read and understand because there are no natural stopping points and the reader gets lost in the wall of words...
+"""
+
 STYLE RULES
 DO:
 - Write in clear, logical paragraphs with smooth transitions
+- Break content into short, focused paragraphs (3-5 sentences each)
+- Add blank lines between every paragraph for readability
 - Maintain rigor without academic verbosity
 - Use active voice
 - Define acronyms on first use
@@ -301,10 +334,12 @@ DO NOT:
 - make unsubstantiated performance claims
 - rely on non-technical analogies
 - produce wall-of-text sections
+- write paragraphs longer than 5 sentences
 
 OUTPUT FORMAT
 - Start with a single # title on the first line — this MUST be your own unique, compelling title (NOT the original article title)
-- Continuous prose in Markdown
+- Continuous prose in Markdown with clear paragraph breaks
+- Double line breaks between EVERY paragraph (this is essential)
 - Code blocks with language tags (\`\`\`python, \`\`\`sql, etc.)
 - LaTeX math using $...$ (inline) or $$...$$ (display)
 - Tables for comparison data where appropriate
@@ -319,6 +354,8 @@ TITLE REQUIREMENTS (CRITICAL)
 FINAL CHECK (INTERNAL)
 Before finalizing, ensure:
 - The title is UNIQUE and NOT from the source article
+- Every paragraph is 3-5 sentences max with blank lines between
+- No walls of text anywhere
 - An experienced engineer would learn something new
 - Claims are backed by technical reasoning
 - Scope is tight and controlled
