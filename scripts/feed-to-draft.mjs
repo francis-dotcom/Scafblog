@@ -695,8 +695,27 @@ const TEST_MODE = false;
 
 /* ==================== CONFIG ==================== */
 
+// const CONFIG = {
+//   OUTPUT_DIR: path.join(__dirname, "../stageArea/drafts"),
+//   FEEDS_CONFIG_PATH: path.join(__dirname, "../feeds.json"),
+
+//   MAX_CONCURRENT_REQUESTS: 3,
+//   OPENAI_RATE_LIMIT: 3,
+//   MAX_RETRIES: 3,
+//   RETRY_DELAY: 2000,
+
+//   MODEL: "gpt-4o-mini",
+//   MAX_TOKENS: TEST_MODE ? 1000 : 2500,
+//   MAX_TOTAL_POSTS: 1,
+// };
+//
+//
 const CONFIG = {
-  OUTPUT_DIR: path.join(__dirname, "../stageArea/drafts"),
+  OUTPUT_DIR:
+    process.env.DIRECT_PUBLISH === "true"
+      ? path.join(__dirname, "../blog")
+      : path.join(__dirname, "../stageArea/drafts"),
+
   FEEDS_CONFIG_PATH: path.join(__dirname, "../feeds.json"),
 
   MAX_CONCURRENT_REQUESTS: 3,
@@ -864,7 +883,14 @@ async function autoMode() {
         minScore: 3,
       });
 
+      let publishedCount = 0;
+
       for (const { item, matchedKeywords } of selected) {
+        if (publishedCount >= CONFIG.MAX_TOTAL_POSTS) {
+          logger.info("Post limit reached. Stopping.");
+          return;
+        }
+
         const hash = fingerprintItem(item);
         if (registry.has(hash)) continue;
 
@@ -893,8 +919,40 @@ async function autoMode() {
         });
 
         await saveRegistry(registry);
-        logger.success(`✅ Created ${filename}`);
+        publishedCount++;
       }
+
+      // for (const { item, matchedKeywords } of selected) {
+      //   const hash = fingerprintItem(item);
+      //   if (registry.has(hash)) continue;
+
+      //   const slug = slugify(item.title, { lower: true, strict: true });
+      //   const filename = `${new Date().toISOString()}-${slug}.mdx`;
+
+      //   logger.info(`✍️  Generating ${filename}`);
+
+      //   const content = await generateBlogPost(
+      //     item,
+      //     matchedKeywords,
+      //     topic.name,
+      //   );
+
+      //   await fs.writeFile(
+      //     path.join(CONFIG.OUTPUT_DIR, filename),
+      //     content,
+      //     "utf8",
+      //   );
+
+      //   registry.set(hash, {
+      //     hash,
+      //     url: item.link ?? null,
+      //     title: item.title ?? null,
+      //     processedAt: new Date().toISOString(),
+      //   });
+
+      //   await saveRegistry(registry);
+      //   logger.success(`✅ Created ${filename}`);
+      // }
     }
   }
 
