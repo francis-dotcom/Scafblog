@@ -1,0 +1,453 @@
+
+---
+slug: student-equipment-requirements-stfrancis-labs-bootcamp
+title: "Student Equipment Requirements - StFrancis Labs AI Security Bootcamp"
+authors: [francis]
+tags:
+  - equipment
+  - requirements
+  - laptop-specs
+  - bootcamp
+  - ai-security
+  - student-guide
+date: 2026-01-28T02:45:00.000Z
+description: "Complete hardware, software, and system requirements for students participating in the StFrancis Labs AI Security Engineer Bootcamp."
+image: /img/blog/equipment-requirements.jpg
+---
+
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+# Student Equipment Requirements
+## StFrancis Labs AI Security Engineer Bootcamp
+
+**Delivered by StFrancis Labs**
+
+---
+
+## Why These Requirements Matter
+
+This is not a theoretical program. You will build real systems, attack production-grade models, and defend against live adversaries. The hardware and software listed below are not suggestions—they are minimum requirements to participate successfully.
+
+If you arrive with underpowered equipment, you will fall behind immediately. There are no exceptions.
+
+---
+
+## Minimum Laptop Specifications
+
+### Hardware Requirements (Non-Negotiable)
+
+**CPU**
+- Intel Core i7 11th Gen or newer (8+ cores)
+- OR AMD Ryzen 7 5000 series or newer (8+ cores)
+
+**RAM**
+- 32GB minimum
+- 64GB recommended for Modules 2-7
+
+**Storage**
+- 1TB NVMe SSD minimum
+- 2TB recommended for datasets and VMs
+
+**GPU (Critical for AI Modules)**
+- NVIDIA RTX 3060 8GB minimum
+- RTX 4060/4070 12GB+ recommended
+- AMD GPUs not supported for CUDA-dependent labs
+
+**Display**
+- 1920x1080 resolution minimum
+- 1440p+ recommended for multitasking
+
+**Battery & Cooling**
+- 6+ hour battery capacity (for unplugged sessions)
+- Adequate thermal design (no throttling under load)
+
+---
+
+## Mandatory Operating System
+
+### Primary Operating System
+**Ubuntu 22.04 LTS**
+- Clean install required
+- Dual boot with Windows acceptable
+- Must be installed before Day 1
+
+### Windows Users (Limited Acceptability)
+- Windows 11 Pro with WSL2 + Ubuntu 22.04 only
+- Windows Home edition not accepted
+- Corporate laptops often fail—test virtualization early
+
+### Not Accepted
+- macOS for core modules (except remote access)
+- ChromeOS or tablets
+- Virtual machines as primary OS
+
+---
+
+## Required Software Stack
+
+### 1. Virtualization Layer (Install Before Course)
+```bash
+sudo apt update
+sudo apt install qemu-kvm libvirt-daemon-system libvirt-clients
+sudo apt install virtualbox-7.0 virt-manager
+sudo systemctl enable libvirtd
+```
+
+### 2. Containerization
+```bash
+sudo apt install docker.io docker-compose podman
+sudo usermod -aG docker $USER
+sudo systemctl enable docker
+```
+
+### 3. AI/ML Development Stack
+```bash
+# Python environment
+python3 -m venv ~/aisec
+source ~/aisec/bin/activate
+
+# Core ML libraries
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+pip install tensorflow-gpu jax jaxlib
+pip install transformers datasets accelerate
+pip install openai anthropic langchain
+```
+
+### 4. Security Tooling
+```bash
+# Offensive security tools
+sudo apt install nmap burpsuite wireshark metasploit-framework
+sudo apt install john hashcat sqlmap
+
+# Development and analysis
+pip install scapy impacket pwntools requests beautifulsoup4
+```
+
+### 5. Development Environment
+```bash
+# Code editors and version control
+sudo snap install code --classic  # VS Code
+sudo apt install neovim git gh
+
+# Terminal and productivity
+sudo apt install tmux zsh terminator htop
+```
+
+---
+
+## Network Requirements
+
+### Internet Connection
+- **Download:** 100+ Mbps minimum (300+ Mbps recommended)
+- **Upload:** 50+ Mbps minimum (for video streaming and large uploads)
+- **Latency:** Less than 50ms to US East/West coast servers
+- **Data Cap:** Unlimited required (expect 500GB+ monthly usage)
+
+### Home Network Setup
+- Router with IPv6 enabled
+- Ability to forward/open ports for labs
+- VPN capability (optional but recommended)
+- Mobile hotspot backup (mandatory for exam days)
+
+---
+
+## Peripherals and Accessories
+
+### Mandatory Equipment
+1. **Webcam** — 1080p minimum, for proctored exams
+2. **Headset with Microphone** — Noise-cancelling recommended
+3. **External Monitor** — 24-inch 1080p minimum
+4. **USB-C/Thunderbolt Dock** — Single-cable connectivity
+
+### Strongly Recommended
+1. **Second Screen** — Tablet or secondary monitor
+2. **KVM Switch** — If using multiple systems
+3. **UPS (Battery Backup)** — Critical during exams
+4. **Ergonomic Setup** — Chair and desk for 8-12 hour days
+
+---
+
+## Cloud Resources and Accounts
+
+### Mandatory Cloud Credits
+1. **Google Cloud Platform** — $300 credits minimum
+2. **AWS Educate** — Free credits (apply before course)
+3. **Azure for Students** — $100 free credits
+
+### GPU Cloud Alternatives
+Register accounts with these services before Day 1:
+- Lambda Labs
+- RunPod
+- Vast.ai
+- Google Colab Pro ($10/month subscription)
+
+**Expected Monthly Cloud Spend:** $50-$100 during intensive modules
+
+---
+
+## Pre-Course Installation Checklist
+
+### Two Weeks Before Start
+```bash
+# 1. Clean Ubuntu installation
+# 2. Full system update
+sudo apt update && sudo apt upgrade -y
+
+# 3. Install virtualization stack
+sudo apt install virtualbox qemu-kvm virt-manager
+
+# 4. Set up Python environment
+python3 -m venv ~/aisec
+echo "source ~/aisec/bin/activate" >> ~/.bashrc
+
+# 5. Clone course repositories
+git clone https://github.com/stfrancislabs/aisec-foundations
+git clone https://github.com/stfrancislabs/adversarial-ml-labs
+```
+
+### One Week Before Start
+```bash
+# 1. Verify GPU and CUDA functionality
+nvidia-smi
+python3 -c "import torch; print(torch.cuda.is_available())"
+
+# 2. Test containerization
+docker run hello-world
+podman run hello-world
+
+# 3. Test network connectivity
+# - Port forwarding
+# - VPN connectivity
+# - Latency to lab servers
+
+# 4. Install course management tools
+pip install stfrancis-cli
+stfrancis --validate-system
+```
+
+---
+
+## Lab Environment Specifications
+
+Each student receives dedicated lab resources:
+
+### Virtual Machines (Per Student)
+- **Attack Box** — Kali Linux 2024.1, 4 cores, 8GB RAM
+- **Defense Box** — Ubuntu 22.04, 4 cores, 16GB RAM, GPU passthrough
+- **Monitoring Box** — Security Onion, 2 cores, 4GB RAM
+
+### Cloud Resources
+- GPU Instance: 1x A100 40GB (8 hours/day allocation)
+- Storage: 500GB persistent disk
+- Network: Isolated VPC with VPN access
+
+### Software Licenses Provided
+- Burp Suite Professional
+- Tenable Nessus
+- Commercial ML model access
+- Specialized security databases
+
+---
+
+## Mobile and Tablet Requirements
+
+### Smartphone (Mandatory)
+1. Authenticator app (Google Authenticator or Authy)
+2. Password manager (Bitwarden or 1Password)
+3. SSH client (Termius or JuiceSSH)
+4. Network scanner (Fing or Network Analyzer)
+
+### Tablet (Recommended)
+1. Digital notebook (GoodNotes or Notability)
+2. Reference materials viewer
+3. Monitoring dashboard access
+
+---
+
+## Security Requirements
+
+### Before Course Start
+1. **Full disk encryption** enabled (LUKS on Linux)
+2. **Password manager** installed and populated
+3. **Two-factor authentication** on all critical accounts
+4. **VPN configured** and tested
+5. **Backup system** operational (Timeshift or BorgBackup)
+
+### Security Software Installation
+```bash
+# Mandatory security tools
+sudo apt install fail2ban ufw rkhunter chkrootkit
+sudo ufw enable
+sudo systemctl enable fail2ban
+```
+
+---
+
+## Prerequisite Knowledge Verification
+
+### Technical Skills Test (Complete Before Application)
+
+**Python Requirements**
+```python
+# Demonstrate ability to:
+# 1. Write decorators that log execution
+# 2. Implement context managers
+# 3. Parse complex JSON structures
+# 4. Write asynchronous functions
+# 5. Use generators and comprehensions
+```
+
+**Linux/Bash Requirements**
+```bash
+# Demonstrate ability to:
+# 1. Write scripts monitoring system processes
+# 2. Parse log files with awk/sed
+# 3. Configure network interfaces
+# 4. Set up SSH keys and configurations
+# 5. Manage services with systemd
+```
+
+**Networking Knowledge**
+1. Explain TCP vs UDP differences
+2. Configure port forwarding
+3. Use tcpdump for traffic analysis
+4. Explain TLS handshake process
+5. Understand basic routing concepts
+
+---
+
+## Budget Estimate for Students
+
+| Item | Minimum Cost | Recommended Investment |
+|------|-------------|------------------------|
+| **Laptop** | $1,500 | $2,500-$3,500 |
+| **External Monitor** | $150 | $300-$500 |
+| **Peripherals** | $100 | $300 |
+| **Cloud Credits** | $50/month | $100/month |
+| **Software** | $0 (FOSS) | $200 (optional tools) |
+| **Books/Materials** | $100 | $300 |
+| **Backup Internet** | $30/month | $50/month |
+| **Total (8 months)** | ~$3,000 | ~$6,000 |
+
+---
+
+## Non-Negotiable Requirements
+
+### Automatic Rejection Criteria
+1. Underpowered laptop (less than 16GB RAM, no dedicated GPU)
+2. Windows Home Edition (must be Pro for WSL2)
+3. Unreliable internet (less than 50Mbps, data caps)
+4. Cannot run Linux VMs (corporate lockdown, Chromebooks)
+5. No webcam or microphone
+
+### Acceptable Alternatives
+1. Desktop + inexpensive laptop for remote access
+2. Cloud GPU resources + medium-spec laptop
+3. Corporate laptop with full admin rights and virtualization support
+
+---
+
+## Orientation Week Technical Verification
+
+**First Week — System Validation**
+
+```bash
+# Day 1: Full system check
+stfrancis-cli validate --full
+
+# Day 2: Network capability test
+./network_test.sh --lab-servers --vpn --bandwidth
+
+# Day 3: GPU and ML stack verification
+python3 ml_stack_test.py --cuda --models --benchmark
+
+# Day 4: Security tools functionality
+./security_test.sh --metasploit --nmap --burp
+
+# Day 5: Mock lab environment
+./mock_lab.sh --duration 4h --proctored
+```
+
+---
+
+## Technical Support Boundaries
+
+### We Provide Support For
+- Lab environment connectivity issues
+- Course software configuration problems
+- Network access to our systems
+- Exam and assessment technical difficulties
+
+### We Do Not Provide Support For
+- Personal hardware failures or upgrades
+- Home network configuration
+- Operating system installations
+- Commercial software licensing
+
+### Support Channels
+1. **Discord** — #tech-support (24/7 for urgent lab issues)
+2. **Email** — tech@stfrancislabs.com (24-hour response time)
+3. **Emergency Line** — Active only during examination periods
+
+---
+
+## Final System Verification
+
+**All students must run this command and pass ALL checks:**
+
+```bash
+curl -s https://stfrancislabs.com/verify-system.sh | bash
+```
+
+**Required Output:**
+```
+[✓] Ubuntu 22.04 detected
+[✓] 32GB+ RAM available
+[✓] NVIDIA GPU with CUDA support
+[✓] 1TB+ free disk space
+[✓] 100+ Mbps internet connection
+[✓] Virtualization enabled in BIOS
+[✓] All required packages installed
+[✓] Network ports accessible
+```
+
+---
+
+## The StFrancis Labs Standard
+
+**Performance requires proper tools.**
+
+We provide the most advanced AI security curriculum available. You must provide the hardware and dedication to match it.
+
+These requirements ensure every student can focus on learning—not troubleshooting inadequate equipment.
+
+---
+
+## Final Note
+
+This equipment list represents the minimum viable setup for success in this program. Students who invest in better equipment consistently perform better and complete projects faster.
+
+**Your hardware is your first line of defense in AI security.**
+
+---
+
+**StFrancis Labs**  
+*Building the engineers who secure the future*
+
+---
+
+<SocialShare
+  title="Student Equipment Requirements - StFrancis Labs AI Security Bootcamp"
+  slug="student-equipment-requirements-stfrancis-labs-bootcamp"
+/>
+
+<GiscusComments />
+
+<Newsletter
+  title="🚀 Ready to secure AI systems?"
+  description="Join our community for weekly AI security insights and updates."
+  buttonText="Subscribe Now"
+  theme="secondary"
+/>
