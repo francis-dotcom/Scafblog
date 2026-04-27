@@ -1,977 +1,3 @@
-// // import fs from "fs/promises";
-// // import fsSync from "fs";
-// // import path from "path";
-// // import crypto from "crypto";
-// // import { fileURLToPath } from "url";
-
-// // import Parser from "rss-parser";
-// // import slugify from "slugify";
-// // import OpenAI from "openai";
-// // import dotenv from "dotenv";
-// // import pLimit from "p-limit";
-// // import inquirer from "inquirer";
-
-// // import { selectFeedItems } from "./lib/selectFeedItems.mjs";
-// // import { logger } from "./lib/logger.mjs";
-// // import { validateConfig } from "./lib/configValidator.mjs";
-// // import { RateLimiter } from "./lib/rateLimiter.mjs";
-// // import { buildPerspectivePrompt } from "./lib/promptBuilder.mjs";
-// // import { buildCustomTopicPrompt } from "./lib/custompromptBuilder.mjs";
-
-// // import {
-// //   generateBlogPost as formatBlogPost,
-// //   calculateReadTime,
-// // } from "../templates/cleanBlogTemplate.mjs";
-
-// // /* -------------------- ENV + PATH -------------------- */
-
-// // const __filename = fileURLToPath(import.meta.url);
-// // const __dirname = path.dirname(__filename);
-
-// // dotenv.config({ path: path.join(__dirname, "../.env") });
-
-// // const parser = new Parser();
-// // const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-
-// // /* -------------------- MODE -------------------- */
-
-// // const TEST_MODE = false;
-
-// // /* -------------------- CONFIG -------------------- */
-
-// // const CONFIG = {
-// //   OUTPUT_DIR: path.join(__dirname, "../stageArea/drafts"),
-// //   FEEDS_CONFIG_PATH: path.join(__dirname, "../feeds.json"),
-
-// //   MAX_CONCURRENT_REQUESTS: 3,
-// //   OPENAI_RATE_LIMIT: 3,
-// //   MAX_RETRIES: 3,
-// //   RETRY_DELAY: 2000,
-
-// //   MODEL: "gpt-4o-mini",
-// //   MAX_TOKENS: TEST_MODE ? 1000 : 2500,
-// //   MAX_TOTAL_POSTS: 1,
-// // };
-
-// // /* -------------------- LIMITERS -------------------- */
-
-// // const openaiLimiter = new RateLimiter(CONFIG.OPENAI_RATE_LIMIT, 60000);
-// // const limit = pLimit(CONFIG.MAX_CONCURRENT_REQUESTS);
-
-// // /* -------------------- REGISTRY (DEDUP) -------------------- */
-
-// // const REGISTRY_PATH = path.join(__dirname, "../stageArea/processed.json");
-
-// // async function loadRegistry() {
-// //   try {
-// //     const data = await fs.readFile(REGISTRY_PATH, "utf8");
-// //     return new Set(JSON.parse(data));
-// //   } catch {
-// //     return new Set();
-// //   }
-// // }
-
-// // async function saveRegistry(registry) {
-// //   await fs.writeFile(REGISTRY_PATH, JSON.stringify([...registry], null, 2));
-// // }
-
-// // function fingerprintItem(item) {
-// //   return crypto
-// //     .createHash("sha256")
-// //     .update(item.link || item.title)
-// //     .digest("hex");
-// // }
-
-// // /* -------------------- UTIL -------------------- */
-
-// // const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-// // async function withRetry(fn) {
-// //   let lastError;
-// //   for (let i = 1; i <= CONFIG.MAX_RETRIES; i++) {
-// //     try {
-// //       return await fn();
-// //     } catch (err) {
-// //       lastError = err;
-// //       if (i < CONFIG.MAX_RETRIES) {
-// //         const delay = CONFIG.RETRY_DELAY * Math.pow(2, i - 1);
-// //         logger.warn(`Retry ${i} failed. Waiting ${delay}ms`);
-// //         await sleep(delay);
-// //       }
-// //     }
-// //   }
-// //   throw lastError;
-// // }
-
-// // /* -------------------- GENERATION -------------------- */
-
-// // // async function generateBlogPost(item, matchedKeywords, topicName) {
-// // //   const prompt = buildPerspectivePrompt({
-// // //     item,
-// // //     topicName,
-// // //     matchedKeywords,
-// // //     testMode: TEST_MODE,
-// // //   });
-
-// // //   await openaiLimiter.wait();
-
-// // //   const response = await withRetry(() =>
-// // //     openai.chat.completions.create({
-// // //       model: CONFIG.MODEL,
-// // //       temperature: 0.6,
-// // //       max_tokens: CONFIG.MAX_TOKENS,
-// // //       messages: [
-// // //         {
-// // //           role: "system",
-// // //           content: TEST_MODE
-// // //             ? "You generate short technical test output."
-// // //             : "You are a senior engineer writing rigorous technical briefings.",
-// // //         },
-// // //         { role: "user", content: prompt },
-// // //       ],
-// // //     }),
-// // //   );
-
-// // //   const aiContent = response.choices[0].message.content;
-
-// // //   return formatBlogPost({
-// // //     title: item.title,
-// // //     slug: slugify(item.title, { lower: true, strict: true }),
-// // //     date: new Date().toISOString(),
-// // //     tags: matchedKeywords.slice(0, 4),
-// // //     authors: ["francis"],
-// // //     content: aiContent,
-// // //     sourceUrl: item.link,
-// // //     excerpt: item.contentSnippet?.slice(0, 150),
-// // //     readTime: calculateReadTime(aiContent),
-// // //   });
-// // // }
-// // //
-// // //
-// // async function generateBlogPost(item, matchedKeywords, topicName) {
-// //   const prompt = buildPerspectivePrompt({
-// //     item,
-// //     topicName,
-// //     matchedKeywords,
-// //     testMode: TEST_MODE,
-// //   });
-
-// //   await openaiLimiter.wait();
-
-// //   const response = await withRetry(() =>
-// //     openai.chat.completions.create({
-// //       model: CONFIG.MODEL,
-// //       temperature: 0.6,
-// //       max_tokens: CONFIG.MAX_TOKENS,
-// //       messages: [
-// //         {
-// //           role: "system",
-// //           content: TEST_MODE
-// //             ? "You generate short technical test output."
-// //             : "You are a senior engineer writing rigorous technical briefings.",
-// //         },
-// //         { role: "user", content: prompt },
-// //       ],
-// //     }),
-// //   );
-
-// //   const aiContent = response.choices[0].message.content;
-
-// //   // Extract title from first line (# Title), use original as fallback
-// //   const lines = aiContent.split("\n").filter((line) => line.trim());
-// //   let generatedTitle = item.title; // fallback
-// //   let contentWithoutTitle = aiContent;
-
-// //   if (lines[0]?.startsWith("#")) {
-// //     generatedTitle = lines[0].replace(/^#\s*/, "").trim();
-// //     contentWithoutTitle = lines.slice(1).join("\n").trim();
-// //   }
-
-// //   return formatBlogPost({
-// //     title: generatedTitle,
-// //     slug: slugify(generatedTitle, { lower: true, strict: true }),
-// //     date: new Date().toISOString(),
-// //     tags: matchedKeywords.slice(0, 4),
-// //     authors: ["francis"],
-// //     content: contentWithoutTitle,
-// //     sourceUrl: item.link,
-// //     excerpt: item.contentSnippet?.slice(0, 150),
-// //     readTime: calculateReadTime(contentWithoutTitle),
-// //   });
-// // }
-
-// // /* -------------------- INTERACTIVE MODE -------------------- */
-
-// // async function interactiveMode() {
-// //   logger.info("🎯 Interactive Mode\n");
-
-// //   if (!fsSync.existsSync(CONFIG.OUTPUT_DIR)) {
-// //     await fs.mkdir(CONFIG.OUTPUT_DIR, { recursive: true });
-// //   }
-
-// //   const feedsConfig = JSON.parse(
-// //     await fs.readFile(CONFIG.FEEDS_CONFIG_PATH, "utf8"),
-// //   );
-// //   validateConfig(feedsConfig);
-
-// //   const registry = await loadRegistry();
-
-// //   /* STEP 1 — SELECT TOPIC */
-
-// //   // const { topicIndex } = await inquirer.prompt([
-// //   //   {
-// //   //     type: "list",
-// //   //     name: "topicIndex",
-// //   //     message: "Select a topic:",
-// //   //     choices: feedsConfig.topics.map((t, i) => ({
-// //   //       name: `${t.name} (${t.feeds.length} feeds, ${t.keywords.length} keywords)`,
-// //   //       value: i,
-// //   //     })),
-// //   //   },
-// //   // ]);
-
-// //   // const topic = feedsConfig.topics[topicIndex];
-// //   // logger.info(`📚 Topic: ${topic.name}\n`);
-// //   //
-// //   //
-// //   /* STEP 1 — SELECT TOPIC */
-
-// //   const choices = feedsConfig.topics.map((t, i) => ({
-// //     name: `${t.name} (${t.feeds.length} feeds, ${t.keywords.length} keywords)`,
-// //     value: i,
-// //   }));
-
-// //   choices.push({
-// //     name: "⌨️  Type my own topic",
-// //     value: "custom",
-// //   });
-
-// //   const { topicIndex } = await inquirer.prompt([
-// //     {
-// //       type: "list",
-// //       name: "topicIndex",
-// //       message: "Select a topic or type your own:",
-// //       choices,
-// //     },
-// //   ]);
-
-// //   // if (topicIndex === "custom") {
-// //   //   const { customName, customKeywords } = await inquirer.prompt([
-// //   //     {
-// //   //       type: "input",
-// //   //       name: "customName",
-// //   //       message: "What topic are you interested in?",
-// //   //     },
-// //   //     {
-// //   //       type: "input",
-// //   //       name: "customKeywords",
-// //   //       message: "Enter keywords to search for (comma-separated):",
-// //   //       validate: (input) =>
-// //   //         input.trim().length > 0 || "Please enter at least one keyword",
-// //   //     },
-// //   //   ]);
-
-// //   //   const allFeeds = [...new Set(feedsConfig.topics.flatMap((t) => t.feeds))];
-
-// //   //   topic = {
-// //   //     name: customName,
-// //   //     keywords: customKeywords.split(",").map((k) => k.trim().toLowerCase()),
-// //   //     feeds: allFeeds,
-// //   //   };
-// //   // } else {
-// //   //   topic = feedsConfig.topics[topicIndex];
-// //   // }
-
-// //   // logger.info(`\n📚 Topic: ${topic.name}`);
-// //   // logger.info(`🏷️  Keywords: ${topic.keywords.join(", ")}\n`);
-// //   //
-// //   //
-
-// //   // CUSTOM TOPIC — generate directly without feeds
-// //   if (topicIndex === "custom") {
-// //     const { title, description, keywords } = await inquirer.prompt([
-// //       {
-// //         type: "input",
-// //         name: "title",
-// //         message: "Blog post title:",
-// //         validate: (input) => input.trim().length > 0 || "Please enter a title",
-// //       },
-// //       {
-// //         type: "input",
-// //         name: "description",
-// //         message: "What should this post be about? (describe in detail):",
-// //         validate: (input) =>
-// //           input.trim().length > 0 || "Please enter a description",
-// //       },
-// //       {
-// //         type: "input",
-// //         name: "keywords",
-// //         message: "Tags/keywords (comma-separated):",
-// //         default: "tech",
-// //       },
-// //     ]);
-
-// //     const tags = keywords.split(",").map((k) => k.trim().toLowerCase());
-
-// //     console.log("\n📄 Your Blog Post:");
-// //     console.log(`   Title: ${title}`);
-// //     console.log(`   About: ${description}`);
-// //     console.log(`   Tags: ${tags.join(", ")}`);
-// //     console.log(
-// //       `   Estimated cost: ~$${((CONFIG.MAX_TOKENS / 1000) * 0.00015).toFixed(4)}\n`,
-// //     );
-
-// //     const { confirm } = await inquirer.prompt([
-// //       {
-// //         type: "confirm",
-// //         name: "confirm",
-// //         message: "Generate this blog post?",
-// //         default: true,
-// //       },
-// //     ]);
-
-// //     if (!confirm) {
-// //       logger.info("❌ Cancelled.");
-// //       return;
-// //     }
-
-// //     const slug = slugify(title, { lower: true, strict: true });
-// //     const filename = `${new Date().toISOString()}-${slug}.mdx`;
-
-// //     logger.info(`\n✍️  Generating ${filename}...`);
-
-// //     // Use the custom prompt builder
-// //     const prompt = buildCustomTopicPrompt({
-// //       title,
-// //       description,
-// //       keywords: tags,
-// //       testMode: TEST_MODE,
-// //     });
-
-// //     await openaiLimiter.wait();
-
-// //     const response = await withRetry(() =>
-// //       openai.chat.completions.create({
-// //         model: CONFIG.MODEL,
-// //         temperature: 0.6,
-// //         max_tokens: CONFIG.MAX_TOKENS,
-// //         messages: [
-// //           {
-// //             role: "system",
-// //             content: TEST_MODE
-// //               ? "You generate short technical test output."
-// //               : "You are a senior engineer writing rigorous technical briefings.",
-// //           },
-// //           { role: "user", content: prompt },
-// //         ],
-// //       }),
-// //     );
-
-// //     const aiContent = response.choices[0].message.content;
-
-// //     const content = formatBlogPost({
-// //       title,
-// //       slug,
-// //       // date: new Date().toISOString(),
-// //       date: new Date().toISOString(),
-// //       tags: tags.slice(0, 4),
-// //       authors: ["francis"],
-// //       content: aiContent,
-// //       sourceUrl: null,
-// //       excerpt: description.slice(0, 150),
-// //       readTime: calculateReadTime(aiContent),
-// //     });
-
-// //     await fs.writeFile(path.join(CONFIG.OUTPUT_DIR, filename), content, "utf8");
-
-// //     logger.success(`\n🎉 Created: ${filename}`);
-// //     logger.info(`📂 Location: ${path.join(CONFIG.OUTPUT_DIR, filename)}`);
-// //     return; // Exit here — don't continue to feed-based flow
-// //   }
-
-// //   // PREDEFINED TOPIC — use feeds
-// //   // const topic = feedsConfig.topics[topicIndex];
-// //   const topic = feedsConfig.topics[topicIndex];
-// //   logger.info(`\n📚 Topic: ${topic.name}`);
-// //   logger.info(`🏷️  Keywords: ${topic.keywords.join(", ")}\n`);
-// //   /* STEP 2 — FETCH ALL FEEDS FOR TOPIC */
-
-// //   logger.info("📡 Fetching feeds...");
-
-// //   let allItems = [];
-// //   for (const feedUrl of topic.feeds) {
-// //     try {
-// //       const feed = await withRetry(() => parser.parseURL(feedUrl));
-// //       allItems.push(...feed.items);
-// //     } catch (err) {
-// //       logger.warn(`Failed to fetch ${feedUrl}: ${err.message}`);
-// //     }
-// //   }
-
-// //   /* STEP 3 — FILTER OUT PROCESSED ITEMS */
-
-// //   const freshItems = allItems.filter(
-// //     (item) => !registry.has(fingerprintItem(item)),
-// //   );
-
-// //   if (!freshItems.length) {
-// //     logger.warn("No new articles available. All have been processed.");
-// //     return;
-// //   }
-
-// //   /* STEP 4 — SCORE AND RANK */
-
-// //   const scored = selectFeedItems(freshItems, topic, {
-// //     maxItems: 20,
-// //     minKeywordMatches: 1,
-// //     minScore: 2,
-// //   });
-
-// //   if (!scored.length) {
-// //     logger.warn("No articles matched your keywords.");
-// //     return;
-// //   }
-
-// //   /* STEP 5 — SELECT ARTICLE */
-
-// //   const { articleIndex } = await inquirer.prompt([
-// //     {
-// //       type: "list",
-// //       name: "articleIndex",
-// //       message: `Select an article (${scored.length} available):`,
-// //       pageSize: 15,
-// //       choices: scored.map((s, i) => ({
-// //         name: `${s.item.title}\n      🏷️  ${s.matchedKeywords.join(", ")}  |  📅 ${s.item.pubDate || "No date"}`,
-// //         value: i,
-// //       })),
-// //     },
-// //   ]);
-
-// //   const selected = scored[articleIndex];
-
-// //   /* STEP 6 — CONFIRM */
-
-// //   console.log("\n📄 Selected Article:");
-// //   console.log(`   Title: ${selected.item.title}`);
-// //   console.log(`   Link: ${selected.item.link}`);
-// //   console.log(`   Keywords: ${selected.matchedKeywords.join(", ")}`);
-// //   console.log(
-// //     `   Estimated cost: ~$${((CONFIG.MAX_TOKENS / 1000) * 0.00015).toFixed(4)}\n`,
-// //   );
-
-// //   const { confirm } = await inquirer.prompt([
-// //     {
-// //       type: "confirm",
-// //       name: "confirm",
-// //       message: "Generate blog post from this article?",
-// //       default: true,
-// //     },
-// //   ]);
-
-// //   if (!confirm) {
-// //     logger.info("❌ Cancelled.");
-// //     return;
-// //   }
-
-// //   /* STEP 7 — GENERATE */
-
-// //   const slug = slugify(selected.item.title, { lower: true, strict: true });
-// //   const filename = `${new Date().toISOString()}-${slug}.mdx`;
-
-// //   logger.info(`\n✍️  Generating ${filename}...`);
-
-// //   const content = await generateBlogPost(
-// //     selected.item,
-// //     selected.matchedKeywords,
-// //     topic.name,
-// //   );
-
-// //   await fs.writeFile(path.join(CONFIG.OUTPUT_DIR, filename), content, "utf8");
-
-// //   registry.add(fingerprintItem(selected.item));
-// //   await saveRegistry(registry);
-
-// //   logger.success(`\n🎉 Created: ${filename}`);
-// //   logger.info(`📂 Location: ${path.join(CONFIG.OUTPUT_DIR, filename)}`);
-// // }
-
-// // /* -------------------- PREVIEW MODE -------------------- */
-
-// // async function previewFeeds() {
-// //   logger.info("👀 PREVIEW MODE — No generation will occur\n");
-
-// //   const feedsConfig = JSON.parse(
-// //     await fs.readFile(CONFIG.FEEDS_CONFIG_PATH, "utf8"),
-// //   );
-// //   validateConfig(feedsConfig);
-
-// //   const registry = await loadRegistry();
-
-// //   for (const topic of feedsConfig.topics) {
-// //     logger.info(`\n📚 Topic: ${topic.name}`);
-// //     logger.info(`   Keywords: ${topic.keywords.join(", ")}\n`);
-
-// //     for (const feedUrl of topic.feeds) {
-// //       logger.info(`📡 Feed: ${feedUrl}`);
-
-// //       try {
-// //         const feed = await withRetry(() => parser.parseURL(feedUrl));
-
-// //         const freshItems = feed.items.filter(
-// //           (item) => !registry.has(fingerprintItem(item)),
-// //         );
-
-// //         if (freshItems.length === 0) {
-// //           logger.warn("   ⏭️  No new items (all previously processed)\n");
-// //           continue;
-// //         }
-
-// //         const selected = selectFeedItems(freshItems, topic, {
-// //           maxItems: 10,
-// //           minKeywordMatches: 1,
-// //           minScore: 2,
-// //         });
-
-// //         if (!selected.length) {
-// //           logger.warn("   No matching items for keywords\n");
-// //           continue;
-// //         }
-
-// //         logger.info(`   Found ${selected.length} matching articles:\n`);
-
-// //         selected.forEach((s, i) => {
-// //           console.log(`   ${i + 1}. ${s.item.title}`);
-// //           console.log(`      🔗 ${s.item.link}`);
-// //           console.log(`      🏷️  ${s.matchedKeywords.join(", ")}`);
-// //           console.log(`      📅 ${s.item.pubDate || "No date"}\n`);
-// //         });
-// //       } catch (err) {
-// //         logger.error(`   Failed to fetch feed: ${err.message}\n`);
-// //       }
-// //     }
-// //   }
-
-// //   logger.success("\n✅ Preview complete");
-// // }
-
-// // /* -------------------- AUTO MODE (ORIGINAL) -------------------- */
-
-// // async function autoMode() {
-// //   logger.info(`🚀 ScafBlog Generator ${TEST_MODE ? "(TEST MODE)" : "(PROD)"}`);
-
-// //   if (!fsSync.existsSync(CONFIG.OUTPUT_DIR)) {
-// //     await fs.mkdir(CONFIG.OUTPUT_DIR, { recursive: true });
-// //   }
-
-// //   const registry = await loadRegistry();
-
-// //   const feedsConfig = JSON.parse(
-// //     await fs.readFile(CONFIG.FEEDS_CONFIG_PATH, "utf8"),
-// //   );
-
-// //   validateConfig(feedsConfig);
-
-// //   for (const topic of feedsConfig.topics) {
-// //     logger.info(`📚 Topic: ${topic.name}`);
-// //     for (const feedUrl of topic.feeds) {
-// //       logger.info(`📡 Fetching feed: ${feedUrl}`);
-
-// //       const feed = await withRetry(() => parser.parseURL(feedUrl));
-
-// //       const freshItems = feed.items.filter((item) => {
-// //         const fp = fingerprintItem(item);
-// //         return !registry.has(fp);
-// //       });
-
-// //       if (freshItems.length === 0) {
-// //         logger.info("⏭️  No new items in feed");
-// //         continue;
-// //       }
-
-// //       const selected = selectFeedItems(freshItems, topic, {
-// //         maxItems: CONFIG.MAX_FEED_ITEMS,
-// //         minKeywordMatches: 2,
-// //         minScore: 3,
-// //       });
-
-// //       for (const { item, matchedKeywords } of selected) {
-// //         const fingerprint = fingerprintItem(item);
-
-// //         if (registry.has(fingerprint)) {
-// //           logger.info(`⏭️  Skipping: ${item.title}`);
-// //           continue;
-// //         }
-
-// //         const slug = slugify(item.title, { lower: true, strict: true });
-// //         const filename = `${new Date().toISOString()}-${slug}.mdx`;
-
-// //         logger.info(`✍️  Generating ${filename}`);
-
-// //         const content = await generateBlogPost(
-// //           item,
-// //           matchedKeywords,
-// //           topic.name,
-// //         );
-
-// //         await fs.writeFile(
-// //           path.join(CONFIG.OUTPUT_DIR, filename),
-// //           content,
-// //           "utf8",
-// //         );
-
-// //         registry.add(fingerprint);
-// //         await saveRegistry(registry);
-
-// //         logger.success(`✅ Created ${filename}`);
-// //       }
-// //     }
-// //   }
-
-// //   logger.success("🎉 Generation complete");
-// // }
-
-// // /* -------------------- RUN -------------------- */
-
-// // async function run() {
-// //   const args = process.argv.slice(2);
-
-// //   if (args.includes("--preview")) {
-// //     return previewFeeds();
-// //   }
-
-// //   if (args.includes("--interactive") || args.includes("-i")) {
-// //     return interactiveMode();
-// //   }
-
-// //   // Default: auto mode
-// //   return autoMode();
-// // }
-
-// // run().catch((err) => {
-// //   logger.error(err.message);
-// //   process.exit(1);
-// // });
-
-// /* ==================== IMPORTS ==================== */
-
-// import fs from "fs/promises";
-// import fsSync from "fs";
-// import path from "path";
-// import crypto from "crypto";
-// import { fileURLToPath } from "url";
-
-// import Parser from "rss-parser";
-// import slugify from "slugify";
-// import OpenAI from "openai";
-// import dotenv from "dotenv";
-// import pLimit from "p-limit";
-// import inquirer from "inquirer";
-
-// import { selectFeedItems } from "./lib/selectFeedItems.mjs";
-// import { logger } from "./lib/logger.mjs";
-// import { validateConfig } from "./lib/configValidator.mjs";
-// import { RateLimiter } from "./lib/rateLimiter.mjs";
-// import { buildPerspectivePrompt } from "./lib/promptBuilder.mjs";
-// import { buildCustomTopicPrompt } from "./lib/custompromptBuilder.mjs";
-
-// import {
-//   generateBlogPost as formatBlogPost,
-//   calculateReadTime,
-// } from "../templates/cleanBlogTemplate.mjs";
-
-// /* ==================== ENV + PATH ==================== */
-
-// const __filename = fileURLToPath(import.meta.url);
-// const __dirname = path.dirname(__filename);
-
-// dotenv.config({ path: path.join(__dirname, "../.env") });
-
-// const parser = new Parser();
-// const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-
-// /* ==================== MODE ==================== */
-
-// const TEST_MODE = false;
-
-// /* ==================== CONFIG ==================== */
-
-// // const CONFIG = {
-// //   OUTPUT_DIR: path.join(__dirname, "../stageArea/drafts"),
-// //   FEEDS_CONFIG_PATH: path.join(__dirname, "../feeds.json"),
-
-// //   MAX_CONCURRENT_REQUESTS: 3,
-// //   OPENAI_RATE_LIMIT: 3,
-// //   MAX_RETRIES: 3,
-// //   RETRY_DELAY: 2000,
-
-// //   MODEL: "gpt-4o-mini",
-// //   MAX_TOKENS: TEST_MODE ? 1000 : 2500,
-// //   MAX_TOTAL_POSTS: 1,
-// // };
-// //
-// //
-// const CONFIG = {
-//   OUTPUT_DIR:
-//     process.env.DIRECT_PUBLISH === "true"
-//       ? path.join(__dirname, "../blog")
-//       : path.join(__dirname, "../stageArea/drafts"),
-
-//   FEEDS_CONFIG_PATH: path.join(__dirname, "../feeds.json"),
-
-//   MAX_CONCURRENT_REQUESTS: 3,
-//   OPENAI_RATE_LIMIT: 3,
-//   MAX_RETRIES: 3,
-//   RETRY_DELAY: 2000,
-
-//   MODEL: "gpt-4o-mini",
-//   MAX_TOKENS: TEST_MODE ? 1000 : 2500,
-//   MAX_TOTAL_POSTS: 1,
-// };
-
-// /* ==================== LIMITERS ==================== */
-
-// const openaiLimiter = new RateLimiter(CONFIG.OPENAI_RATE_LIMIT, 60000);
-// const limit = pLimit(CONFIG.MAX_CONCURRENT_REQUESTS);
-
-// /* ==================== REGISTRY (DEDUP) ==================== */
-
-// const REGISTRY_PATH = path.join(__dirname, "../stageArea/processed.json");
-
-// async function loadRegistry() {
-//   try {
-//     const data = await fs.readFile(REGISTRY_PATH, "utf8");
-//     const parsed = JSON.parse(data);
-
-//     // Backward compatible: string[] or object[]
-//     return new Map(
-//       parsed.map((entry) =>
-//         typeof entry === "string"
-//           ? [entry, { hash: entry }]
-//           : [entry.hash, entry],
-//       ),
-//     );
-//   } catch {
-//     return new Map();
-//   }
-// }
-
-// async function saveRegistry(registry) {
-//   await fs.writeFile(
-//     REGISTRY_PATH,
-//     JSON.stringify([...registry.values()], null, 2),
-//   );
-// }
-
-// function fingerprintItem(item) {
-//   return crypto
-//     .createHash("sha256")
-//     .update(item.link || item.title)
-//     .digest("hex");
-// }
-
-// /* ==================== UTIL ==================== */
-
-// const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-// async function withRetry(fn) {
-//   let lastError;
-//   for (let i = 1; i <= CONFIG.MAX_RETRIES; i++) {
-//     try {
-//       return await fn();
-//     } catch (err) {
-//       lastError = err;
-//       if (i < CONFIG.MAX_RETRIES) {
-//         const delay = CONFIG.RETRY_DELAY * Math.pow(2, i - 1);
-//         logger.warn(`Retry ${i} failed. Waiting ${delay}ms`);
-//         await sleep(delay);
-//       }
-//     }
-//   }
-//   throw lastError;
-// }
-
-// /* ==================== GENERATION ==================== */
-
-// async function generateBlogPost(item, matchedKeywords, topicName) {
-//   const prompt = buildPerspectivePrompt({
-//     item,
-//     topicName,
-//     matchedKeywords,
-//     testMode: TEST_MODE,
-//   });
-
-//   await openaiLimiter.wait();
-
-//   const response = await withRetry(() =>
-//     openai.chat.completions.create({
-//       model: CONFIG.MODEL,
-//       temperature: 0.6,
-//       max_tokens: CONFIG.MAX_TOKENS,
-//       messages: [
-//         {
-//           role: "system",
-//           content: TEST_MODE
-//             ? "You generate short technical test output."
-//             : "You are a senior engineer writing rigorous technical briefings.",
-//         },
-//         { role: "user", content: prompt },
-//       ],
-//     }),
-//   );
-
-//   const aiContent = response.choices[0].message.content;
-
-//   const lines = aiContent.split("\n").filter((l) => l.trim());
-//   let title = item.title;
-//   let body = aiContent;
-
-//   if (lines[0]?.startsWith("#")) {
-//     title = lines[0].replace(/^#\s*/, "").trim();
-//     body = lines.slice(1).join("\n").trim();
-//   }
-
-//   return formatBlogPost({
-//     title,
-//     slug: slugify(title, { lower: true, strict: true }),
-//     date: new Date().toISOString(),
-//     tags: matchedKeywords.slice(0, 4),
-//     authors: ["francis"],
-//     content: body,
-//     sourceUrl: item.link,
-//     excerpt: item.contentSnippet?.slice(0, 150),
-//     readTime: calculateReadTime(body),
-//   });
-// }
-
-// /* ==================== AUTO MODE ==================== */
-
-// async function autoMode() {
-//   logger.info(`🚀 ScafBlog Generator ${TEST_MODE ? "(TEST MODE)" : "(PROD)"}`);
-
-//   if (!fsSync.existsSync(CONFIG.OUTPUT_DIR)) {
-//     await fs.mkdir(CONFIG.OUTPUT_DIR, { recursive: true });
-//   }
-
-//   const registry = await loadRegistry();
-
-//   const feedsConfig = JSON.parse(
-//     await fs.readFile(CONFIG.FEEDS_CONFIG_PATH, "utf8"),
-//   );
-
-//   validateConfig(feedsConfig);
-
-//   for (const topic of feedsConfig.topics) {
-//     logger.info(`📚 Topic: ${topic.name}`);
-
-//     for (const feedUrl of topic.feeds) {
-//       logger.info(`📡 Fetching feed: ${feedUrl}`);
-
-//       const feed = await withRetry(() => parser.parseURL(feedUrl));
-
-//       const freshItems = feed.items.filter(
-//         (item) => !registry.has(fingerprintItem(item)),
-//       );
-
-//       if (!freshItems.length) {
-//         logger.info("⏭️  No new items");
-//         continue;
-//       }
-
-//       const selected = selectFeedItems(freshItems, topic, {
-//         maxItems: 10,
-//         minKeywordMatches: 2,
-//         minScore: 3,
-//       });
-
-//       let publishedCount = 0;
-
-//       for (const { item, matchedKeywords } of selected) {
-//         if (publishedCount >= CONFIG.MAX_TOTAL_POSTS) {
-//           logger.info("Post limit reached. Stopping.");
-//           return;
-//         }
-
-//         const hash = fingerprintItem(item);
-//         if (registry.has(hash)) continue;
-
-//         const slug = slugify(item.title, { lower: true, strict: true });
-//         const filename = `${new Date().toISOString()}-${slug}.mdx`;
-
-//         logger.info(`✍️  Generating ${filename}`);
-
-//         const content = await generateBlogPost(
-//           item,
-//           matchedKeywords,
-//           topic.name,
-//         );
-
-//         await fs.writeFile(
-//           path.join(CONFIG.OUTPUT_DIR, filename),
-//           content,
-//           "utf8",
-//         );
-
-//         registry.set(hash, {
-//           hash,
-//           url: item.link ?? null,
-//           title: item.title ?? null,
-//           processedAt: new Date().toISOString(),
-//         });
-
-//         await saveRegistry(registry);
-//         publishedCount++;
-//       }
-
-//       // for (const { item, matchedKeywords } of selected) {
-//       //   const hash = fingerprintItem(item);
-//       //   if (registry.has(hash)) continue;
-
-//       //   const slug = slugify(item.title, { lower: true, strict: true });
-//       //   const filename = `${new Date().toISOString()}-${slug}.mdx`;
-
-//       //   logger.info(`✍️  Generating ${filename}`);
-
-//       //   const content = await generateBlogPost(
-//       //     item,
-//       //     matchedKeywords,
-//       //     topic.name,
-//       //   );
-
-//       //   await fs.writeFile(
-//       //     path.join(CONFIG.OUTPUT_DIR, filename),
-//       //     content,
-//       //     "utf8",
-//       //   );
-
-//       //   registry.set(hash, {
-//       //     hash,
-//       //     url: item.link ?? null,
-//       //     title: item.title ?? null,
-//       //     processedAt: new Date().toISOString(),
-//       //   });
-
-//       //   await saveRegistry(registry);
-//       //   logger.success(`✅ Created ${filename}`);
-//       // }
-//     }
-//   }
-
-//   logger.success("🎉 Generation complete");
-// }
-
-// /* ==================== RUN ==================== */
-
-// async function run() {
-//   return autoMode();
-// }
-
-// run().catch((err) => {
-//   logger.error(err.message);
-//   process.exit(1);
-// });
-
-/* ==================== IMPORTS ==================== */
-
 import fs from "fs/promises";
 import fsSync from "fs";
 import path from "path";
@@ -982,22 +8,42 @@ import Parser from "rss-parser";
 import slugify from "slugify";
 import OpenAI from "openai";
 import dotenv from "dotenv";
-import pLimit from "p-limit";
 import inquirer from "inquirer";
 
 import { selectFeedItems } from "./lib/selectFeedItems.mjs";
 import { logger } from "./lib/logger.mjs";
 import { validateConfig } from "./lib/configValidator.mjs";
 import { RateLimiter } from "./lib/rateLimiter.mjs";
-import { buildPerspectivePrompt } from "./lib/promptBuilder.mjs";
-import { buildCustomTopicPrompt } from "./lib/custompromptBuilder.mjs";
+import {
+  createAgentRegistry,
+  ensureJsonFile,
+  executeWorkflow,
+  runAgent,
+} from "./lib/agentRuntime.mjs";
+import { appendAgentEvent, appendRunTracker } from "./lib/localTracker.mjs";
+import {
+  createRunArtifacts,
+  loadLastRun,
+  saveLastRun,
+  writeJsonArtifact,
+  writeTextArtifact,
+} from "./lib/runArtifacts.mjs";
+import {
+  extractTitleAndBody,
+  validateDraft,
+  combineReadiness,
+} from "./lib/draftQuality.mjs";
+import {
+  buildPlannerPrompt,
+  buildDraftAgentPrompt,
+  buildReviewerPrompt,
+  buildRevisionPrompt,
+} from "./lib/orchestratorPrompts.mjs";
 
 import {
   generateBlogPost as formatBlogPost,
   calculateReadTime,
 } from "../templates/cleanBlogTemplate.mjs";
-
-/* ==================== ENV + PATH ==================== */
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1007,42 +53,50 @@ dotenv.config({ path: path.join(__dirname, "../.env") });
 const parser = new Parser();
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-/* ==================== MODE ==================== */
-
-const TEST_MODE = false;
-
-/* ==================== CONFIG ==================== */
-
 const CONFIG = {
+  FEEDS_CONFIG_PATH: path.join(__dirname, "../feeds.json"),
   OUTPUT_DIR:
     process.env.DIRECT_PUBLISH === "true"
       ? path.join(__dirname, "../blog")
       : path.join(__dirname, "../stageArea/drafts"),
-
-  FEEDS_CONFIG_PATH: path.join(__dirname, "../feeds.json"),
-
-  MAX_CONCURRENT_REQUESTS: 3,
-  OPENAI_RATE_LIMIT: 3,
+  RUNS_DIR: path.join(__dirname, "../stageArea/runs"),
+  REGISTRY_PATH: path.join(__dirname, "../stageArea/processed.json"),
+  LOCAL_TRACKER_PATH: path.join(__dirname, "../orchestration-state.local.json"),
   MAX_RETRIES: 3,
   RETRY_DELAY: 2000,
-
-  MODEL: "gpt-4o-mini",
-  MAX_TOKENS: TEST_MODE ? 1000 : 2500,
-  MAX_TOTAL_POSTS: 1,
+  MODEL: process.env.OPENAI_MODEL || "gpt-4o-mini",
+  FALLBACK_MODEL: process.env.OPENAI_FALLBACK_MODEL || "",
+  PLANNER_MODEL: process.env.PLANNER_MODEL || "",
+  WRITER_MODEL: process.env.WRITER_MODEL || "",
+  REVIEWER_MODEL: process.env.REVIEWER_MODEL || "",
+  REVISION_MODEL: process.env.REVISION_MODEL || "",
+  MAX_TOKENS: Number(process.env.OPENAI_MAX_TOKENS || 2600),
+  OPENAI_RATE_LIMIT: Number(process.env.OPENAI_RATE_LIMIT || 3),
+  MAX_TOTAL_POSTS: Number(process.env.MAX_TOTAL_POSTS || 1),
+  REVIEW_THRESHOLD: Number(process.env.REVIEW_THRESHOLD || 80),
+  MIN_WORDS: Number(process.env.MIN_WORDS || 900),
+  MAX_CANDIDATES_PER_TOPIC: Number(process.env.MAX_CANDIDATES_PER_TOPIC || 8),
+  MAX_REVISION_CYCLES: Number(process.env.MAX_REVISION_CYCLES || 2),
 };
 
-/* ==================== LIMITERS ==================== */
-
 const openaiLimiter = new RateLimiter(CONFIG.OPENAI_RATE_LIMIT, 60000);
-const limit = pLimit(CONFIG.MAX_CONCURRENT_REQUESTS);
 
-/* ==================== REGISTRY (DEDUP) ==================== */
+function ensureOpenAiConfigured() {
+  if (!process.env.OPENAI_API_KEY) {
+    throw new Error("OPENAI_API_KEY is required in scafblog/.env");
+  }
+}
 
-const REGISTRY_PATH = path.join(__dirname, "../stageArea/processed.json");
+function fingerprintItem(item) {
+  return crypto
+    .createHash("sha256")
+    .update(item.link || item.guid || item.title)
+    .digest("hex");
+}
 
 async function loadRegistry() {
   try {
-    const data = await fs.readFile(REGISTRY_PATH, "utf8");
+    const data = await fs.readFile(CONFIG.REGISTRY_PATH, "utf8");
     const parsed = JSON.parse(data);
 
     return new Map(
@@ -1058,487 +112,692 @@ async function loadRegistry() {
 }
 
 async function saveRegistry(registry) {
+  await fs.mkdir(path.dirname(CONFIG.REGISTRY_PATH), { recursive: true });
   await fs.writeFile(
-    REGISTRY_PATH,
-    JSON.stringify([...registry.values()], null, 2),
+    CONFIG.REGISTRY_PATH,
+    `${JSON.stringify([...registry.values()], null, 2)}\n`,
+    "utf8",
   );
 }
 
-function fingerprintItem(item) {
-  return crypto
-    .createHash("sha256")
-    .update(item.link || item.title)
-    .digest("hex");
-}
-
-/* ==================== UTIL ==================== */
-
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function withRetry(fn) {
   let lastError;
-  for (let i = 1; i <= CONFIG.MAX_RETRIES; i++) {
+
+  for (let attempt = 1; attempt <= CONFIG.MAX_RETRIES; attempt += 1) {
     try {
       return await fn();
-    } catch (err) {
-      lastError = err;
-      if (i < CONFIG.MAX_RETRIES) {
-        const delay = CONFIG.RETRY_DELAY * Math.pow(2, i - 1);
-        logger.warn(`Retry ${i} failed. Waiting ${delay}ms`);
+    } catch (error) {
+      lastError = error;
+
+      if (attempt < CONFIG.MAX_RETRIES) {
+        const delay = CONFIG.RETRY_DELAY * Math.pow(2, attempt - 1);
+        logger.warn(`Retry ${attempt} failed. Waiting ${delay}ms`);
         await sleep(delay);
       }
     }
   }
+
   throw lastError;
 }
 
-/* ==================== GENERATION ==================== */
+function buildModelChain(preferredModel) {
+  return [...new Set([preferredModel, CONFIG.MODEL, CONFIG.FALLBACK_MODEL].filter(Boolean))];
+}
 
-async function generateBlogPost(item, matchedKeywords, topicName) {
-  const prompt = buildPerspectivePrompt({
-    item,
-    topicName,
-    matchedKeywords,
-    testMode: TEST_MODE,
-  });
+async function createCompletionWithFallback({ models, payload }) {
+  let lastError;
 
+  for (const model of models) {
+    try {
+      return await withRetry(() =>
+        openai.chat.completions.create({
+          model,
+          ...payload,
+        }),
+      );
+    } catch (error) {
+      lastError = error;
+      logger.warn(`Model ${model} failed, trying next fallback if available`);
+    }
+  }
+
+  throw lastError;
+}
+
+async function callTextAgent(system, user, modelPreference = "") {
   await openaiLimiter.wait();
 
-  const response = await withRetry(() =>
-    openai.chat.completions.create({
-      model: CONFIG.MODEL,
-      temperature: 0.6,
+  const response = await createCompletionWithFallback({
+    models: buildModelChain(modelPreference),
+    payload: {
+      temperature: 0.45,
       max_tokens: CONFIG.MAX_TOKENS,
       messages: [
-        {
-          role: "system",
-          content: TEST_MODE
-            ? "You generate short technical test output."
-            : "You are a senior engineer writing rigorous technical briefings.",
-        },
-        { role: "user", content: prompt },
+        { role: "system", content: system },
+        { role: "user", content: user },
       ],
+    },
+  });
+
+  return response.choices[0]?.message?.content?.trim() || "";
+}
+
+async function callJsonAgent(system, user, modelPreference = "") {
+  await openaiLimiter.wait();
+
+  const response = await createCompletionWithFallback({
+    models: buildModelChain(modelPreference),
+    payload: {
+      temperature: 0.2,
+      max_tokens: 1200,
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: system },
+        { role: "user", content: user },
+      ],
+    },
+  });
+
+  const raw = response.choices[0]?.message?.content?.trim() || "{}";
+
+  try {
+    return JSON.parse(raw);
+  } catch (error) {
+    throw new Error(`Agent returned invalid JSON: ${error.message}`);
+  }
+}
+
+async function loadFeedsConfig() {
+  const raw = await fs.readFile(CONFIG.FEEDS_CONFIG_PATH, "utf8");
+  const config = JSON.parse(raw);
+  const result = validateConfig(config);
+
+  if (!result.valid) {
+    throw new Error(`Invalid feeds.json:\n- ${result.errors.join("\n- ")}`);
+  }
+
+  return config;
+}
+
+async function fetchTopicCandidates(topic, registry) {
+  const allItems = [];
+  const feedResults = await Promise.allSettled(
+    topic.feeds.map(async (feedUrl) => {
+      logger.info(`📡 Fetching feed: ${feedUrl}`);
+      const feed = await withRetry(() => parser.parseURL(feedUrl));
+      return { feedUrl, items: feed.items || [] };
     }),
   );
 
-  const aiContent = response.choices[0].message.content;
-
-  const lines = aiContent.split("\n").filter((l) => l.trim());
-  let title = item.title;
-  let body = aiContent;
-
-  if (lines[0]?.startsWith("#")) {
-    title = lines[0].replace(/^#\s*/, "").trim();
-    body = lines.slice(1).join("\n").trim();
+  for (const result of feedResults) {
+    if (result.status === "fulfilled") {
+      allItems.push(...result.value.items);
+    } else {
+      logger.warn(`Failed to fetch feed: ${result.reason?.message || result.reason}`);
+    }
   }
 
-  return formatBlogPost({
-    title,
-    slug: slugify(title, { lower: true, strict: true }),
-    date: new Date().toISOString(),
-    tags: matchedKeywords.slice(0, 4),
-    authors: ["francis"],
-    content: body,
-    sourceUrl: item.link,
-    excerpt: item.contentSnippet?.slice(0, 150),
-    readTime: calculateReadTime(body),
+  const freshItems = allItems.filter((item) => !registry.has(fingerprintItem(item)));
+
+  const selected = selectFeedItems(freshItems, topic, {
+    maxItems: CONFIG.MAX_CANDIDATES_PER_TOPIC,
+    minKeywordMatches: 2,
+    minScore: 3,
   });
+
+  return selected;
 }
 
-/* ==================== INTERACTIVE MODE ==================== */
+async function packageArticle({
+  title,
+  body,
+  tags,
+  sourceUrl,
+  excerpt,
+  outputDir,
+  runDir,
+}) {
+  const slug = slugify(title, { lower: true, strict: true });
+  const filename = `${new Date().toISOString()}-${slug}.mdx`;
+  const finalMdx = formatBlogPost({
+    title,
+    slug,
+    date: new Date().toISOString(),
+    tags: (tags || []).slice(0, 4),
+    authors: ["francis"],
+    content: body,
+    sourceUrl,
+    excerpt,
+    readTime: calculateReadTime(body),
+  });
 
-async function interactiveMode() {
-  logger.info("🎯 Interactive Mode\n");
+  await fs.mkdir(outputDir, { recursive: true });
+  const finalPath = path.join(outputDir, filename);
+  await fs.writeFile(finalPath, finalMdx, "utf8");
+  await writeTextArtifact(runDir, "06-final.mdx", finalMdx);
 
-  if (!fsSync.existsSync(CONFIG.OUTPUT_DIR)) {
-    await fs.mkdir(CONFIG.OUTPUT_DIR, { recursive: true });
+  return { filename, finalPath, slug };
+}
+
+const AGENT_REGISTRY = createAgentRegistry([
+  {
+    id: "topic_planner",
+    label: "Topic Planner",
+    stage: "planning",
+    summarize(output) {
+      return {
+        proposedTitle: output?.proposed_title || null,
+        tags: output?.tags || [],
+      };
+    },
+    async run({ runtime, input }) {
+      const plan = await callJsonAgent(
+        "You are a senior editorial planner. Return only valid JSON.",
+        buildPlannerPrompt({
+          topicName: input.topicName,
+          keywords: input.matchedKeywords,
+          item: input.item,
+          customTopic: input.customTopic,
+        }),
+        CONFIG.PLANNER_MODEL,
+      );
+      await writeJsonArtifact(input.runDir, "02-plan.json", plan);
+      return plan;
+    },
+  },
+  {
+    id: "draft_writer",
+    label: "Draft Writer",
+    stage: "drafting",
+    summarize(output) {
+      return { characters: String(output || "").length };
+    },
+    async run({ input }) {
+      const markdown = await callTextAgent(
+        "You are a rigorous technical writer. Produce publication-ready markdown only.",
+        buildDraftAgentPrompt({
+          item: input.item,
+          topicName: input.topicName,
+          matchedKeywords: input.matchedKeywords,
+          plan: input.plan,
+          customTopic: input.customTopic,
+        }),
+        CONFIG.WRITER_MODEL,
+      );
+      await writeTextArtifact(input.runDir, "03-draft.md", markdown);
+      return markdown;
+    },
+  },
+  {
+    id: "quality_reviewer",
+    label: "Quality Reviewer",
+    stage: "review",
+    summarize(output) {
+      return {
+        overallScore: Number(output?.overall_score || 0),
+        mustRevise: Boolean(output?.must_revise),
+      };
+    },
+    async run({ input }) {
+      const review = await callJsonAgent(
+        "You are a strict editor. Return only valid JSON.",
+        buildReviewerPrompt({
+          title: input.title,
+          body: input.body,
+          plan: input.plan,
+          item: input.item,
+          customTopic: input.customTopic,
+        }),
+        CONFIG.REVIEWER_MODEL,
+      );
+      await writeJsonArtifact(input.runDir, input.filename, review);
+      return review;
+    },
+  },
+  {
+    id: "revision_agent",
+    label: "Revision Agent",
+    stage: "revision",
+    summarize(output) {
+      return { characters: String(output || "").length };
+    },
+    async run({ input }) {
+      const revised = await callTextAgent(
+        "You are an expert revision agent. Return markdown only.",
+        buildRevisionPrompt({
+          title: input.title,
+          body: input.body,
+          review: input.review,
+          plan: input.plan,
+        }),
+        CONFIG.REVISION_MODEL,
+      );
+      await writeTextArtifact(input.runDir, "05-revised.md", revised);
+      return revised;
+    },
+  },
+  {
+    id: "publish_validator",
+    label: "Publish Validator",
+    stage: "validation",
+    summarize(output) {
+      return {
+        publishReady: Boolean(output?.readiness?.publishReady),
+        combined: Number(output?.readiness?.combined || 0),
+      };
+    },
+    async run({ input }) {
+      const localValidation = validateDraft({
+        title: input.title,
+        body: input.body,
+        sourceTitle: input.item?.title || "",
+        sourceUrl: input.item?.link || "",
+        minimumWords: CONFIG.MIN_WORDS,
+        requireSource: input.requireSource,
+      });
+      const readiness = combineReadiness(
+        localValidation.score,
+        Number(input.review.overall_score || 0),
+      );
+      const payload = { localValidation, readiness };
+      await writeJsonArtifact(input.runDir, "06-validation.json", payload);
+      return payload;
+    },
+  },
+  {
+    id: "publisher",
+    label: "Publisher",
+    stage: "publishing",
+    summarize(output) {
+      return {
+        filename: output?.filename || null,
+        finalPath: output?.finalPath || null,
+      };
+    },
+    async run({ input }) {
+      const packaged = await packageArticle({
+        title: input.title,
+        body: input.body,
+        tags: input.tags,
+        sourceUrl: input.item?.link || null,
+        excerpt: input.item?.contentSnippet || input.customTopic?.description || "",
+        outputDir: input.outputDir,
+        runDir: input.runDir,
+      });
+      return packaged;
+    },
+  },
+]);
+
+async function orchestrateCandidate({
+  topicName,
+  matchedKeywords,
+  item,
+  customTopic = null,
+  outputDir = CONFIG.OUTPUT_DIR,
+  requireSource = true,
+}) {
+  const label = customTopic ? customTopic.title : item.title;
+  const { runId, runDir } = await createRunArtifacts(CONFIG.RUNS_DIR, label);
+  await ensureJsonFile(CONFIG.LOCAL_TRACKER_PATH, { runs: [], events: [] });
+
+  const sourcePayload = customTopic
+    ? { customTopic, matchedKeywords, topicName }
+    : {
+        topicName,
+        matchedKeywords,
+        source: {
+          title: item.title,
+          link: item.link || null,
+          summary: item.contentSnippet || null,
+          publishedAt: item.pubDate || null,
+        },
+      };
+
+  await writeJsonArtifact(runDir, "01-source.json", sourcePayload);
+  const runtime = {
+    registry: AGENT_REGISTRY,
+    logger,
+    events: [],
+    async trackEvent(event) {
+      await appendAgentEvent(CONFIG.LOCAL_TRACKER_PATH, {
+        runId,
+        ...event,
+      });
+    },
+  };
+
+  const baseState = await executeWorkflow(
+    runtime,
+    [
+      {
+        agentId: "topic_planner",
+        input(context) {
+          return context;
+        },
+        assign(context, output) {
+          return { ...context, plan: output };
+        },
+      },
+      {
+        agentId: "draft_writer",
+        input(context) {
+          return {
+            ...context,
+            plan: context.plan,
+          };
+        },
+        assign(context, output) {
+          const parsed = extractTitleAndBody(
+            output,
+            context.plan.proposed_title ||
+              context.customTopic?.title ||
+              context.item?.title ||
+              "Untitled Draft",
+          );
+          return { ...context, draftMarkdown: output, ...parsed };
+        },
+      },
+    ],
+    {
+      topicName,
+      matchedKeywords,
+      item,
+      customTopic,
+      runDir,
+    },
+  );
+  let workflowState = { ...baseState, revisionCycle: 0 };
+
+  workflowState.review = await runAgent(runtime, "quality_reviewer", {
+    ...workflowState,
+    filename: "04-review.json",
+  });
+
+  while (
+    workflowState.revisionCycle < CONFIG.MAX_REVISION_CYCLES &&
+    (Number(workflowState.review?.overall_score || 0) < CONFIG.REVIEW_THRESHOLD ||
+      workflowState.review?.must_revise)
+  ) {
+    const revisedMarkdown = await runAgent(runtime, "revision_agent", {
+      title: workflowState.title,
+      body: workflowState.body,
+      review: workflowState.review,
+      plan: workflowState.plan,
+      runDir: workflowState.runDir,
+    });
+
+    const parsed = extractTitleAndBody(revisedMarkdown, workflowState.title);
+    workflowState = {
+      ...workflowState,
+      revisedMarkdown,
+      revisionCycle: workflowState.revisionCycle + 1,
+      ...parsed,
+    };
+
+    workflowState.review = await runAgent(runtime, "quality_reviewer", {
+      ...workflowState,
+      filename: `05b-review-after-revision-${workflowState.revisionCycle}.json`,
+    });
   }
 
-  const feedsConfig = JSON.parse(
-    await fs.readFile(CONFIG.FEEDS_CONFIG_PATH, "utf8"),
-  );
-  validateConfig(feedsConfig);
+  const validation = await runAgent(runtime, "publish_validator", {
+    ...workflowState,
+    requireSource,
+  });
 
+  workflowState = {
+    ...workflowState,
+    localValidation: validation.localValidation,
+    readiness: validation.readiness,
+  };
+
+  if (
+    workflowState.readiness?.publishReady &&
+    workflowState.review?.publish_ready !== false
+  ) {
+    workflowState.packaged = await runAgent(runtime, "publisher", {
+      ...workflowState,
+      tags: workflowState.plan.tags || workflowState.matchedKeywords,
+      outputDir,
+    });
+  }
+
+  const summary = {
+    runId,
+    title: workflowState.title,
+    topicName,
+    sourceTitle: item?.title || customTopic?.title || null,
+    sourceUrl: item?.link || null,
+    reviewerScore: Number(workflowState.review.overall_score || 0),
+    localValidation: workflowState.localValidation,
+    readiness: workflowState.readiness,
+    tags: workflowState.plan.tags || matchedKeywords,
+    publishDecision:
+      workflowState.readiness.publishReady &&
+      workflowState.review.publish_ready !== false,
+    outputDir,
+    agentEvents: runtime.events,
+  };
+
+  await writeJsonArtifact(runDir, "07-summary.json", summary);
+  await saveLastRun(CONFIG.RUNS_DIR, summary);
+  await appendRunTracker(CONFIG.LOCAL_TRACKER_PATH, summary);
+
+  if (!summary.publishDecision) {
+    logger.warn(`Draft failed publish gate: ${workflowState.title}`);
+    return { ...summary, finalPath: null };
+  }
+
+  const finalSummary = {
+    ...summary,
+    ...workflowState.packaged,
+  };
+
+  await writeJsonArtifact(runDir, "07-summary.json", finalSummary);
+  await saveLastRun(CONFIG.RUNS_DIR, finalSummary);
+
+  return finalSummary;
+}
+
+async function previewFeeds() {
+  const registry = await loadRegistry();
+  const feedsConfig = await loadFeedsConfig();
+
+  logger.info("👀 Previewing ranked candidates\n");
+
+  for (const topic of feedsConfig.topics) {
+    const candidates = await fetchTopicCandidates(topic, registry);
+    logger.info(`\n📚 Topic: ${topic.name}`);
+
+    if (!candidates.length) {
+      logger.warn("   No new matching candidates");
+      continue;
+    }
+
+    candidates.forEach((candidate, index) => {
+      console.log(
+        `   ${index + 1}. ${candidate.item.title}\n      score=${candidate.score} keywords=${candidate.matchedKeywords.join(", ")}\n      ${candidate.item.link}\n`,
+      );
+    });
+  }
+}
+
+async function interactiveMode() {
+  ensureOpenAiConfigured();
+  await fs.mkdir(CONFIG.OUTPUT_DIR, { recursive: true });
+
+  const feedsConfig = await loadFeedsConfig();
   const registry = await loadRegistry();
 
-  /* STEP 1 — SELECT TOPIC */
-
-  const choices = feedsConfig.topics.map((t, i) => ({
-    name: `${t.name} (${t.feeds.length} feeds, ${t.keywords.length} keywords)`,
-    value: i,
+  const choices = feedsConfig.topics.map((topic, index) => ({
+    name: `${topic.name} (${topic.feeds.length} feeds)`,
+    value: index,
   }));
 
   choices.push({
-    name: "⌨️  Type my own topic",
+    name: "Custom topic",
     value: "custom",
   });
 
-  const { topicIndex } = await inquirer.prompt([
+  const { topicChoice } = await inquirer.prompt([
     {
       type: "list",
-      name: "topicIndex",
-      message: "Select a topic or type your own:",
+      name: "topicChoice",
+      message: "Choose an orchestration mode:",
       choices,
     },
   ]);
 
-  // CUSTOM TOPIC — generate directly without feeds
-  if (topicIndex === "custom") {
-    const { title, description, keywords } = await inquirer.prompt([
+  if (topicChoice === "custom") {
+    const customTopic = await inquirer.prompt([
       {
         type: "input",
         name: "title",
-        message: "Blog post title:",
-        validate: (input) => input.trim().length > 0 || "Please enter a title",
+        message: "Article title:",
+        validate: (value) => value.trim().length > 0 || "Title is required",
       },
       {
         type: "input",
         name: "description",
-        message: "What should this post be about? (describe in detail):",
-        validate: (input) =>
-          input.trim().length > 0 || "Please enter a description",
+        message: "Article description:",
+        validate: (value) => value.trim().length > 0 || "Description is required",
       },
       {
         type: "input",
         name: "keywords",
-        message: "Tags/keywords (comma-separated):",
-        default: "tech",
+        message: "Keywords (comma-separated):",
+        default: "ai, systems, engineering",
       },
     ]);
 
-    const tags = keywords.split(",").map((k) => k.trim().toLowerCase());
+    const matchedKeywords = customTopic.keywords
+      .split(",")
+      .map((value) => value.trim().toLowerCase())
+      .filter(Boolean);
 
-    console.log("\n📄 Your Blog Post:");
-    console.log(`   Title: ${title}`);
-    console.log(`   About: ${description}`);
-    console.log(`   Tags: ${tags.join(", ")}`);
-    console.log(
-      `   Estimated cost: ~$${((CONFIG.MAX_TOKENS / 1000) * 0.00015).toFixed(4)}\n`,
-    );
-
-    const { confirm } = await inquirer.prompt([
-      {
-        type: "confirm",
-        name: "confirm",
-        message: "Generate this blog post?",
-        default: true,
-      },
-    ]);
-
-    if (!confirm) {
-      logger.info("❌ Cancelled.");
-      return;
-    }
-
-    const slug = slugify(title, { lower: true, strict: true });
-    const filename = `${new Date().toISOString()}-${slug}.mdx`;
-
-    logger.info(`\n✍️  Generating ${filename}...`);
-
-    const prompt = buildCustomTopicPrompt({
-      title,
-      description,
-      keywords: tags,
-      testMode: TEST_MODE,
+    const result = await orchestrateCandidate({
+      topicName: "Custom topic",
+      matchedKeywords,
+      item: null,
+      customTopic,
+      requireSource: false,
     });
 
-    await openaiLimiter.wait();
-
-    const response = await withRetry(() =>
-      openai.chat.completions.create({
-        model: CONFIG.MODEL,
-        temperature: 0.6,
-        max_tokens: CONFIG.MAX_TOKENS,
-        messages: [
-          {
-            role: "system",
-            content: TEST_MODE
-              ? "You generate short technical test output."
-              : "You are a senior engineer writing rigorous technical briefings.",
-          },
-          { role: "user", content: prompt },
-        ],
-      }),
-    );
-
-    const aiContent = response.choices[0].message.content;
-
-    const content = formatBlogPost({
-      title,
-      slug,
-      date: new Date().toISOString(),
-      tags: tags.slice(0, 4),
-      authors: ["francis"],
-      content: aiContent,
-      sourceUrl: null,
-      excerpt: description.slice(0, 150),
-      readTime: calculateReadTime(aiContent),
-    });
-
-    await fs.writeFile(path.join(CONFIG.OUTPUT_DIR, filename), content, "utf8");
-
-    logger.success(`\n🎉 Created: ${filename}`);
-    logger.info(`📂 Location: ${path.join(CONFIG.OUTPUT_DIR, filename)}`);
-    return;
-  }
-
-  // PREDEFINED TOPIC — use feeds
-  const topic = feedsConfig.topics[topicIndex];
-  logger.info(`\n📚 Topic: ${topic.name}`);
-  logger.info(`🏷️  Keywords: ${topic.keywords.join(", ")}\n`);
-
-  /* STEP 2 — FETCH ALL FEEDS FOR TOPIC */
-
-  logger.info("📡 Fetching feeds...");
-
-  let allItems = [];
-  for (const feedUrl of topic.feeds) {
-    try {
-      const feed = await withRetry(() => parser.parseURL(feedUrl));
-      allItems.push(...feed.items);
-    } catch (err) {
-      logger.warn(`Failed to fetch ${feedUrl}: ${err.message}`);
+    if (result.finalPath) {
+      logger.success(`✅ Published draft: ${result.finalPath}`);
     }
-  }
 
-  /* STEP 3 — FILTER OUT PROCESSED ITEMS */
-
-  const freshItems = allItems.filter(
-    (item) => !registry.has(fingerprintItem(item)),
-  );
-
-  if (!freshItems.length) {
-    logger.warn("No new articles available. All have been processed.");
     return;
   }
 
-  /* STEP 4 — SCORE AND RANK */
+  const topic = feedsConfig.topics[topicChoice];
+  const candidates = await fetchTopicCandidates(topic, registry);
 
-  const scored = selectFeedItems(freshItems, topic, {
-    maxItems: 20,
-    minKeywordMatches: 1,
-    minScore: 2,
-  });
-
-  if (!scored.length) {
-    logger.warn("No articles matched your keywords.");
+  if (!candidates.length) {
+    logger.warn("No fresh candidates found.");
     return;
   }
 
-  /* STEP 5 — SELECT ARTICLE */
-
-  const { articleIndex } = await inquirer.prompt([
+  const { candidateIndex } = await inquirer.prompt([
     {
       type: "list",
-      name: "articleIndex",
-      message: `Select an article (${scored.length} available):`,
-      pageSize: 15,
-      choices: scored.map((s, i) => ({
-        name: `${s.item.title}\n      🏷️  ${s.matchedKeywords.join(", ")}  |  📅 ${s.item.pubDate || "No date"}`,
-        value: i,
+      name: "candidateIndex",
+      message: `Choose a source for ${topic.name}:`,
+      pageSize: 12,
+      choices: candidates.map((candidate, index) => ({
+        name: `${candidate.item.title} [score=${candidate.score}]`,
+        value: index,
       })),
     },
   ]);
 
-  const selected = scored[articleIndex];
+  const candidate = candidates[candidateIndex];
+  const result = await orchestrateCandidate({
+    topicName: topic.name,
+    matchedKeywords: candidate.matchedKeywords,
+    item: candidate.item,
+  });
 
-  /* STEP 6 — CONFIRM */
+  if (result.finalPath) {
+    const hash = fingerprintItem(candidate.item);
+    registry.set(hash, {
+      hash,
+      url: candidate.item.link || null,
+      title: candidate.item.title || null,
+      processedAt: new Date().toISOString(),
+    });
+    await saveRegistry(registry);
+    logger.success(`✅ Published draft: ${result.finalPath}`);
+  }
+}
 
-  console.log("\n📄 Selected Article:");
-  console.log(`   Title: ${selected.item.title}`);
-  console.log(`   Link: ${selected.item.link}`);
-  console.log(`   Keywords: ${selected.matchedKeywords.join(", ")}`);
-  console.log(
-    `   Estimated cost: ~$${((CONFIG.MAX_TOKENS / 1000) * 0.00015).toFixed(4)}\n`,
-  );
+async function autoMode() {
+  ensureOpenAiConfigured();
+  await fs.mkdir(CONFIG.OUTPUT_DIR, { recursive: true });
 
-  const { confirm } = await inquirer.prompt([
-    {
-      type: "confirm",
-      name: "confirm",
-      message: "Generate blog post from this article?",
-      default: true,
-    },
-  ]);
+  const feedsConfig = await loadFeedsConfig();
+  const registry = await loadRegistry();
+  let publishedCount = 0;
 
-  if (!confirm) {
-    logger.info("❌ Cancelled.");
+  logger.info("🚀 Running orchestrated publishing flow");
+
+  for (const topic of feedsConfig.topics) {
+    if (publishedCount >= CONFIG.MAX_TOTAL_POSTS) {
+      break;
+    }
+
+    logger.info(`\n📚 Topic: ${topic.name}`);
+    const candidates = await fetchTopicCandidates(topic, registry);
+
+    if (!candidates.length) {
+      logger.info("No fresh candidates for this topic.");
+      continue;
+    }
+
+    const candidate = candidates[0];
+
+    const result = await orchestrateCandidate({
+      topicName: topic.name,
+      matchedKeywords: candidate.matchedKeywords,
+      item: candidate.item,
+    });
+
+    if (!result.finalPath) {
+      logger.warn(`Skipped publish for ${candidate.item.title}`);
+      continue;
+    }
+
+    const hash = fingerprintItem(candidate.item);
+    registry.set(hash, {
+      hash,
+      url: candidate.item.link || null,
+      title: candidate.item.title || null,
+      processedAt: new Date().toISOString(),
+    });
+    await saveRegistry(registry);
+
+    publishedCount += 1;
+    logger.success(`✅ Published ${result.filename}`);
+  }
+
+  if (publishedCount === 0) {
+    logger.warn("No article passed the publish gate.");
+  }
+}
+
+async function reviewLastRun() {
+  const lastRun = await loadLastRun(CONFIG.RUNS_DIR);
+
+  if (!lastRun) {
+    logger.warn("No previous run found.");
     return;
   }
 
-  /* STEP 7 — GENERATE */
-
-  const slug = slugify(selected.item.title, { lower: true, strict: true });
-  const filename = `${new Date().toISOString()}-${slug}.mdx`;
-
-  logger.info(`\n✍️  Generating ${filename}...`);
-
-  const content = await generateBlogPost(
-    selected.item,
-    selected.matchedKeywords,
-    topic.name,
-  );
-
-  await fs.writeFile(path.join(CONFIG.OUTPUT_DIR, filename), content, "utf8");
-
-  const hash = fingerprintItem(selected.item);
-  registry.set(hash, {
-    hash,
-    url: selected.item.link ?? null,
-    title: selected.item.title ?? null,
-    processedAt: new Date().toISOString(),
-  });
-  await saveRegistry(registry);
-
-  logger.success(`\n🎉 Created: ${filename}`);
-  logger.info(`📂 Location: ${path.join(CONFIG.OUTPUT_DIR, filename)}`);
+  console.log(JSON.stringify(lastRun, null, 2));
 }
-
-/* ==================== PREVIEW MODE ==================== */
-
-async function previewFeeds() {
-  logger.info("👀 PREVIEW MODE — No generation will occur\n");
-
-  const feedsConfig = JSON.parse(
-    await fs.readFile(CONFIG.FEEDS_CONFIG_PATH, "utf8"),
-  );
-  validateConfig(feedsConfig);
-
-  const registry = await loadRegistry();
-
-  for (const topic of feedsConfig.topics) {
-    logger.info(`\n📚 Topic: ${topic.name}`);
-    logger.info(`   Keywords: ${topic.keywords.join(", ")}\n`);
-
-    for (const feedUrl of topic.feeds) {
-      logger.info(`📡 Feed: ${feedUrl}`);
-
-      try {
-        const feed = await withRetry(() => parser.parseURL(feedUrl));
-
-        const freshItems = feed.items.filter(
-          (item) => !registry.has(fingerprintItem(item)),
-        );
-
-        if (freshItems.length === 0) {
-          logger.warn("   ⏭️  No new items (all previously processed)\n");
-          continue;
-        }
-
-        const selected = selectFeedItems(freshItems, topic, {
-          maxItems: 10,
-          minKeywordMatches: 1,
-          minScore: 2,
-        });
-
-        if (!selected.length) {
-          logger.warn("   No matching items for keywords\n");
-          continue;
-        }
-
-        logger.info(`   Found ${selected.length} matching articles:\n`);
-
-        selected.forEach((s, i) => {
-          console.log(`   ${i + 1}. ${s.item.title}`);
-          console.log(`      🔗 ${s.item.link}`);
-          console.log(`      🏷️  ${s.matchedKeywords.join(", ")}`);
-          console.log(`      📅 ${s.item.pubDate || "No date"}\n`);
-        });
-      } catch (err) {
-        logger.error(`   Failed to fetch feed: ${err.message}\n`);
-      }
-    }
-  }
-
-  logger.success("\n✅ Preview complete");
-}
-
-/* ==================== AUTO MODE ==================== */
-
-async function autoMode() {
-  logger.info(`🚀 ScafBlog Generator ${TEST_MODE ? "(TEST MODE)" : "(PROD)"}`);
-
-  if (!fsSync.existsSync(CONFIG.OUTPUT_DIR)) {
-    await fs.mkdir(CONFIG.OUTPUT_DIR, { recursive: true });
-  }
-
-  const registry = await loadRegistry();
-
-  const feedsConfig = JSON.parse(
-    await fs.readFile(CONFIG.FEEDS_CONFIG_PATH, "utf8"),
-  );
-
-  validateConfig(feedsConfig);
-
-  for (const topic of feedsConfig.topics) {
-    logger.info(`📚 Topic: ${topic.name}`);
-
-    for (const feedUrl of topic.feeds) {
-      logger.info(`📡 Fetching feed: ${feedUrl}`);
-
-      const feed = await withRetry(() => parser.parseURL(feedUrl));
-
-      const freshItems = feed.items.filter(
-        (item) => !registry.has(fingerprintItem(item)),
-      );
-
-      if (!freshItems.length) {
-        logger.info("⏭️  No new items");
-        continue;
-      }
-
-      const selected = selectFeedItems(freshItems, topic, {
-        maxItems: 10,
-        minKeywordMatches: 2,
-        minScore: 3,
-      });
-
-      let publishedCount = 0;
-
-      for (const { item, matchedKeywords } of selected) {
-        if (publishedCount >= CONFIG.MAX_TOTAL_POSTS) {
-          logger.info("Post limit reached. Stopping.");
-          return;
-        }
-
-        const hash = fingerprintItem(item);
-        if (registry.has(hash)) continue;
-
-        const slug = slugify(item.title, { lower: true, strict: true });
-        const filename = `${new Date().toISOString()}-${slug}.mdx`;
-
-        logger.info(`✍️  Generating ${filename}`);
-
-        const content = await generateBlogPost(
-          item,
-          matchedKeywords,
-          topic.name,
-        );
-
-        await fs.writeFile(
-          path.join(CONFIG.OUTPUT_DIR, filename),
-          content,
-          "utf8",
-        );
-
-        registry.set(hash, {
-          hash,
-          url: item.link ?? null,
-          title: item.title ?? null,
-          processedAt: new Date().toISOString(),
-        });
-
-        await saveRegistry(registry);
-        logger.success(`✅ Created ${filename}`);
-        publishedCount++;
-      }
-    }
-  }
-
-  logger.success("🎉 Generation complete");
-}
-
-/* ==================== RUN ==================== */
 
 async function run() {
   const args = process.argv.slice(2);
@@ -1551,10 +810,14 @@ async function run() {
     return interactiveMode();
   }
 
+  if (args.includes("--review-last")) {
+    return reviewLastRun();
+  }
+
   return autoMode();
 }
 
-run().catch((err) => {
-  logger.error(err.message);
+run().catch((error) => {
+  logger.error(error.message);
   process.exit(1);
 });

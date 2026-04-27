@@ -45,7 +45,7 @@ ${content}
 
 Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
 
-**Source:** [Read the original discussion](${sourceUrl})
+${sourceUrl ? `**Source:** [Read the original discussion](${sourceUrl})` : "This article was generated from an internal Scafblog topic brief."}
 
 ---
 
