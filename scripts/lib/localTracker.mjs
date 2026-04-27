@@ -22,3 +22,16 @@ export async function appendAgentEvent(filepath, event) {
   current.events.push(event);
   await fs.writeFile(filepath, `${JSON.stringify(current, null, 2)}\n`, "utf8");
 }
+
+export async function loadTracker(filepath) {
+  return readJson(filepath, { runs: [], events: [] });
+}
+
+export async function updateRunTracker(filepath, runId, updater) {
+  const current = await readJson(filepath, { runs: [], events: [] });
+  current.runs = Array.isArray(current.runs) ? current.runs : [];
+  current.runs = current.runs.map((run) =>
+    run.runId === runId ? updater(run) : run,
+  );
+  await fs.writeFile(filepath, `${JSON.stringify(current, null, 2)}\n`, "utf8");
+}

@@ -20,7 +20,12 @@ import {
   executeWorkflow,
   runAgent,
 } from "./lib/agentRuntime.mjs";
-import { appendAgentEvent, appendRunTracker } from "./lib/localTracker.mjs";
+import {
+  appendAgentEvent,
+  appendRunTracker,
+  loadTracker,
+  updateRunTracker,
+} from "./lib/localTracker.mjs";
 import {
   createRunArtifacts,
   loadLastRun,
@@ -30,10 +35,12 @@ import {
 } from "./lib/runArtifacts.mjs";
 import {
   extractTitleAndBody,
+  countWords,
   validateDraft,
   combineReadiness,
 } from "./lib/draftQuality.mjs";
 import {
+  buildSourceQualifierPrompt,
   buildPlannerPrompt,
   buildDraftAgentPrompt,
   buildReviewerPrompt,
@@ -55,10 +62,8 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 const CONFIG = {
   FEEDS_CONFIG_PATH: path.join(__dirname, "../feeds.json"),
-  OUTPUT_DIR:
-    process.env.DIRECT_PUBLISH === "true"
-      ? path.join(__dirname, "../blog")
-      : path.join(__dirname, "../stageArea/drafts"),
+  STAGING_DIR: path.join(__dirname, "../stageArea/drafts"),
+  BLOG_DIR: path.join(__dirname, "../blog"),
   RUNS_DIR: path.join(__dirname, "../stageArea/runs"),
   REGISTRY_PATH: path.join(__dirname, "../stageArea/processed.json"),
   LOCAL_TRACKER_PATH: path.join(__dirname, "../orchestration-state.local.json"),
@@ -66,6 +71,7 @@ const CONFIG = {
   RETRY_DELAY: 2000,
   MODEL: process.env.OPENAI_MODEL || "gpt-4o-mini",
   FALLBACK_MODEL: process.env.OPENAI_FALLBACK_MODEL || "",
+  QUALIFIER_MODEL: process.env.QUALIFIER_MODEL || "",
   PLANNER_MODEL: process.env.PLANNER_MODEL || "",
   WRITER_MODEL: process.env.WRITER_MODEL || "",
   REVIEWER_MODEL: process.env.REVIEWER_MODEL || "",
@@ -74,6 +80,7 @@ const CONFIG = {
   OPENAI_RATE_LIMIT: Number(process.env.OPENAI_RATE_LIMIT || 3),
   MAX_TOTAL_POSTS: Number(process.env.MAX_TOTAL_POSTS || 1),
   REVIEW_THRESHOLD: Number(process.env.REVIEW_THRESHOLD || 80),
+  SOURCE_PASS_THRESHOLD: Number(process.env.SOURCE_PASS_THRESHOLD || 70),
   MIN_WORDS: Number(process.env.MIN_WORDS || 900),
   MAX_CANDIDATES_PER_TOPIC: Number(process.env.MAX_CANDIDATES_PER_TOPIC || 8),
   MAX_REVISION_CYCLES: Number(process.env.MAX_REVISION_CYCLES || 2),
@@ -250,6 +257,55 @@ async function fetchTopicCandidates(topic, registry) {
   return selected;
 }
 
+async function qualifyCandidates(topicName, candidates) {
+  if (!candidates.length) {
+    return [];
+  }
+
+  const payloadCandidates = candidates.map((candidate, index) => ({
+    candidate_index: index,
+    title: candidate.item?.title || "",
+    summary: candidate.item?.contentSnippet || "",
+    url: candidate.item?.link || "",
+    relevance_score: candidate.score,
+    matched_keywords: candidate.matchedKeywords || [],
+  }));
+
+  const result = await callJsonAgent(
+    "You are a strict technical editor. Return only valid JSON.",
+    buildSourceQualifierPrompt({
+      topicName,
+      candidates: payloadCandidates,
+    }),
+    CONFIG.QUALIFIER_MODEL,
+  );
+
+  const evaluations = Array.isArray(result.evaluations) ? result.evaluations : [];
+
+  return candidates
+    .map((candidate, index) => {
+      const evaluation =
+        evaluations.find((entry) => Number(entry.candidate_index) === index) || {};
+
+      return {
+        ...candidate,
+        qualification: {
+          passLikelihood: Number(evaluation.pass_likelihood || 0),
+          recommended: Boolean(evaluation.recommended),
+          rationale: evaluation.rationale || "",
+          strengths: Array.isArray(evaluation.strengths) ? evaluation.strengths : [],
+          risks: Array.isArray(evaluation.risks) ? evaluation.risks : [],
+        },
+      };
+    })
+    .sort((a, b) => {
+      const left = a.qualification?.passLikelihood || 0;
+      const right = b.qualification?.passLikelihood || 0;
+      if (left !== right) return right - left;
+      return (b.score || 0) - (a.score || 0);
+    });
+}
+
 async function packageArticle({
   title,
   body,
@@ -281,7 +337,34 @@ async function packageArticle({
   return { filename, finalPath, slug };
 }
 
+async function publishApprovedDraft({ draftPath, runDir }) {
+  const filename = path.basename(draftPath);
+  const finalPath = path.join(CONFIG.BLOG_DIR, filename);
+  await fs.mkdir(CONFIG.BLOG_DIR, { recursive: true });
+  await fs.copyFile(draftPath, finalPath);
+  await writeJsonArtifact(runDir, "09-publish-result.json", {
+    publishedAt: new Date().toISOString(),
+    draftPath,
+    finalPath,
+  });
+  return { filename, finalPath };
+}
+
 const AGENT_REGISTRY = createAgentRegistry([
+  {
+    id: "source_qualifier",
+    label: "Source Qualifier",
+    stage: "qualification",
+    summarize(output) {
+      return {
+        recommendedCount: output.filter((candidate) => candidate.qualification?.recommended).length,
+        topPassLikelihood: output[0]?.qualification?.passLikelihood || 0,
+      };
+    },
+    async run({ input }) {
+      return qualifyCandidates(input.topicName, input.candidates);
+    },
+  },
   {
     id: "topic_planner",
     label: "Topic Planner",
@@ -323,6 +406,7 @@ const AGENT_REGISTRY = createAgentRegistry([
           matchedKeywords: input.matchedKeywords,
           plan: input.plan,
           customTopic: input.customTopic,
+          minimumWords: CONFIG.MIN_WORDS,
         }),
         CONFIG.WRITER_MODEL,
       );
@@ -349,6 +433,8 @@ const AGENT_REGISTRY = createAgentRegistry([
           plan: input.plan,
           item: input.item,
           customTopic: input.customTopic,
+          priorReview: input.priorReview || null,
+          revisionCycle: input.revisionCycle || 0,
         }),
         CONFIG.REVIEWER_MODEL,
       );
@@ -371,6 +457,9 @@ const AGENT_REGISTRY = createAgentRegistry([
           body: input.body,
           review: input.review,
           plan: input.plan,
+          revisionCycle: input.revisionCycle || 0,
+          currentWordCount: input.currentWordCount || 0,
+          minimumWords: CONFIG.MIN_WORDS,
         }),
         CONFIG.REVISION_MODEL,
       );
@@ -397,10 +486,14 @@ const AGENT_REGISTRY = createAgentRegistry([
         minimumWords: CONFIG.MIN_WORDS,
         requireSource: input.requireSource,
       });
-      const readiness = combineReadiness(
+      const readinessBase = combineReadiness(
         localValidation.score,
         Number(input.review.overall_score || 0),
       );
+      const readiness = {
+        ...readinessBase,
+        publishReady: readinessBase.publishReady && localValidation.passed,
+      };
       const payload = { localValidation, readiness };
       await writeJsonArtifact(input.runDir, "06-validation.json", payload);
       return payload;
@@ -429,6 +522,35 @@ const AGENT_REGISTRY = createAgentRegistry([
       return packaged;
     },
   },
+  {
+    id: "approval_reporter",
+    label: "Approval Reporter",
+    stage: "approval",
+    summarize(output) {
+      return {
+        status: output?.status || null,
+        recommendation: output?.recommended_action || null,
+      };
+    },
+    async run({ input }) {
+      const report = {
+        status: "pending_approval",
+        runId: input.runId,
+        title: input.title,
+        topicName: input.topicName,
+        source_url: input.item?.link || null,
+        reviewer_score: Number(input.review.overall_score || 0),
+        validation_score: Number(input.localValidation.score || 0),
+        readiness_score: Number(input.readiness.combined || 0),
+        revision_cycles: Number(input.revisionCycle || 0),
+        draft_path: input.packaged?.finalPath || null,
+        report_generated_at: new Date().toISOString(),
+        recommended_action: input.readiness.publishReady ? "approve" : "reject",
+      };
+      await writeJsonArtifact(input.runDir, "08-approval-report.json", report);
+      return report;
+    },
+  },
 ]);
 
 async function orchestrateCandidate({
@@ -436,7 +558,7 @@ async function orchestrateCandidate({
   matchedKeywords,
   item,
   customTopic = null,
-  outputDir = CONFIG.OUTPUT_DIR,
+  outputDir = CONFIG.STAGING_DIR,
   requireSource = true,
 }) {
   const label = customTopic ? customTopic.title : item.title;
@@ -497,7 +619,12 @@ async function orchestrateCandidate({
               context.item?.title ||
               "Untitled Draft",
           );
-          return { ...context, draftMarkdown: output, ...parsed };
+          return {
+            ...context,
+            draftMarkdown: output,
+            wordCount: countWords(parsed.body),
+            ...parsed,
+          };
         },
       },
     ],
@@ -514,6 +641,8 @@ async function orchestrateCandidate({
   workflowState.review = await runAgent(runtime, "quality_reviewer", {
     ...workflowState,
     filename: "04-review.json",
+    priorReview: null,
+    revisionCycle: 0,
   });
 
   while (
@@ -527,19 +656,25 @@ async function orchestrateCandidate({
       review: workflowState.review,
       plan: workflowState.plan,
       runDir: workflowState.runDir,
+      revisionCycle: workflowState.revisionCycle + 1,
+      currentWordCount: workflowState.wordCount || 0,
     });
 
+    const priorReview = workflowState.review;
     const parsed = extractTitleAndBody(revisedMarkdown, workflowState.title);
     workflowState = {
       ...workflowState,
       revisedMarkdown,
       revisionCycle: workflowState.revisionCycle + 1,
+      wordCount: countWords(parsed.body),
       ...parsed,
     };
 
     workflowState.review = await runAgent(runtime, "quality_reviewer", {
       ...workflowState,
       filename: `05b-review-after-revision-${workflowState.revisionCycle}.json`,
+      priorReview,
+      revisionCycle: workflowState.revisionCycle,
     });
   }
 
@@ -563,6 +698,11 @@ async function orchestrateCandidate({
       tags: workflowState.plan.tags || workflowState.matchedKeywords,
       outputDir,
     });
+    workflowState.approvalReport = await runAgent(runtime, "approval_reporter", {
+      ...workflowState,
+      runId,
+      outputDir,
+    });
   }
 
   const summary = {
@@ -578,7 +718,19 @@ async function orchestrateCandidate({
     publishDecision:
       workflowState.readiness.publishReady &&
       workflowState.review.publish_ready !== false,
+    status:
+      workflowState.readiness.publishReady &&
+      workflowState.review.publish_ready !== false
+        ? "pending_approval"
+        : "rejected_quality",
+    approvalRequired:
+      workflowState.readiness.publishReady &&
+      workflowState.review.publish_ready !== false,
     outputDir,
+    draftPath: workflowState.packaged?.finalPath || null,
+    approvalReportPath: workflowState.approvalReport
+      ? path.join(runDir, "08-approval-report.json")
+      : null,
     agentEvents: runtime.events,
   };
 
@@ -627,7 +779,7 @@ async function previewFeeds() {
 
 async function interactiveMode() {
   ensureOpenAiConfigured();
-  await fs.mkdir(CONFIG.OUTPUT_DIR, { recursive: true });
+  await fs.mkdir(CONFIG.STAGING_DIR, { recursive: true });
 
   const feedsConfig = await loadFeedsConfig();
   const registry = await loadRegistry();
@@ -687,7 +839,7 @@ async function interactiveMode() {
     });
 
     if (result.finalPath) {
-      logger.success(`✅ Published draft: ${result.finalPath}`);
+      logger.success(`✅ Draft staged for approval: ${result.finalPath}`);
     }
 
     return;
@@ -701,20 +853,48 @@ async function interactiveMode() {
     return;
   }
 
+  logger.info("🤖 Qualifying candidates for pass likelihood...");
+  const qualifiedCandidates = await runAgent(
+    {
+      registry: AGENT_REGISTRY,
+      logger,
+      events: [],
+    },
+    "source_qualifier",
+    {
+      topicName: topic.name,
+      candidates,
+    },
+  );
+
+  const recommendedCandidates = qualifiedCandidates.filter(
+    (candidate) =>
+      candidate.qualification?.recommended &&
+      candidate.qualification?.passLikelihood >= CONFIG.SOURCE_PASS_THRESHOLD,
+  );
+
+  const choicePool = recommendedCandidates.length ? recommendedCandidates : qualifiedCandidates;
+
+  if (!recommendedCandidates.length) {
+    logger.warn(
+      `No candidates cleared pass threshold ${CONFIG.SOURCE_PASS_THRESHOLD}. Showing best available options anyway.`,
+    );
+  }
+
   const { candidateIndex } = await inquirer.prompt([
     {
       type: "list",
       name: "candidateIndex",
       message: `Choose a source for ${topic.name}:`,
       pageSize: 12,
-      choices: candidates.map((candidate, index) => ({
-        name: `${candidate.item.title} [score=${candidate.score}]`,
+      choices: choicePool.map((candidate, index) => ({
+        name: `${candidate.item.title} [rel=${candidate.score} pass=${candidate.qualification?.passLikelihood || 0}]`,
         value: index,
       })),
     },
   ]);
 
-  const candidate = candidates[candidateIndex];
+  const candidate = choicePool[candidateIndex];
   const result = await orchestrateCandidate({
     topicName: topic.name,
     matchedKeywords: candidate.matchedKeywords,
@@ -730,22 +910,22 @@ async function interactiveMode() {
       processedAt: new Date().toISOString(),
     });
     await saveRegistry(registry);
-    logger.success(`✅ Published draft: ${result.finalPath}`);
+    logger.success(`✅ Draft staged for approval: ${result.finalPath}`);
   }
 }
 
 async function autoMode() {
   ensureOpenAiConfigured();
-  await fs.mkdir(CONFIG.OUTPUT_DIR, { recursive: true });
+  await fs.mkdir(CONFIG.STAGING_DIR, { recursive: true });
 
   const feedsConfig = await loadFeedsConfig();
   const registry = await loadRegistry();
-  let publishedCount = 0;
+  let stagedCount = 0;
 
   logger.info("🚀 Running orchestrated publishing flow");
 
   for (const topic of feedsConfig.topics) {
-    if (publishedCount >= CONFIG.MAX_TOTAL_POSTS) {
+    if (stagedCount >= CONFIG.MAX_TOTAL_POSTS) {
       break;
     }
 
@@ -757,7 +937,25 @@ async function autoMode() {
       continue;
     }
 
-    const candidate = candidates[0];
+    const qualifiedCandidates = await runAgent(
+      {
+        registry: AGENT_REGISTRY,
+        logger,
+        events: [],
+      },
+      "source_qualifier",
+      {
+        topicName: topic.name,
+        candidates,
+      },
+    );
+
+    const candidate =
+      qualifiedCandidates.find(
+        (entry) =>
+          entry.qualification?.recommended &&
+          entry.qualification?.passLikelihood >= CONFIG.SOURCE_PASS_THRESHOLD,
+      ) || qualifiedCandidates[0];
 
     const result = await orchestrateCandidate({
       topicName: topic.name,
@@ -779,11 +977,11 @@ async function autoMode() {
     });
     await saveRegistry(registry);
 
-    publishedCount += 1;
-    logger.success(`✅ Published ${result.filename}`);
+    stagedCount += 1;
+    logger.success(`✅ Staged ${result.filename} for approval`);
   }
 
-  if (publishedCount === 0) {
+  if (stagedCount === 0) {
     logger.warn("No article passed the publish gate.");
   }
 }
@@ -799,8 +997,138 @@ async function reviewLastRun() {
   console.log(JSON.stringify(lastRun, null, 2));
 }
 
+async function listPendingRuns() {
+  const tracker = await loadTracker(CONFIG.LOCAL_TRACKER_PATH);
+  const pendingRuns = (tracker.runs || []).filter(
+    (run) => run.status === "pending_approval" && run.draftPath,
+  );
+
+  if (!pendingRuns.length) {
+    logger.warn("No pending approval runs.");
+    return;
+  }
+
+  pendingRuns.forEach((run, index) => {
+    console.log(
+      `${index + 1}. ${run.runId}\n   title=${run.title}\n   topic=${run.topicName}\n   reviewer=${run.reviewerScore} readiness=${run.readiness?.combined}\n   draft=${run.draftPath}\n`,
+    );
+  });
+}
+
+async function resolvePendingRun(runId) {
+  const tracker = await loadTracker(CONFIG.LOCAL_TRACKER_PATH);
+  const pendingRuns = (tracker.runs || []).filter(
+    (run) => run.status === "pending_approval" && run.draftPath,
+  );
+
+  if (!pendingRuns.length) {
+    throw new Error("No pending approval runs.");
+  }
+
+  if (runId) {
+    const matched = pendingRuns.find((run) => run.runId === runId);
+    if (!matched) {
+      throw new Error(`Pending run not found for runId: ${runId}`);
+    }
+    return matched;
+  }
+
+  return pendingRuns[pendingRuns.length - 1];
+}
+
+async function pickPendingRun(actionLabel) {
+  const tracker = await loadTracker(CONFIG.LOCAL_TRACKER_PATH);
+  const pendingRuns = (tracker.runs || []).filter(
+    (run) => run.status === "pending_approval" && run.draftPath,
+  );
+
+  if (!pendingRuns.length) {
+    logger.warn("No pending approval runs.");
+    return null;
+  }
+
+  const { runId } = await inquirer.prompt([
+    {
+      type: "list",
+      name: "runId",
+      message: `${actionLabel}: choose a pending run`,
+      pageSize: 12,
+      choices: pendingRuns.map((run) => ({
+        name: `${run.title} [${run.topicName}] (${run.runId})`,
+        value: run.runId,
+      })),
+    },
+  ]);
+
+  return pendingRuns.find((run) => run.runId === runId) || null;
+}
+
+async function approveRun(targetRun) {
+  const runDir = path.join(CONFIG.RUNS_DIR, targetRun.runId);
+  const published = await publishApprovedDraft({
+    draftPath: targetRun.draftPath,
+    runDir,
+  });
+
+  const updatedRun = {
+    ...targetRun,
+    status: "published",
+    approved: true,
+    publishedAt: new Date().toISOString(),
+    blogPath: published.finalPath,
+  };
+
+  await saveLastRun(CONFIG.RUNS_DIR, updatedRun);
+  await updateRunTracker(CONFIG.LOCAL_TRACKER_PATH, targetRun.runId, () => updatedRun);
+  logger.success(`✅ Published approved draft: ${published.finalPath}`);
+}
+
+async function rejectRun(targetRun) {
+  const updatedRun = {
+    ...targetRun,
+    status: "rejected_by_human",
+    approved: false,
+    rejectedAt: new Date().toISOString(),
+  };
+
+  await saveLastRun(CONFIG.RUNS_DIR, updatedRun);
+  await updateRunTracker(CONFIG.LOCAL_TRACKER_PATH, targetRun.runId, () => updatedRun);
+  logger.warn(`Rejected pending draft: ${targetRun.title}`);
+}
+
+async function approveLastRun(runId = "") {
+  try {
+    const run = await resolvePendingRun(runId);
+    await approveRun(run);
+  } catch (error) {
+    logger.warn(error.message);
+  }
+}
+
+async function rejectLastRun(runId = "") {
+  try {
+    const run = await resolvePendingRun(runId);
+    await rejectRun(run);
+  } catch (error) {
+    logger.warn(error.message);
+  }
+}
+
+async function approvePick() {
+  const run = await pickPendingRun("Approve");
+  if (!run) return;
+  await approveRun(run);
+}
+
+async function rejectPick() {
+  const run = await pickPendingRun("Reject");
+  if (!run) return;
+  await rejectRun(run);
+}
+
 async function run() {
   const args = process.argv.slice(2);
+  const runIdArg = args.find((arg) => arg.startsWith("--run-id="))?.split("=")[1] || "";
 
   if (args.includes("--preview")) {
     return previewFeeds();
@@ -812,6 +1140,26 @@ async function run() {
 
   if (args.includes("--review-last")) {
     return reviewLastRun();
+  }
+
+  if (args.includes("--list-pending")) {
+    return listPendingRuns();
+  }
+
+  if (args.includes("--approve-last")) {
+    return approveLastRun(runIdArg);
+  }
+
+  if (args.includes("--approve-pick")) {
+    return approvePick();
+  }
+
+  if (args.includes("--reject-last")) {
+    return rejectLastRun(runIdArg);
+  }
+
+  if (args.includes("--reject-pick")) {
+    return rejectPick();
   }
 
   return autoMode();

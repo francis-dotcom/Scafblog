@@ -17,9 +17,11 @@ Scafblog is a live Docusaurus site with an AI-orchestrated publishing pipeline. 
 5. `Revision Agent`
    Rewrites the article when the review score is below threshold or revision is required.
 6. `Publish Validator`
-   Runs local checks on title originality, word count, themed structure, and publish readiness.
+   Runs local checks on title originality, source quality, word count, themed structure, title quality, and publish readiness.
 7. `Publisher`
-   Saves approved posts into `stageArea/drafts/` by default, or directly into `blog/` when `DIRECT_PUBLISH=true`.
+   Saves approved posts into `stageArea/drafts/` first.
+8. `Approval Reporter`
+   Writes a pending-approval report and waits for human confirmation before final publishing.
 
 Every run writes artifacts to `stageArea/runs/<timestamp>-<slug>/` so the full reasoning chain is inspectable:
 - `01-source.json`
@@ -74,10 +76,40 @@ Review the last orchestration run:
 npm run review:last
 ```
 
-Direct-publish to the live `blog/` directory:
+List all pending approval runs:
 
 ```bash
-DIRECT_PUBLISH=true npm run orchestrate
+npm run list:pending
+```
+
+Approve the last staged draft and publish it to `blog/`:
+
+```bash
+npm run approve:last
+```
+
+Approve a specific pending run by picking from a list:
+
+```bash
+npm run approve:pick
+```
+
+Approve a specific run directly by id:
+
+```bash
+node scripts/feed-to-draft.mjs --approve-last --run-id=<runId>
+```
+
+Reject the last staged draft:
+
+```bash
+npm run reject:last
+```
+
+Reject by picking from pending runs:
+
+```bash
+npm run reject:pick
 ```
 
 ## Environment
@@ -113,7 +145,8 @@ npm run generate:pr
 
 That flow:
 - generates an article into `stageArea/drafts/`
-- moves the latest approved draft into `blog/`
-- opens a GitHub pull request for review
+- waits for human approval
+- after approval, you can publish to `blog/`
+- then open a GitHub pull request for review if desired
 
 The live site remains a normal Docusaurus deployment. The AI system only changes how content is produced and gated before publishing.

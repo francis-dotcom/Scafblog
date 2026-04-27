@@ -43,7 +43,8 @@ const config = {
         id: "get-trained",
         path: "get-trained",
         routeBasePath: "get-trained",
-        sidebarPath: "./sidebars.js",
+        // sidebarPath: "./sidebars.js",
+        sidebarPath: "./get-trained/sidebars.js", // ← UPDATED
         // editUrl: 'https://github.com/francis-dotcom/Scafblog/edit/main/',
       },
     ],
