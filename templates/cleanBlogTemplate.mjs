@@ -7,7 +7,6 @@ function generateBlogPost({
   title,
   slug,
   date,
-  topicName = "Scafblog",
   tags,
   authors = ["francis"],
   content,
@@ -16,8 +15,6 @@ function generateBlogPost({
   featuredImage = null,
   photoCredit = null,
   creditSourceUrl = null,
-  imageMode = "none",
-  layoutVariant = "analysis",
   readTime = "5 min read",
 }) {
   const escapeAttribute = (value) =>
@@ -40,28 +37,14 @@ ${imageFrontmatter}---
  
 <!--truncate-->
  
-import ArticleLayout from "@site/src/components/ArticleLayout";
 import SocialShare from "@site/src/components/SocialShare";
 import GiscusComments from "@site/src/components/GiscusComments";
 import Newsletter from "@site/src/components/Newsletter";
 
-<ArticleLayout
-  title="${escapeAttribute(title)}"
-  topicName="${escapeAttribute(topicName)}"
-  excerpt="${escapeAttribute(description)}"
-  tags={[${tags.map((tag) => `"${tag}"`).join(", ")}]}
-  featuredImage={${featuredImage ? `"${featuredImage}"` : "null"}}
-  photoCredit={${photoCredit ? `"${escapeAttribute(photoCredit)}"` : "null"}}
-  creditSourceUrl={${creditSourceUrl ? `"${creditSourceUrl}"` : "null"}}
-  readTime="${escapeAttribute(readTime)}"
-  sourceUrl={${sourceUrl ? `"${sourceUrl}"` : "null"}}
-  imageMode="${imageMode}"
-  layoutVariant="${layoutVariant}"
->
+${featuredImage ? `![${escapeAttribute(title)}](${featuredImage})` : ""}
+${photoCredit ? `\n*Photo credit: ${creditSourceUrl ? `[${escapeAttribute(photoCredit)}](${creditSourceUrl})` : escapeAttribute(photoCredit)}*\n` : ""}
 
 ${content}
-
-</ArticleLayout>
 
 ---
 
