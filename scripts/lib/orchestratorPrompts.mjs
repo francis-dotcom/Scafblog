@@ -74,6 +74,7 @@ export function buildImageDecisionPrompt({
   sourceTitle = "",
   sourceSummary = "",
   sourceUrl = "",
+  articleType = "",
 }) {
   return `
 You are the Image Decision agent in an automated publishing system.
@@ -117,6 +118,7 @@ Decision policy:
 Article title: ${title}
 Topic: ${topicName}
 Tags: ${tags.join(", ")}
+Article type: ${articleType || "technical"}
 Source title: ${sourceTitle}
 Source summary: ${sourceSummary}
 Source url: ${sourceUrl}
@@ -151,12 +153,16 @@ Return valid JSON with this exact shape:
 Topic title: ${customTopic.title}
 Topic description: ${customTopic.description}
 Keywords: ${keywords.join(", ")}
+Article type: ${customTopic.articleType || "technical"}
+Target length: ${customTopic.targetLength?.label || "medium"} (${customTopic.targetLength?.minimumWords || 900}+ words)
 
 Rules:
 - Plan for a technically serious article.
 - Outline must contain 6 to 8 steps.
 - Tags must be short, lowercase, and useful for a blog.
 - Risks should name what could make the article weak or generic.
+- Respect the requested article type in tone, structure, and audience.
+- Respect the requested length by adjusting depth, section count, and level of detail.
 `;
   }
 
@@ -204,6 +210,9 @@ export function buildDraftAgentPrompt({
   customTopic,
   minimumWords = 900,
   recoveryStrategy = null,
+  reviewFeedback = null,
+  redraftCycle = 0,
+  existingBody = "",
 }) {
   const planBlock = `
 Execution plan:
@@ -228,10 +237,17 @@ ${planBlock}
 ${recoveryStrategy ? `Recovery strategy:
 ${JSON.stringify(recoveryStrategy, null, 2)}` : ""}
 
+${reviewFeedback ? `Review feedback to address:
+${JSON.stringify(reviewFeedback, null, 2)}` : ""}
+
 Use the plan to write the article. Keep the writing technical, specific, and publication-ready.
+Requested article type: ${customTopic.articleType || "technical"}
+Requested length: ${customTopic.targetLength?.label || "medium"}
 You must produce a substantial article of at least ${minimumWords} words.
 Target range: ${minimumWords}-${minimumWords + 500} words.
 Do not end early. Add concrete examples, implementation detail, comparisons, and operational implications if needed to reach depth.
+${reviewFeedback ? `This is corrective redraft cycle ${redraftCycle}. Rewrite the article to directly fix the review issues while preserving the strongest ideas from the prior draft.` : ""}
+${existingBody ? `Current draft to improve:\n${existingBody}` : ""}
 
 ${buildCustomTopicPrompt({
   title: customTopic.title,
@@ -250,10 +266,15 @@ ${planBlock}
 ${recoveryStrategy ? `Recovery strategy:
 ${JSON.stringify(recoveryStrategy, null, 2)}` : ""}
 
+${reviewFeedback ? `Review feedback to address:
+${JSON.stringify(reviewFeedback, null, 2)}` : ""}
+
 Use the source article only as the trigger for analysis. Do not summarize it.
 You must produce a substantial article of at least ${minimumWords} words.
 Target range: ${minimumWords}-${minimumWords + 500} words.
 Do not end early. Add concrete examples, implementation detail, comparisons, and operational implications if needed to reach depth.
+${reviewFeedback ? `This is corrective redraft cycle ${redraftCycle}. Rewrite the article to directly fix the review issues while preserving the strongest ideas from the prior draft.` : ""}
+${existingBody ? `Current draft to improve:\n${existingBody}` : ""}
 
 ${buildPerspectivePrompt({
   item,

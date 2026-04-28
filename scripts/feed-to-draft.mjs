@@ -134,6 +134,40 @@ async function saveRegistry(registry) {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+function resolveMinimumWords(customTopic) {
+  const selected = customTopic?.targetLength?.minimumWords;
+  const parsed = Number(selected);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : CONFIG.MIN_WORDS;
+}
+
+async function importCustomImage({ imagePath, slug }) {
+  const absoluteInputPath = path.resolve(imagePath);
+
+  if (!fsSync.existsSync(absoluteInputPath)) {
+    throw new Error(`Custom image not found: ${absoluteInputPath}`);
+  }
+
+  const extension = path.extname(absoluteInputPath).toLowerCase() || ".png";
+  const allowed = new Set([".jpg", ".jpeg", ".png", ".webp", ".gif", ".svg"]);
+  const safeExtension = allowed.has(extension) ? extension : ".png";
+  const assetDir = path.join(__dirname, "../static/img/blog/uploaded");
+  const digest = crypto.createHash("sha1").update(absoluteInputPath).digest("hex").slice(0, 8);
+  const filename = `${slug}-${digest}${safeExtension === ".jpeg" ? ".jpg" : safeExtension}`;
+  const finalPath = path.join(assetDir, filename);
+
+  await fs.mkdir(assetDir, { recursive: true });
+  await fs.copyFile(absoluteInputPath, finalPath);
+
+  return {
+    featuredImage: `/img/blog/uploaded/${filename}`,
+    imageSource: "custom_upload",
+    originalUrl: absoluteInputPath,
+    photoCredit: "Provided by author",
+    creditSourceUrl: null,
+    downloaded: true,
+  };
+}
+
 async function withRetry(fn) {
   let lastError;
 
@@ -317,6 +351,7 @@ async function packageArticle({
   tags,
   topicName,
   item,
+  customTopic = null,
   sourceUrl,
   excerpt,
   outputDir,
@@ -335,7 +370,12 @@ async function packageArticle({
     downloaded: false,
   };
 
-  if (imageDecision?.image_mode === "source" && item) {
+  if (customTopic?.imagePath) {
+    imageResult = await importCustomImage({
+      imagePath: customTopic.imagePath,
+      slug,
+    });
+  } else if (imageDecision?.image_mode === "source" && item) {
     imageResult =
       imagePreview ||
       (await resolveFeaturedImage({
@@ -480,6 +520,7 @@ const AGENT_REGISTRY = createAgentRegistry([
           title: input.title,
           topicName: input.topicName,
           tags: input.tags || [],
+          articleType: input.customTopic?.articleType || "",
           sourceTitle: input.item?.title || input.customTopic?.title || "",
           sourceSummary: input.item?.contentSnippet || input.customTopic?.description || "",
           sourceUrl: input.item?.link || "",
@@ -506,12 +547,15 @@ const AGENT_REGISTRY = createAgentRegistry([
           matchedKeywords: input.matchedKeywords,
           plan: input.plan,
           customTopic: input.customTopic,
-          minimumWords: CONFIG.MIN_WORDS,
+          minimumWords: resolveMinimumWords(input.customTopic),
           recoveryStrategy: input.recoveryStrategy || null,
+          reviewFeedback: input.reviewFeedback || null,
+          redraftCycle: input.redraftCycle || 0,
+          existingBody: input.existingBody || "",
         }),
         CONFIG.WRITER_MODEL,
       );
-      await writeTextArtifact(input.runDir, "03-draft.md", markdown);
+      await writeTextArtifact(input.runDir, input.filename || "03-draft.md", markdown);
       return markdown;
     },
   },
@@ -560,7 +604,7 @@ const AGENT_REGISTRY = createAgentRegistry([
           plan: input.plan,
           revisionCycle: input.revisionCycle || 0,
           currentWordCount: input.currentWordCount || 0,
-          minimumWords: CONFIG.MIN_WORDS,
+          minimumWords: resolveMinimumWords(input.customTopic),
         }),
         CONFIG.REVISION_MODEL,
       );
@@ -585,7 +629,7 @@ const AGENT_REGISTRY = createAgentRegistry([
         sourceTitle: input.item?.title || "",
         sourceSummary: input.item?.contentSnippet || input.customTopic?.description || "",
         sourceUrl: input.item?.link || "",
-        minimumWords: CONFIG.MIN_WORDS,
+        minimumWords: resolveMinimumWords(input.customTopic),
         requireSource: input.requireSource,
         topicName: input.topicName || "",
         tags: input.tags || [],
@@ -625,6 +669,7 @@ const AGENT_REGISTRY = createAgentRegistry([
         tags: input.tags,
         topicName: input.topicName,
         item: input.item,
+        customTopic: input.customTopic || null,
         sourceUrl: input.item?.link || null,
         excerpt: input.item?.contentSnippet || input.customTopic?.description || "",
         outputDir: input.outputDir,
@@ -783,21 +828,20 @@ async function orchestrateCandidate({
     (Number(workflowState.review?.overall_score || 0) < CONFIG.REVIEW_THRESHOLD ||
       workflowState.review?.must_revise)
   ) {
-    const revisedMarkdown = await runAgent(runtime, "revision_agent", {
-      title: workflowState.title,
-      body: workflowState.body,
-      review: workflowState.review,
-      plan: workflowState.plan,
+    const redraftedMarkdown = await runAgent(runtime, "draft_writer", {
+      ...workflowState,
       runDir: workflowState.runDir,
-      revisionCycle: workflowState.revisionCycle + 1,
-      currentWordCount: workflowState.wordCount || 0,
+      reviewFeedback: workflowState.review,
+      redraftCycle: workflowState.revisionCycle + 1,
+      existingBody: workflowState.body,
+      filename: `05a-redraft-cycle-${workflowState.revisionCycle + 1}.md`,
     });
 
-    const priorReview = workflowState.review;
-    const parsed = extractTitleAndBody(revisedMarkdown, workflowState.title);
+    let priorReview = workflowState.review;
+    let parsed = extractTitleAndBody(redraftedMarkdown, workflowState.title);
     workflowState = {
       ...workflowState,
-      revisedMarkdown,
+      draftMarkdown: redraftedMarkdown,
       revisionCycle: workflowState.revisionCycle + 1,
       wordCount: countWords(parsed.body),
       ...parsed,
@@ -805,7 +849,41 @@ async function orchestrateCandidate({
 
     workflowState.review = await runAgent(runtime, "quality_reviewer", {
       ...workflowState,
-      filename: `05b-review-after-revision-${workflowState.revisionCycle}.json`,
+      filename: `05b-review-after-redraft-${workflowState.revisionCycle}.json`,
+      priorReview,
+      revisionCycle: workflowState.revisionCycle,
+    });
+
+    if (
+      Number(workflowState.review?.overall_score || 0) >= CONFIG.REVIEW_THRESHOLD &&
+      !workflowState.review?.must_revise
+    ) {
+      break;
+    }
+
+    const revisedMarkdown = await runAgent(runtime, "revision_agent", {
+      title: workflowState.title,
+      body: workflowState.body,
+      review: workflowState.review,
+      plan: workflowState.plan,
+      runDir: workflowState.runDir,
+      customTopic: workflowState.customTopic,
+      revisionCycle: workflowState.revisionCycle,
+      currentWordCount: workflowState.wordCount || 0,
+    });
+
+    priorReview = workflowState.review;
+    parsed = extractTitleAndBody(revisedMarkdown, workflowState.title);
+    workflowState = {
+      ...workflowState,
+      revisedMarkdown,
+      wordCount: countWords(parsed.body),
+      ...parsed,
+    };
+
+    workflowState.review = await runAgent(runtime, "quality_reviewer", {
+      ...workflowState,
+      filename: `05c-review-after-revision-${workflowState.revisionCycle}.json`,
       priorReview,
       revisionCycle: workflowState.revisionCycle,
     });
@@ -1010,6 +1088,53 @@ async function interactiveMode() {
         name: "keywords",
         message: "Keywords (comma-separated):",
         default: "ai, systems, engineering",
+      },
+      {
+        type: "list",
+        name: "articleType",
+        message: "What kind of article is this?",
+        choices: [
+          { name: "Technical", value: "technical" },
+          { name: "Scientific", value: "scientific" },
+          { name: "Blog / Editorial", value: "blog" },
+          { name: "Explainer", value: "explainer" },
+          { name: "Tutorial / Guide", value: "tutorial" },
+          { name: "Case Study", value: "case-study" },
+          { name: "Opinion / Essay", value: "opinion" },
+        ],
+        default: "technical",
+      },
+      {
+        type: "list",
+        name: "targetLength",
+        message: "How long should it be?",
+        choices: [
+          { name: "Short (600-900 words)", value: { label: "short", minimumWords: 600 } },
+          { name: "Medium (900-1400 words)", value: { label: "medium", minimumWords: 900 } },
+          { name: "Long (1400-2200 words)", value: { label: "long", minimumWords: 1400 } },
+          { name: "Deep dive (2200+ words)", value: { label: "deep-dive", minimumWords: 2200 } },
+        ],
+        default: { label: "medium", minimumWords: 900 },
+      },
+      {
+        type: "confirm",
+        name: "hasCustomImage",
+        message: "Do you have an image to use for this article?",
+        default: false,
+      },
+      {
+        type: "input",
+        name: "imagePath",
+        message: "Local image path:",
+        when: (answers) => Boolean(answers.hasCustomImage),
+        validate: (value) => {
+          if (!value || !value.trim()) {
+            return "Image path is required";
+          }
+          const resolved = path.resolve(value.trim());
+          return fsSync.existsSync(resolved) || `Image not found: ${resolved}`;
+        },
+        filter: (value) => value.trim(),
       },
     ]);
 
