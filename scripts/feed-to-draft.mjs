@@ -41,6 +41,7 @@ import {
 } from "./lib/draftQuality.mjs";
 import {
   buildSourceQualifierPrompt,
+  buildRecoveryStrategistPrompt,
   buildPlannerPrompt,
   buildDraftAgentPrompt,
   buildReviewerPrompt,
@@ -72,6 +73,7 @@ const CONFIG = {
   MODEL: process.env.OPENAI_MODEL || "gpt-4o-mini",
   FALLBACK_MODEL: process.env.OPENAI_FALLBACK_MODEL || "",
   QUALIFIER_MODEL: process.env.QUALIFIER_MODEL || "",
+  RECOVERY_MODEL: process.env.RECOVERY_MODEL || "",
   PLANNER_MODEL: process.env.PLANNER_MODEL || "",
   WRITER_MODEL: process.env.WRITER_MODEL || "",
   REVIEWER_MODEL: process.env.REVIEWER_MODEL || "",
@@ -84,6 +86,7 @@ const CONFIG = {
   MIN_WORDS: Number(process.env.MIN_WORDS || 900),
   MAX_CANDIDATES_PER_TOPIC: Number(process.env.MAX_CANDIDATES_PER_TOPIC || 8),
   MAX_REVISION_CYCLES: Number(process.env.MAX_REVISION_CYCLES || 2),
+  RECOVERY_MAX_REVISION_CYCLES: Number(process.env.RECOVERY_MAX_REVISION_CYCLES || 3),
 };
 
 const openaiLimiter = new RateLimiter(CONFIG.OPENAI_RATE_LIMIT, 60000);
@@ -366,6 +369,29 @@ const AGENT_REGISTRY = createAgentRegistry([
     },
   },
   {
+    id: "recovery_strategist",
+    label: "Recovery Strategist",
+    stage: "recovery",
+    summarize(output) {
+      return {
+        salvageable: Boolean(output?.salvageable),
+        reframedAngle: output?.reframed_angle || null,
+      };
+    },
+    async run({ input }) {
+      const strategy = await callJsonAgent(
+        "You are a sharp editorial recovery strategist. Return only valid JSON.",
+        buildRecoveryStrategistPrompt({
+          topicName: input.topicName,
+          item: input.item,
+        }),
+        CONFIG.RECOVERY_MODEL,
+      );
+      await writeJsonArtifact(input.runDir, "01b-recovery-strategy.json", strategy);
+      return strategy;
+    },
+  },
+  {
     id: "topic_planner",
     label: "Topic Planner",
     stage: "planning",
@@ -383,6 +409,7 @@ const AGENT_REGISTRY = createAgentRegistry([
           keywords: input.matchedKeywords,
           item: input.item,
           customTopic: input.customTopic,
+          recoveryStrategy: input.recoveryStrategy || null,
         }),
         CONFIG.PLANNER_MODEL,
       );
@@ -407,6 +434,7 @@ const AGENT_REGISTRY = createAgentRegistry([
           plan: input.plan,
           customTopic: input.customTopic,
           minimumWords: CONFIG.MIN_WORDS,
+          recoveryStrategy: input.recoveryStrategy || null,
         }),
         CONFIG.WRITER_MODEL,
       );
@@ -478,13 +506,18 @@ const AGENT_REGISTRY = createAgentRegistry([
       };
     },
     async run({ input }) {
-      const localValidation = validateDraft({
+      const localValidation = await validateDraft({
         title: input.title,
         body: input.body,
         sourceTitle: input.item?.title || "",
+        sourceSummary: input.item?.contentSnippet || input.customTopic?.description || "",
         sourceUrl: input.item?.link || "",
         minimumWords: CONFIG.MIN_WORDS,
         requireSource: input.requireSource,
+        topicName: input.topicName || "",
+        tags: input.tags || [],
+        excerpt: input.item?.contentSnippet || input.customTopic?.description || "",
+        blogDir: CONFIG.BLOG_DIR,
       });
       const readinessBase = combineReadiness(
         localValidation.score,
@@ -560,6 +593,8 @@ async function orchestrateCandidate({
   customTopic = null,
   outputDir = CONFIG.STAGING_DIR,
   requireSource = true,
+  pipelineProfile = "primary",
+  qualification = null,
 }) {
   const label = customTopic ? customTopic.title : item.title;
   const { runId, runDir } = await createRunArtifacts(CONFIG.RUNS_DIR, label);
@@ -594,6 +629,18 @@ async function orchestrateCandidate({
   const baseState = await executeWorkflow(
     runtime,
     [
+      {
+        agentId: "recovery_strategist",
+        when(context) {
+          return context.pipelineProfile === "recovery";
+        },
+        input(context) {
+          return context;
+        },
+        assign(context, output) {
+          return { ...context, recoveryStrategy: output };
+        },
+      },
       {
         agentId: "topic_planner",
         input(context) {
@@ -634,9 +681,15 @@ async function orchestrateCandidate({
       item,
       customTopic,
       runDir,
+      pipelineProfile,
+      qualification,
     },
   );
   let workflowState = { ...baseState, revisionCycle: 0 };
+  const maxRevisionCycles =
+    pipelineProfile === "recovery"
+      ? CONFIG.RECOVERY_MAX_REVISION_CYCLES
+      : CONFIG.MAX_REVISION_CYCLES;
 
   workflowState.review = await runAgent(runtime, "quality_reviewer", {
     ...workflowState,
@@ -646,7 +699,7 @@ async function orchestrateCandidate({
   });
 
   while (
-    workflowState.revisionCycle < CONFIG.MAX_REVISION_CYCLES &&
+    workflowState.revisionCycle < maxRevisionCycles &&
     (Number(workflowState.review?.overall_score || 0) < CONFIG.REVIEW_THRESHOLD ||
       workflowState.review?.must_revise)
   ) {
@@ -681,6 +734,7 @@ async function orchestrateCandidate({
   const validation = await runAgent(runtime, "publish_validator", {
     ...workflowState,
     requireSource,
+    tags: workflowState.plan.tags || workflowState.matchedKeywords,
   });
 
   workflowState = {
@@ -711,6 +765,8 @@ async function orchestrateCandidate({
     topicName,
     sourceTitle: item?.title || customTopic?.title || null,
     sourceUrl: item?.link || null,
+    pipelineProfile,
+    sourceQualification: qualification,
     reviewerScore: Number(workflowState.review.overall_score || 0),
     localValidation: workflowState.localValidation,
     readiness: workflowState.readiness,
@@ -888,17 +944,33 @@ async function interactiveMode() {
       message: `Choose a source for ${topic.name}:`,
       pageSize: 12,
       choices: choicePool.map((candidate, index) => ({
-        name: `${candidate.item.title} [rel=${candidate.score} pass=${candidate.qualification?.passLikelihood || 0}]`,
+        name: `${candidate.item.title} [rel=${candidate.score} pass=${candidate.qualification?.passLikelihood || 0} ${candidate.qualification?.recommended && candidate.qualification?.passLikelihood >= CONFIG.SOURCE_PASS_THRESHOLD ? "suggested" : "alternate"}]`,
         value: index,
       })),
     },
   ]);
 
   const candidate = choicePool[candidateIndex];
+  const pipelineProfile =
+    candidate.qualification?.recommended &&
+    candidate.qualification?.passLikelihood >= CONFIG.SOURCE_PASS_THRESHOLD
+      ? "primary"
+      : "recovery";
+
+  if (pipelineProfile === "recovery") {
+    logger.warn(
+      `Selected source did not clear the suggested pass threshold. Routing through recovery branch.`,
+    );
+  } else {
+    logger.info(`Selected source cleared pass threshold. Using primary branch.`);
+  }
+
   const result = await orchestrateCandidate({
     topicName: topic.name,
     matchedKeywords: candidate.matchedKeywords,
     item: candidate.item,
+    pipelineProfile,
+    qualification: candidate.qualification,
   });
 
   if (result.finalPath) {
@@ -961,6 +1033,12 @@ async function autoMode() {
       topicName: topic.name,
       matchedKeywords: candidate.matchedKeywords,
       item: candidate.item,
+      pipelineProfile:
+        candidate.qualification?.recommended &&
+        candidate.qualification?.passLikelihood >= CONFIG.SOURCE_PASS_THRESHOLD
+          ? "primary"
+          : "recovery",
+      qualification: candidate.qualification,
     });
 
     if (!result.finalPath) {

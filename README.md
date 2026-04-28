@@ -17,7 +17,7 @@ Scafblog is a live Docusaurus site with an AI-orchestrated publishing pipeline. 
 5. `Revision Agent`
    Rewrites the article when the review score is below threshold or revision is required.
 6. `Publish Validator`
-   Runs local checks on title originality, source quality, word count, themed structure, title quality, and publish readiness.
+   Runs local checks on similarity risk, source quality, banned topics, tone, redundancy, metadata completeness, unsafe claims, link integrity, SEO quality, word count, and publish readiness.
 7. `Publisher`
    Saves approved posts into `stageArea/drafts/` first.
 8. `Approval Reporter`

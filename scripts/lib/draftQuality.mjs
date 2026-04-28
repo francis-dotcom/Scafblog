@@ -1,3 +1,6 @@
+import fs from "fs/promises";
+import path from "path";
+
 export function extractTitleAndBody(markdown, fallbackTitle = "Untitled Draft") {
   const text = String(markdown || "").trim();
   const lines = text.split("\n");
@@ -24,32 +27,9 @@ export function countWords(text) {
 
 function normalizeTokens(text) {
   const stopwords = new Set([
-    "a",
-    "an",
-    "and",
-    "are",
-    "as",
-    "at",
-    "be",
-    "by",
-    "for",
-    "from",
-    "how",
-    "in",
-    "into",
-    "is",
-    "it",
-    "of",
-    "on",
-    "or",
-    "that",
-    "the",
-    "to",
-    "via",
-    "what",
-    "when",
-    "why",
-    "with",
+    "a", "an", "and", "are", "as", "at", "be", "by", "for", "from",
+    "how", "in", "into", "is", "it", "of", "on", "or", "that", "the",
+    "to", "via", "what", "when", "why", "with",
   ]);
 
   return String(text || "")
@@ -105,19 +85,173 @@ function hasLowSignalTitlePattern(title) {
   );
 }
 
-export function validateDraft({
+function buildSlug(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, "")
+    .trim()
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-");
+}
+
+function extractDomain(rawUrl) {
+  try {
+    return new URL(rawUrl).hostname.replace(/^www\./, "");
+  } catch {
+    return "";
+  }
+}
+
+function stripHtml(html) {
+  return String(html || "")
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+async function fetchSourceText(sourceUrl) {
+  if (!sourceUrl) return { ok: false, sourceText: "", status: null };
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 6000);
+
+  try {
+    const res = await fetch(sourceUrl, {
+      method: "GET",
+      redirect: "follow",
+      signal: controller.signal,
+      headers: {
+        "user-agent": "ScafblogValidator/1.0",
+        accept: "text/html,application/xhtml+xml",
+      },
+    });
+
+    const contentType = res.headers.get("content-type") || "";
+    const text = contentType.includes("text/html")
+      ? stripHtml(await res.text())
+      : "";
+
+    return {
+      ok: res.ok,
+      sourceText: text.slice(0, 12000),
+      status: res.status,
+    };
+  } catch {
+    return { ok: false, sourceText: "", status: null };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function loadExistingBlogCorpus(blogDir) {
+  try {
+    const files = await fs.readdir(blogDir);
+    const mdxFiles = files.filter((file) => file.endsWith(".mdx"));
+    const contents = await Promise.all(
+      mdxFiles.map(async (file) => ({
+        file,
+        text: await fs.readFile(path.join(blogDir, file), "utf8"),
+      })),
+    );
+    return contents;
+  } catch {
+    return [];
+  }
+}
+
+function maxCorpusSimilarity(title, body, corpus) {
+  let maxTitleSimilarity = 0;
+  let maxBodySimilarity = 0;
+  let closestFile = null;
+
+  for (const entry of corpus) {
+    const titleSimilarity = jaccardSimilarity(title, entry.text);
+    const bodySimilarity = jaccardSimilarity(body, entry.text.slice(0, 6000));
+
+    if (bodySimilarity > maxBodySimilarity) {
+      maxBodySimilarity = bodySimilarity;
+      maxTitleSimilarity = titleSimilarity;
+      closestFile = entry.file;
+    }
+  }
+
+  return {
+    maxTitleSimilarity,
+    maxBodySimilarity,
+    closestFile,
+  };
+}
+
+function containsBannedTopic(text) {
+  return /\b(casino|sportsbook|gambling|porn|onlyfans|adult content|betting tips|crypto pump)\b/i.test(
+    String(text || ""),
+  );
+}
+
+function hasUnsafeClaims(text, topicName) {
+  const basePatterns = [
+    /\bguaranteed returns?\b/i,
+    /\bcan't fail\b/i,
+    /\brisk[- ]free\b/i,
+    /\b100%\s*(secure|safe|guaranteed)\b/i,
+    /\bnot legal advice\b/i,
+  ];
+
+  const securityPatterns =
+    topicName === "Cybersecurity"
+      ? [/\bunhackable\b/i, /\bimpossible to breach\b/i, /\bcomplete security\b/i]
+      : [];
+
+  return [...basePatterns, ...securityPatterns].some((pattern) =>
+    pattern.test(String(text || "")),
+  );
+}
+
+function descriptionFromExcerpt(excerpt, body) {
+  return String(excerpt || "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .slice(0, 170) || String(body || "").replace(/[#*`]/g, "").trim().slice(0, 170);
+}
+
+function titleContainsTag(title, tags) {
+  const lowerTitle = String(title || "").toLowerCase();
+  return (tags || []).some((tag) => lowerTitle.includes(String(tag || "").toLowerCase()));
+}
+
+function titleBodySimilarityToSource(title, body, sourceTitle, sourceSummary, sourceText) {
+  return {
+    titleSourceSimilarity: sourceTitle ? jaccardSimilarity(title, sourceTitle) : 0,
+    bodySummarySimilarity: sourceSummary ? jaccardSimilarity(body, sourceSummary) : 0,
+    bodySourceTextSimilarity: sourceText ? jaccardSimilarity(body, sourceText) : 0,
+  };
+}
+
+export async function validateDraft({
   title,
   body,
   sourceTitle = "",
+  sourceSummary = "",
   sourceUrl = "",
   minimumWords = 900,
   requireSource = true,
+  topicName = "",
+  tags = [],
+  excerpt = "",
+  blogDir = "",
 }) {
   const wordCount = countWords(body);
   const themeLabels = (body.match(/^###\s+/gm) || []).length;
   const titleMatchesSource =
     sourceTitle &&
     title.trim().toLowerCase() === String(sourceTitle).trim().toLowerCase();
+
+  const titleLength = String(title || "").trim().length;
+  const description = descriptionFromExcerpt(excerpt, body);
+  const descriptionLength = description.length;
+  const slug = buildSlug(title);
   const sourceUrlIsHttps = !requireSource
     ? true
     : (() => {
@@ -128,8 +262,40 @@ export function validateDraft({
           return false;
         }
       })();
-  const titleLength = String(title || "").trim().length;
-  const titleSimilarity = sourceTitle ? jaccardSimilarity(title, sourceTitle) : 0;
+  const sourceDomain = extractDomain(sourceUrl);
+  const trustedSourceDomains = new Set([
+    "hnrss.org",
+    "techcrunch.com",
+    "dev.to",
+    "github.blog",
+    "openai.com",
+    "blog.google",
+    "wired.com",
+    "anthropic.com",
+    "news.crunchbase.com",
+    "a16z.com",
+    "engineering.fb.com",
+    "netflixtechblog.com",
+    "aws.amazon.com",
+    "thehackernews.com",
+    "krebsonsecurity.com",
+    "schneier.com",
+    "blog.cloudflare.com",
+    "microsoft.com",
+    "unit42.paloaltonetworks.com",
+    "portswigger.net",
+  ]);
+
+  const sourceFetch = requireSource ? await fetchSourceText(sourceUrl) : { ok: true, sourceText: "", status: null };
+  const corpus = blogDir ? await loadExistingBlogCorpus(blogDir) : [];
+  const corpusSimilarity = maxCorpusSimilarity(title, body, corpus);
+  const sourceSimilarity = titleBodySimilarityToSource(
+    title,
+    body,
+    sourceTitle,
+    sourceSummary,
+    sourceFetch.sourceText,
+  );
   const hypePhraseCount = countHypePhrases(`${title}\n${body}`);
 
   const checks = {
@@ -137,12 +303,23 @@ export function validateDraft({
     titleIsOriginal: !titleMatchesSource,
     hasSourceUrl: requireSource ? Boolean(sourceUrl) : true,
     sourceUrlIsHttps,
+    sourceDomainTrusted: requireSource ? trustedSourceDomains.has(sourceDomain) : true,
+    linkIntegrity: requireSource ? Boolean(sourceFetch.ok) : true,
     minimumWordCount: wordCount >= minimumWords,
     hasThemeLabels: themeLabels >= 5,
     seoTitleLength: titleLength >= 45 && titleLength <= 110,
     avoidsLowSignalTitlePatterns: !hasLowSignalTitlePattern(title),
-    titleLowSourceOverlap: titleSimilarity < 0.75,
+    titleLowSourceOverlap: sourceSimilarity.titleSourceSimilarity < 0.75,
     controlledBrandTone: hypePhraseCount <= 2,
+    plagiarismSafeSummary: sourceSimilarity.bodySummarySimilarity < 0.68,
+    plagiarismSafeSourceText: sourceSimilarity.bodySourceTextSimilarity < 0.72,
+    notRedundantWithCorpus: corpusSimilarity.maxBodySimilarity < 0.78,
+    noBannedTopics: !containsBannedTopic(`${title}\n${body}\n${sourceTitle}`),
+    metadataHasTags: Array.isArray(tags) && tags.length >= 3 && tags.length <= 8,
+    metadataHasSlug: slug.length >= 12,
+    metadataDescriptionLength: descriptionLength >= 120 && descriptionLength <= 180,
+    seoKeywordInTitleOrTags: titleContainsTag(title, tags) || (tags || []).length > 0,
+    unsafeClaimsControlled: !hasUnsafeClaims(`${title}\n${body}`, topicName),
   };
 
   const passedChecks = Object.values(checks).filter(Boolean).length;
@@ -156,8 +333,16 @@ export function validateDraft({
       wordCount,
       themeLabels,
       titleLength,
-      titleSimilarity: Number(titleSimilarity.toFixed(2)),
+      descriptionLength,
+      sourceDomain,
+      sourceStatus: sourceFetch.status,
+      titleSourceSimilarity: Number(sourceSimilarity.titleSourceSimilarity.toFixed(2)),
+      bodySummarySimilarity: Number(sourceSimilarity.bodySummarySimilarity.toFixed(2)),
+      bodySourceTextSimilarity: Number(sourceSimilarity.bodySourceTextSimilarity.toFixed(2)),
+      corpusSimilarity: Number(corpusSimilarity.maxBodySimilarity.toFixed(2)),
+      closestCorpusFile: corpusSimilarity.closestFile,
       hypePhraseCount,
+      slugLength: slug.length,
     },
   };
 }
