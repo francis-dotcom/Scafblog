@@ -7,17 +7,27 @@ function generateBlogPost({
   title,
   slug,
   date,
+  topicName = "Scafblog",
   tags,
   authors = ["francis"],
   content,
   sourceUrl,
   excerpt = null,
   featuredImage = null,
+  photoCredit = null,
+  creditSourceUrl = null,
+  imageMode = "none",
+  layoutVariant = "analysis",
   readTime = "5 min read",
 }) {
+  const escapeAttribute = (value) =>
+    String(value || "")
+      .replace(/\\/g, "\\\\")
+      .replace(/"/g, "&quot;");
   // Calculate excerpt if not provided
   const description =
     excerpt || content.substring(0, 155).replace(/[#*`]/g, "");
+  const imageFrontmatter = featuredImage ? `image: ${featuredImage}\n` : "";
 
   return `---
 slug: ${slug}
@@ -26,18 +36,32 @@ authors: [${authors.join(", ")}]
 tags: [${tags.join(", ")}]
 date: ${date}
 description: "${description}..."
-image: ${featuredImage || "/img/blog/default-post.jpg"}
----
-
+${imageFrontmatter}---
+ 
 <!--truncate-->
-
+ 
+import ArticleLayout from "@site/src/components/ArticleLayout";
 import SocialShare from "@site/src/components/SocialShare";
 import GiscusComments from "@site/src/components/GiscusComments";
 import Newsletter from "@site/src/components/Newsletter";
 
-${featuredImage ? `![${title}](${featuredImage})` : ""}
+<ArticleLayout
+  title="${escapeAttribute(title)}"
+  topicName="${escapeAttribute(topicName)}"
+  excerpt="${escapeAttribute(description)}"
+  tags={[${tags.map((tag) => `"${tag}"`).join(", ")}]}
+  featuredImage={${featuredImage ? `"${featuredImage}"` : "null"}}
+  photoCredit={${photoCredit ? `"${escapeAttribute(photoCredit)}"` : "null"}}
+  creditSourceUrl={${creditSourceUrl ? `"${creditSourceUrl}"` : "null"}}
+  readTime="${escapeAttribute(readTime)}"
+  sourceUrl={${sourceUrl ? `"${sourceUrl}"` : "null"}}
+  imageMode="${imageMode}"
+  layoutVariant="${layoutVariant}"
+>
 
 ${content}
+
+</ArticleLayout>
 
 ---
 

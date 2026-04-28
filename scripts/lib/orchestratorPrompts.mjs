@@ -67,6 +67,62 @@ Rules:
 `;
 }
 
+export function buildImageDecisionPrompt({
+  title,
+  topicName,
+  tags = [],
+  sourceTitle = "",
+  sourceSummary = "",
+  sourceUrl = "",
+}) {
+  return `
+You are the Image Decision agent in an automated publishing system.
+
+Decide whether this article should use:
+- "none"
+- "source"
+- "generated"
+
+Return valid JSON with this exact shape:
+{
+  "image_mode": "none",
+  "layout_variant": "analysis",
+  "rationale": "string",
+  "style_brief": "string",
+  "credit_required": false
+}
+
+Decision policy:
+- Choose "none" when a hero image would add little value or risk looking generic.
+- Choose "source" when the article is tied to a concrete company, product, event, security incident, or news item where source visuals make sense.
+- Choose "generated" for abstract explainers, architecture posts, systems essays, and technical concepts where a custom diagram-like or editorial cover would fit better than source art.
+- Avoid forcing images onto every article.
+- Prefer generated visuals over weak stock-like source art.
+- If "source" is chosen, credit_required must be true.
+- If "generated" or "none" is chosen, credit_required must be false.
+- style_brief should be empty for "none", concise for "source", and specific for "generated".
+- layout_variant must be one of:
+  - "analysis" for editorial/news analysis
+  - "briefing" for executive-summary and fast-scan posts
+  - "deep-dive" for architecture/explainer/structured concept posts
+  - "playbook" for implementation, tactical, or operational guidance
+  - "dossier" for case-style breakdowns and investigations
+  - "timeline" for chronological or event-sequence driven posts
+  - "magazine" for feature-style narrative/editorial pieces
+  - "report" for formal technical or market reporting
+  - "notebook" for reflective text-first essays and working notes
+  - "field-guide" for practical operating guidance in the wild
+- Prefer variety. Do not default to the same variant for everything.
+
+Article title: ${title}
+Topic: ${topicName}
+Tags: ${tags.join(", ")}
+Source title: ${sourceTitle}
+Source summary: ${sourceSummary}
+Source url: ${sourceUrl}
+`;
+}
+
 export function buildPlannerPrompt({
   topicName,
   keywords,

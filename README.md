@@ -18,9 +18,11 @@ Scafblog is a live Docusaurus site with an AI-orchestrated publishing pipeline. 
    Rewrites the article when the review score is below threshold or revision is required.
 6. `Publish Validator`
    Runs local checks on similarity risk, source quality, banned topics, tone, redundancy, metadata completeness, unsafe claims, link integrity, SEO quality, word count, and publish readiness.
-7. `Publisher`
-   Saves approved posts into `stageArea/drafts/` first.
-8. `Approval Reporter`
+7. `Image Decision`
+   Decides whether the article should use no image, a source image, or a generated cover, and picks a full-page layout variant.
+8. `Publisher`
+   Resolves source imagery or creates a generated SVG cover, then saves approved posts into `stageArea/drafts/`.
+9. `Approval Reporter`
    Writes a pending-approval report and waits for human confirmation before final publishing.
 
 Every run writes artifacts to `stageArea/runs/<timestamp>-<slug>/` so the full reasoning chain is inspectable:
@@ -30,11 +32,31 @@ Every run writes artifacts to `stageArea/runs/<timestamp>-<slug>/` so the full r
 - `04-review.json`
 - `05-revised.md` when revision happens
 - `05b-review-after-revision.json` when revision is re-reviewed
+- `05c-image-decision.json`
+- `05d-featured-image.json`
 - `06-validation.json`
 - `06-final.mdx`
 - `07-summary.json`
 
 The orchestration runtime also writes a local execution tracker to `orchestration-state.local.json`. That file is gitignored and is meant for local audit/debug history only.
+
+Featured image behavior:
+- image handling is optional per article
+- image decision agent chooses `none`, `source`, or `generated`
+- image decision agent also chooses one of 10 full-page layout variants:
+  - `analysis`
+  - `briefing`
+  - `deep-dive`
+  - `playbook`
+  - `dossier`
+  - `timeline`
+  - `magazine`
+  - `report`
+  - `notebook`
+  - `field-guide`
+- source images prefer feed image URLs, then source page `og:image`, then first inline image
+- source images derive a visible photo credit from feed author metadata, page metadata, or the source domain
+- generated covers are saved to `static/img/blog/generated/` as local SVG assets
 
 Architecture reference: [ARCHITECTURE.md](./ARCHITECTURE.md)
 

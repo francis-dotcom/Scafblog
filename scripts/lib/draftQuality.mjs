@@ -241,6 +241,9 @@ export async function validateDraft({
   tags = [],
   excerpt = "",
   blogDir = "",
+  imageMode = "none",
+  photoCredit = "",
+  layoutVariant = "analysis",
 }) {
   const wordCount = countWords(body);
   const themeLabels = (body.match(/^###\s+/gm) || []).length;
@@ -320,6 +323,25 @@ export async function validateDraft({
     metadataDescriptionLength: descriptionLength >= 120 && descriptionLength <= 180,
     seoKeywordInTitleOrTags: titleContainsTag(title, tags) || (tags || []).length > 0,
     unsafeClaimsControlled: !hasUnsafeClaims(`${title}\n${body}`, topicName),
+    sourceImageHasCredit:
+      imageMode !== "source" ||
+      (String(photoCredit || "").trim().length >= 3 &&
+        !/^(original source|source|unknown)$/i.test(String(photoCredit || "").trim())),
+    generatedImageMarked:
+      imageMode !== "generated" ||
+      /scafblog automation|ai-generated|generated/i.test(String(photoCredit || "")),
+    validLayoutVariant: [
+      "analysis",
+      "briefing",
+      "deep-dive",
+      "playbook",
+      "dossier",
+      "timeline",
+      "magazine",
+      "report",
+      "notebook",
+      "field-guide",
+    ].includes(layoutVariant),
   };
 
   const passedChecks = Object.values(checks).filter(Boolean).length;

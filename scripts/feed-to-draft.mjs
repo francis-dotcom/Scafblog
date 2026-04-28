@@ -39,9 +39,11 @@ import {
   validateDraft,
   combineReadiness,
 } from "./lib/draftQuality.mjs";
+import { createGeneratedCover, resolveFeaturedImage } from "./lib/featuredImage.mjs";
 import {
   buildSourceQualifierPrompt,
   buildRecoveryStrategistPrompt,
+  buildImageDecisionPrompt,
   buildPlannerPrompt,
   buildDraftAgentPrompt,
   buildReviewerPrompt,
@@ -313,31 +315,76 @@ async function packageArticle({
   title,
   body,
   tags,
+  topicName,
+  item,
   sourceUrl,
   excerpt,
   outputDir,
   runDir,
+  imageDecision = null,
+  imagePreview = null,
 }) {
   const slug = slugify(title, { lower: true, strict: true });
   const filename = `${new Date().toISOString()}-${slug}.mdx`;
+  let imageResult = {
+    featuredImage: null,
+    imageSource: "none",
+    originalUrl: null,
+    photoCredit: null,
+    creditSourceUrl: null,
+    downloaded: false,
+  };
+
+  if (imageDecision?.image_mode === "source" && item) {
+    imageResult =
+      imagePreview ||
+      (await resolveFeaturedImage({
+        item,
+        slug,
+        staticDir: path.join(__dirname, "../static"),
+      }));
+  } else if (imageDecision?.image_mode === "generated") {
+    imageResult = await createGeneratedCover({
+      title,
+      topicName,
+      slug,
+      staticDir: path.join(__dirname, "../static"),
+      styleBrief: imageDecision?.style_brief || "",
+    });
+  }
+
   const finalMdx = formatBlogPost({
     title,
     slug,
     date: new Date().toISOString(),
+    topicName,
     tags: (tags || []).slice(0, 4),
     authors: ["francis"],
     content: body,
     sourceUrl,
     excerpt,
+    featuredImage: imageResult.featuredImage,
+    photoCredit: imageResult.photoCredit,
+    creditSourceUrl: imageResult.creditSourceUrl,
+    imageMode: imageDecision?.image_mode || imageResult.imageSource || "none",
+    layoutVariant: imageDecision?.layout_variant || "analysis",
     readTime: calculateReadTime(body),
   });
 
   await fs.mkdir(outputDir, { recursive: true });
   const finalPath = path.join(outputDir, filename);
   await fs.writeFile(finalPath, finalMdx, "utf8");
+  await writeJsonArtifact(runDir, "05d-featured-image.json", imageResult);
   await writeTextArtifact(runDir, "06-final.mdx", finalMdx);
 
-  return { filename, finalPath, slug };
+  return {
+    filename,
+    finalPath,
+    slug,
+    featuredImage: imageResult.featuredImage,
+    photoCredit: imageResult.photoCredit,
+    creditSourceUrl: imageResult.creditSourceUrl,
+  };
 }
 
 async function publishApprovedDraft({ draftPath, runDir }) {
@@ -415,6 +462,32 @@ const AGENT_REGISTRY = createAgentRegistry([
       );
       await writeJsonArtifact(input.runDir, "02-plan.json", plan);
       return plan;
+    },
+  },
+  {
+    id: "image_decider",
+    label: "Image Decision",
+    stage: "image",
+    summarize(output) {
+      return {
+        imageMode: output?.image_mode || "none",
+      };
+    },
+    async run({ input }) {
+      const decision = await callJsonAgent(
+        "You are a disciplined editorial image strategist. Return only valid JSON.",
+        buildImageDecisionPrompt({
+          title: input.title,
+          topicName: input.topicName,
+          tags: input.tags || [],
+          sourceTitle: input.item?.title || input.customTopic?.title || "",
+          sourceSummary: input.item?.contentSnippet || input.customTopic?.description || "",
+          sourceUrl: input.item?.link || "",
+        }),
+        CONFIG.PLANNER_MODEL,
+      );
+      await writeJsonArtifact(input.runDir, "05c-image-decision.json", decision);
+      return decision;
     },
   },
   {
@@ -518,6 +591,9 @@ const AGENT_REGISTRY = createAgentRegistry([
         tags: input.tags || [],
         excerpt: input.item?.contentSnippet || input.customTopic?.description || "",
         blogDir: CONFIG.BLOG_DIR,
+        imageMode: input.imageMode || "none",
+        photoCredit: input.photoCredit || "",
+        layoutVariant: input.layoutVariant || "analysis",
       });
       const readinessBase = combineReadiness(
         localValidation.score,
@@ -547,10 +623,14 @@ const AGENT_REGISTRY = createAgentRegistry([
         title: input.title,
         body: input.body,
         tags: input.tags,
+        topicName: input.topicName,
+        item: input.item,
         sourceUrl: input.item?.link || null,
         excerpt: input.item?.contentSnippet || input.customTopic?.description || "",
         outputDir: input.outputDir,
         runDir: input.runDir,
+        imageDecision: input.imageDecision || null,
+        imagePreview: input.imagePreview || null,
       });
       return packaged;
     },
@@ -731,10 +811,45 @@ async function orchestrateCandidate({
     });
   }
 
+  workflowState.imageDecision = await runAgent(runtime, "image_decider", {
+    ...workflowState,
+    tags: workflowState.plan.tags || workflowState.matchedKeywords,
+  });
+
+  if (workflowState.imageDecision?.image_mode === "source" && workflowState.item) {
+    workflowState.imagePreview = await resolveFeaturedImage({
+      item: workflowState.item,
+      slug: slugify(workflowState.title, { lower: true, strict: true }),
+      staticDir: path.join(__dirname, "../static"),
+    });
+    await writeJsonArtifact(workflowState.runDir, "05d-featured-image.json", workflowState.imagePreview);
+  } else if (workflowState.imageDecision?.image_mode === "generated") {
+    workflowState.imagePreview = {
+      featuredImage: null,
+      imageSource: "generated",
+      originalUrl: null,
+      photoCredit: "Scafblog automation",
+      creditSourceUrl: null,
+      downloaded: false,
+    };
+  } else {
+    workflowState.imagePreview = {
+      featuredImage: null,
+      imageSource: "none",
+      originalUrl: null,
+      photoCredit: null,
+      creditSourceUrl: null,
+      downloaded: false,
+    };
+  }
+
   const validation = await runAgent(runtime, "publish_validator", {
     ...workflowState,
     requireSource,
     tags: workflowState.plan.tags || workflowState.matchedKeywords,
+    imageMode: workflowState.imageDecision?.image_mode || "none",
+    photoCredit: workflowState.imagePreview?.photoCredit || "",
+    layoutVariant: workflowState.imageDecision?.layout_variant || "analysis",
   });
 
   workflowState = {
@@ -771,6 +886,8 @@ async function orchestrateCandidate({
     localValidation: workflowState.localValidation,
     readiness: workflowState.readiness,
     tags: workflowState.plan.tags || matchedKeywords,
+    imageDecision: workflowState.imageDecision || null,
+    imagePreview: workflowState.imagePreview || null,
     publishDecision:
       workflowState.readiness.publishReady &&
       workflowState.review.publish_ready !== false,
@@ -909,6 +1026,13 @@ async function interactiveMode() {
     return;
   }
 
+  logger.info(`\n📚 Raw candidates for ${topic.name} before qualification:\n`);
+  candidates.forEach((candidate, index) => {
+    console.log(
+      `   ${index + 1}. ${candidate.item.title}\n      rel=${candidate.score} keywords=${candidate.matchedKeywords.join(", ")}\n      ${candidate.item.link}\n`,
+    );
+  });
+
   logger.info("🤖 Qualifying candidates for pass likelihood...");
   const qualifiedCandidates = await runAgent(
     {
@@ -928,12 +1052,9 @@ async function interactiveMode() {
       candidate.qualification?.recommended &&
       candidate.qualification?.passLikelihood >= CONFIG.SOURCE_PASS_THRESHOLD,
   );
-
-  const choicePool = recommendedCandidates.length ? recommendedCandidates : qualifiedCandidates;
-
   if (!recommendedCandidates.length) {
     logger.warn(
-      `No candidates cleared pass threshold ${CONFIG.SOURCE_PASS_THRESHOLD}. Showing best available options anyway.`,
+      `No candidates cleared pass threshold ${CONFIG.SOURCE_PASS_THRESHOLD}. Showing all as alternate options.`,
     );
   }
 
@@ -943,14 +1064,14 @@ async function interactiveMode() {
       name: "candidateIndex",
       message: `Choose a source for ${topic.name}:`,
       pageSize: 12,
-      choices: choicePool.map((candidate, index) => ({
+      choices: qualifiedCandidates.map((candidate, index) => ({
         name: `${candidate.item.title} [rel=${candidate.score} pass=${candidate.qualification?.passLikelihood || 0} ${candidate.qualification?.recommended && candidate.qualification?.passLikelihood >= CONFIG.SOURCE_PASS_THRESHOLD ? "suggested" : "alternate"}]`,
         value: index,
       })),
     },
   ]);
 
-  const candidate = choicePool[candidateIndex];
+  const candidate = qualifiedCandidates[candidateIndex];
   const pipelineProfile =
     candidate.qualification?.recommended &&
     candidate.qualification?.passLikelihood >= CONFIG.SOURCE_PASS_THRESHOLD
@@ -1243,7 +1364,15 @@ async function run() {
   return autoMode();
 }
 
-run().catch((error) => {
-  logger.error(error.message);
-  process.exit(1);
-});
+run()
+  .then(() => {
+    if (process.stdin.isTTY && typeof process.stdin.setRawMode === "function") {
+      process.stdin.setRawMode(false);
+    }
+    process.stdin.pause();
+    process.exit(0);
+  })
+  .catch((error) => {
+    logger.error(error.message);
+    process.exit(1);
+  });
