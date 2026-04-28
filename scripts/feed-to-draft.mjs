@@ -822,6 +822,21 @@ async function orchestrateCandidate({
       slug: slugify(workflowState.title, { lower: true, strict: true }),
       staticDir: path.join(__dirname, "../static"),
     });
+    if (workflowState.imagePreview?.rejectedGenericCard) {
+      workflowState.imageDecision = {
+        ...workflowState.imageDecision,
+        image_mode: "generated",
+        rationale: `${workflowState.imageDecision?.rationale || ""} Source image rejected because it appears to be a generic platform social preview card.`.trim(),
+      };
+      workflowState.imagePreview = {
+        featuredImage: null,
+        imageSource: "generated",
+        originalUrl: null,
+        photoCredit: "Scafblog automation",
+        creditSourceUrl: null,
+        downloaded: false,
+      };
+    }
     await writeJsonArtifact(workflowState.runDir, "05d-featured-image.json", workflowState.imagePreview);
   } else if (workflowState.imageDecision?.image_mode === "generated") {
     workflowState.imagePreview = {

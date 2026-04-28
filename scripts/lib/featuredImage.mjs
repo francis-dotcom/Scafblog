@@ -245,6 +245,21 @@ function extractItemImageCandidates(item) {
   ]);
 }
 
+function isGenericPlatformCardImage(url = "") {
+  const value = String(url || "");
+  if (!value) return false;
+
+  const patterns = [
+    /media\d*\.dev\.to\/dynamic\/image/i,
+    /dev-to-uploads\.s3\.amazonaws\.com\/uploads\/articles\//i,
+    /\/social_previews?\//i,
+    /\/opengraph-images?\//i,
+    /\/og-image/i,
+  ];
+
+  return patterns.some((pattern) => pattern.test(value));
+}
+
 export async function resolveFeaturedImage({ item, slug, staticDir }) {
   const candidates = extractItemImageCandidates(item);
   let selectedUrl = candidates[0] || null;
@@ -280,6 +295,18 @@ export async function resolveFeaturedImage({ item, slug, staticDir }) {
     photoCredit = deriveCreditLabel(selectedUrl, item);
   }
 
+  if (selectedUrl && isGenericPlatformCardImage(selectedUrl)) {
+    return {
+      featuredImage: null,
+      imageSource: "rejected_generic_platform_card",
+      originalUrl: selectedUrl,
+      photoCredit: null,
+      creditSourceUrl: item?.link || null,
+      downloaded: false,
+      rejectedGenericCard: true,
+    };
+  }
+
   if (!selectedUrl) {
     return {
       featuredImage: null,
@@ -288,6 +315,7 @@ export async function resolveFeaturedImage({ item, slug, staticDir }) {
       photoCredit: null,
       creditSourceUrl: null,
       downloaded: false,
+      rejectedGenericCard: false,
     };
   }
 
@@ -320,6 +348,7 @@ export async function resolveFeaturedImage({ item, slug, staticDir }) {
       photoCredit,
       creditSourceUrl,
       downloaded: true,
+      rejectedGenericCard: false,
     };
   } catch {
     return {
@@ -329,6 +358,7 @@ export async function resolveFeaturedImage({ item, slug, staticDir }) {
       photoCredit,
       creditSourceUrl,
       downloaded: false,
+      rejectedGenericCard: false,
     };
   }
 }

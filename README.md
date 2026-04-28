@@ -55,6 +55,7 @@ Featured image behavior:
   - `notebook`
   - `field-guide`
 - source images prefer feed image URLs, then source page `og:image`, then first inline image
+- generic platform social-preview cards are rejected as hero images
 - source images derive a visible photo credit from feed author metadata, page metadata, or the source domain
 - generated covers are saved to `static/img/blog/generated/` as local SVG assets
 
