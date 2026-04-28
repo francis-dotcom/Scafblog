@@ -155,6 +155,8 @@ Topic description: ${customTopic.description}
 Keywords: ${keywords.join(", ")}
 Article type: ${customTopic.articleType || "technical"}
 Target length: ${customTopic.targetLength?.label || "medium"} (${customTopic.targetLength?.minimumWords || 900}+ words)
+Uploaded image should be explained in article: ${customTopic.explainUploadedImage ? "yes" : "no"}
+Image usage mode: ${customTopic.imageUsageMode || "supporting"}
 
 Rules:
 - Plan for a technically serious article.
@@ -163,6 +165,9 @@ Rules:
 - Risks should name what could make the article weak or generic.
 - Respect the requested article type in tone, structure, and audience.
 - Respect the requested length by adjusting depth, section count, and level of detail.
+- If an uploaded image should be explained, include a dedicated section early in the article that introduces and technically explains the diagram or visual.
+- If image usage mode is "image-led", structure the article around the uploaded image as the primary organizing artifact.
+- If image usage mode is "supporting", use the uploaded image as supporting evidence or illustration rather than the main structure.
 `;
   }
 
@@ -243,6 +248,8 @@ ${JSON.stringify(reviewFeedback, null, 2)}` : ""}
 Use the plan to write the article. Keep the writing technical, specific, and publication-ready.
 Requested article type: ${customTopic.articleType || "technical"}
 Requested length: ${customTopic.targetLength?.label || "medium"}
+Uploaded image should be explained in article: ${customTopic.explainUploadedImage ? "yes" : "no"}
+Image usage mode: ${customTopic.imageUsageMode || "supporting"}
 You must produce a substantial article of at least ${minimumWords} words.
 Target range: ${minimumWords}-${minimumWords + 500} words.
 Do not end early. Add concrete examples, implementation detail, comparisons, and operational implications if needed to reach depth.

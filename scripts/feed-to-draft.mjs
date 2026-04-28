@@ -1136,6 +1136,24 @@ async function interactiveMode() {
         },
         filter: (value) => value.trim(),
       },
+      {
+        type: "confirm",
+        name: "explainUploadedImage",
+        message: "Should the uploaded image also be explained inside the article?",
+        when: (answers) => Boolean(answers.hasCustomImage),
+        default: true,
+      },
+      {
+        type: "list",
+        name: "imageUsageMode",
+        message: "How should the article use the uploaded image?",
+        when: (answers) => Boolean(answers.hasCustomImage),
+        choices: [
+          { name: "Supporting visual", value: "supporting" },
+          { name: "Base the article around the image", value: "image-led" },
+        ],
+        default: "supporting",
+      },
     ]);
 
     const matchedKeywords = customTopic.keywords
