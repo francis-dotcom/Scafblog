@@ -1,0 +1,168 @@
+---
+slug: securing-the-execution-of-ai-generated-code-a-deep-dive-into-sandboxing-solutions
+title: "Securing the Execution of AI-Generated Code: A Deep Dive into Sandboxing Solutions"
+authors: [francis]
+tags: [ai, sandboxing, security, code execution]
+date: 2026-05-01T08:00:48.470Z
+description: "The first time I let an agent run its own code on a server I cared about, it deleted a directory it should not have been able to see. Nothing important. A tmp folder with a half-written script. But the agent had no business knowing the path existed, and the only reason it did was that I had given it a shell on a box that also had a copy of my dotfiles mounted in. The shell was supposed to be scoped. It was not. It was just a child process with a different working directory and a hopeful name.
+That was the moment sandboxing stopped being a feature I would get to later and started being the prerequisite for any agent that produces code I plan to execute. Two years on, the tooling for this is finally good. There are at least four production-grade options for running untrusted code on demand, plus the underlying primitives if you want to roll your own. They are not interchangeable. The differences between them are the difference between an agent that works for one customer and an agent that scales to a thousand without melting your bill or your blast radius.
+This is what I have learned about picking one and using it without regret.
+The pitch for skipping sandboxing is that you trust your agent. You wrote the prompts. You picked the model. The code it generates looks reasonable when you read it. What is the worst that could happen.
+The worst that could happen has a long list. The agent gets prompt-injected by a tool result and writes a script that exfiltrates env vars. The agent installs a package that turns out to be a typosquat. The agent runs an infinite loop that pegs the box. The agent writes a recursive shell that fork-bombs the machine. The agent exfiltrates the contents of /etc/passwd because someone asked it nicely in a comment. None of these are theoretical. They have all happened to people I know who shipped agent products in the last eighteen months. The reason they survived is that the code ran somewhere it could not hurt anything important.
+The principle is simple. If a model produces the code, the code is untrusted. Untrusted code does not run on a host that has access to your secrets, your database, your filesystem, or your network. It runs in a fresh environment with the smallest possible set of capabilities and the shortest possible lifetime. When it is done, you throw the environment away.
+This is the same containment posture you would apply to user-uploaded code in a build pipeline. It is not new. What is new is that AI agents are now the largest source of untrusted code in most apps that ship one, and most teams have not adjusted their security model accordingly. The same caution I wrote about for AI-generated code security risks applies double when you also let the model push the run button.
+The word "sandbox" gets used loosely. A Docker container with default settings is not a sandbox for adversarial code. A chroot is not a sandbox. A Linux user without sudo is not a sandbox. These all reduce blast radius for accidental mistakes. They do not stop a determined script.
+The bar for code you do not control is higher. The sandbox needs hardware-level isolation, ideally a microVM or a strongly confined container. The filesystem is ephemeral. The network is either off entirely or restricted to a specific allowlist. There is no path back to the host that did not get explicitly opened. The lifetime is measured in minutes or hours, not days. When it dies, nothing it produced survives unless you fished it out through a controlled channel.
+The four products in this comparison meet that bar. The shape of the isolation differs. The ergonomics differ a lot more.
+E2B was the first product that made sandboxed code execution feel like an SDK call instead of an infrastructure project. You install a client, you call Sandbox.create(), you run code, you read the result. The sandbox is a Firecracker microVM with a writable filesystem and a configurable lifetime. It comes pre-installed with Python, Node, and a pile of common tooling, so the agent does not have to install half the world before it can do its job.
+The thing E2B got right was the developer experience. The SDK feels like calling a remote shell. You can stream stdout. You can mount files. You can keep a sandbox alive across multiple agent turns so the agent can iterate on the same workspace, then tear it down at the end. Persistent sandboxes for sessions that need to remember installed deps and intermediate state are a real productivity win because the agent does not have to redo setup work on every turn.
+Where E2B costs you is concurrency at scale. The base tier is generous, but if you are running thousands of concurrent sandboxes for a real product, you start to feel the pricing. You can negotiate, but the unit economics matter and you should run the numbers before committing.
+The other thing to watch is the trust model. E2B is a third party. Code your agent runs on E2B is running on E2B's infrastructure. They are reputable and the architecture is solid, but if you have customers whose contracts say their data does not leave systems you control, E2B is a hard sell without a self-hosted variant. They have one for enterprise. It is not the cheapest path.
+E2B is the right call when you are early, you want to ship now, and you are not yet in a contractual position where you need to own the runtime. It is also the right call for prototyping any sandboxed-execution feature, because nothing else gets you to a working agent faster.
+Vercel Sandbox went GA in January 2026 and changes the math for any team already on Vercel. It is also a Firecracker-based microVM, but it is plumbed into the same project, deployment, and billing surface as your functions. You spawn a sandbox from a Function or Routing Middleware, you get back a handle, you run code, you read the result. The lifetime caps at a few hours and the billing aligns with your existing compute budget rather than landing on a separate invoice.
+The integration is the killer feature. You do not have to set up a second account, a second set of credentials, a second observability stack. The same logs, the same dashboard, the same env vars you are already using are wired in. For a team building an agent product on Vercel, this is the path of least resistance and the one with the lowest ongoing maintenance cost.
+The ceiling shows up if you outgrow the Vercel platform's resource limits per sandbox. Long-running ML training is not what these are for. Heavy GPU work is not what these are for. They are sized for code execution that completes in minutes, not hours of model inference. If your agent's job is "run this Python script and tell me what happened," they are exactly right. If your agent's job is "fine-tune a model on this data," look elsewhere.
+The other consideration is that Vercel Sandbox is the youngest of the four. The API is good and the abstractions are clean, but the long tail of edge cases the older products have already absorbed is still being filled in. For most workloads this is invisible. For a few weird ones it is the difference between a clean integration and a workaround.
+If your stack is already on Vercel, this is the default, and you should have a hard reason to pick something else. The combination of Fluid Compute reusing function instances and Sandbox handling untrusted execution is a clean separation of concerns that most agent products end up reinventing badly when they roll their own.
+Modal is the option to reach for when the workload is heavier than what code-execution sandboxes are designed for. It started as a serverless Python runtime for ML and adjacent workloads and has since grown into a full code-execution platform with strong sandbox primitives. You define a function in Python with decorators that describe the environment, the resources, and the lifetime. Modal handles provisioning, scaling, and teardown. The mental model is closer to "serverless runtime for arbitrary code" than "remote shell for an agent."
+Where Modal pulls ahead is anything that needs serious compute. GPUs are first-class. Long-running jobs are first-class. Storage volumes that persist across runs are first-class. If your agent is producing code that does real work, like training a small model, processing a large dataset, or running a simulation, Modal will handle it natively and the rest of the products on this list will struggle.
+The tradeoff is that Modal is more opinionated. The decorator-based function model is great when your code fits the shape, less great when you want a generic shell that the agent can drive freely. You can do that on Modal. It is not what the platform optimizes for. The agents that thrive on Modal are the ones whose tools are well-defined functions with typed inputs and typed outputs, not open-ended REPLs.
+The other thing to know is that Modal's pricing is real. Active CPU and GPU time at production scale is not cheap. It is competitive with the alternatives once you account for what you are actually running, but you cannot pretend the bill is going to be small. Build a cost model before you scale up, not after.
+Modal is the right pick when the agent's outputs are computational, not just exploratory. If the LLM is writing code that has to actually run a job that matters, Modal is where it should run.
+Daytona is the dev-environment-as-a-service approach. Instead of a one-shot sandbox, you get a full development workspace with an editor surface, a filesystem, a terminal, and a network policy you can configure. It is the product you reach for when the agent is collaborating with a human, or when the workload looks more like "explore a repository and make changes" than "run a single script."
+The fit for AI agents is interesting. A Daytona workspace can be the agent's home for a session, with the agent writing code, running tests, iterating on failures, and producing a diff at the end. The lifetime is longer than a code-execution sandbox. The environment is richer. The network and filesystem policies are configurable per workspace, so you can lock down what the agent can reach without giving up the productivity of a real development environment.
+Daytona is also a good answer when the agent's job involves an existing codebase. Cloning a repo, running its tests, making a fix, and producing a PR is a workflow that fits a workspace better than a function call. The agent gets to behave like a developer rather than like a script runner. For products in the AI code review and automated-PR space, this is the natural shape.
+The cost shape is closer to "developer seats" than "function invocations," which is right for some products and wrong for others. If you are running thousands of short tasks a day, this is not the model. If you are running tens of long-form sessions a day where each one is a real piece of work, the math lines up.
+Daytona is the call when the agent's surface is "act like a developer in a workspace" rather than "execute this code and tell me what happened."
+The four products above are the ones I would actually pick from in 2026. The reason to roll your own is narrower than it used to be, but it still exists.
+If you have hard data-residency or compliance requirements that the managed options cannot meet, you may have to. Firecracker is open source. So is gVisor. So is the underlying tech. You can run microVMs on your own hardware or your own cloud account. The cost is a serious infra team and the long tail of edge cases that the managed products have already solved.
+If your workload is so specific that none of the products fit, you may have to. This is rare and getting rarer. The four options above cover most agent workloads cleanly.
+If you have a paranoid security model that requires every byte of execution to be on infrastructure you fully control, you may have to. This is a real reason and the right one. Self-hosted Firecracker on your own VPC with your own monitoring and your own kill switches is a reasonable answer for some companies.
+For everyone else, building your own sandbox in 2026 is the same mistake as building your own auth in 2018. The right answer is to pick the managed product whose tradeoffs match your workload and spend your time on the agent itself.
+Whichever product you pick, there is a set of controls that should not be optional. Most of these are off by default in the SDKs because they get in the way of the demo. Turn them on before you ship.
+Network egress should be blocked by default and opened only to the specific hosts the agent needs. The most common exfiltration path for agent-generated code is "agent decides to curl somewhere with a payload built from env vars." If the network cannot reach arbitrary hosts, that path closes. Allowlist the package registry and the APIs the agent legitimately needs. Block everything else.
+Filesystem mounts should be read-only or scoped writable. The agent should not have write access to anything you would not be willing to throw away. Mount input data read-only. Give the agent a writable scratch directory. When the sandbox dies, the scratch dies with it.
+Secrets should not live in the sandbox's environment. If the agent needs to call an authenticated API, broker the call through your own service that injects the credentials at the network boundary. The sandbox should never see the raw secret. Even with strong isolation, a leaked secret in a logged stdout line is a real failure mode.
+Resource limits should be set explicitly. CPU. Memory. Wall-clock time. Disk. Without these, a runaway script will keep running until it hits a platform limit or eats your budget. Most of the SDKs default to permissive limits because tight limits break legitimate workloads. Tune them down to what your workload actually needs.
+Logging should capture every command and every output. Not for compliance theater, but because you will need to debug agents that did weird things, and the only way to debug a non-deterministic process is to have a complete record of what happened. The same observability discipline I talked about for debugging AI agents in production applies here. The sandbox is part of the agent. Treat it as such.
+Lifetimes should be aggressive. The longer a sandbox lives, the more chance it has to be exploited or to leak state across users. Default to short lifetimes, with explicit extension when the workload needs it. Persistent sandboxes are convenient. They are also a small attack surface that compounds with every session.
+A few patterns have survived contact with production for me, and they are worth lifting out as defaults.
+One sandbox per user, never one sandbox shared across users. Even if the work is "stateless," cross-user sandboxes are how data leaks happen. Pay the cold-start cost.
+Inject the model's plan, not the model's code, when you can. If the agent's job is "run a query against a database," let the agent produce a structured query that your code executes against a connection it owns, not Python code that opens a connection itself. The sandbox is for things you cannot pre-shape. Pre-shape what you can.
+Capture artifacts explicitly. If the agent produces a file you want to keep, the agent's tool should be "save artifact named X with these bytes," and your code should write it to the storage you control. Reading files out of an exiting sandbox after the fact is fine for debugging and bad for production. Make the artifact transfer explicit.
+Run a non-network "thinking" sandbox first when the agent's plan is long. Let it draft. Let it reason. Then move to a network-enabled sandbox only for the steps that need the network, with a tighter scope. This staged approach reduces the blast radius without crippling the agent's ability to plan.
+Validate every tool result the agent acts on. The output of a tool call is a vector for prompt injection. The agent should treat tool results as data, not as instructions. The framework cannot enforce this for you. It is a discipline.
+The decision tree is short.
+If you are on Vercel and your workload is code execution, pick Vercel Sandbox.
+If you are not on Vercel, your workload is code execution, and you want the smoothest SDK experience, pick E2B.
+If your workload is computational and needs real CPU, GPU, or long jobs, pick Modal.
+If your workload is "act like a developer in a real workspace," pick Daytona.
+If your contract says the runtime has to live on infrastructure you control, build on Firecracker yourself and accept the operational cost.
+The wrong answer is to keep running untrusted code in containers you control on hosts that touch your data. That worked when "untrusted code" meant a CI build of your own repo. It does not work when "untrusted code" means whatever the model produced this turn, on a turn-by-turn basis, for every user you have. The volume of untrusted code in agent products is the new variable, and the security architecture has to match.
+The trend that matters is the convergence of agent frameworks and sandboxing primitives. A year ago, picking a framework and picking a sandbox were two separate decisions with manual wiring between them. The newer frameworks ship with sandbox adapters out of the box. The newer sandbox products ship with framework integrations that make the boundary nearly invisible.
+The next step is sandboxes that share more state cheaply. Right now, every cold start is a real cost. The frameworks are getting better at warm pools and shared base images. Fluid Compute showed what is possible when instances are reused intelligently. Sandboxes will get the same treatment. The cost curve for running thousands of concurrent untrusted environments is going to bend down.
+The other thing to watch is the policy layer. Right now, configuring network and filesystem policy is per-product, per-SDK, per-workload. There is room for a higher-level abstraction that lets you express "this agent is allowed to do X but not Y" once and have it enforced across whichever runtime executes the work. That is not here yet. It is being prototyped.
+The deletion incident I started with was a year and a half ago. I would not get away with it now. Not because I have gotten more careful, though I have. Because the tooling has caught up to the problem. Sandboxing AI-generated code is a solved problem in 2026 in the same way that running customer-facing apps in containers was a solved problem in 2018. You still have to do it. You no longer have to invent it. That is real progress, and it is the part of agent infrastructure where you can buy a meaningful chunk of safety with a reasonable amount of integration work.
+Do that work. The first time an agent in your product tries to do something it should not, you will be glad it tried inside a box you can throw away...."
+image: /img/blog/generated/securing-the-execution-of-ai-generated-code-a-deep-dive-into-sandboxing-solutions-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Securing the Execution of AI-Generated Code: A Deep Dive into Sandboxing Solutions](/img/blog/generated/securing-the-execution-of-ai-generated-code-a-deep-dive-into-sandboxing-solutions-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### The Imperative of Sandboxing in AI Code Execution
+
+The emergence of AI-generated code has revolutionized software development, but it also presents significant security challenges. As AI models increasingly generate code for production environments, the risk of executing untrusted code becomes a pressing concern. A critical incident highlighted this issue when an AI agent inadvertently deleted important files due to inadequate sandboxing. Such failures underscore the necessity of robust sandboxing solutions to isolate and control the execution of AI-generated code, ensuring that potential threats do not compromise system integrity.
+
+### Understanding Sandboxing: A Security Paradigm
+
+Sandboxing is a security mechanism that isolates untrusted code execution from the host system, effectively creating a controlled environment. This isolation is essential for mitigating risks associated with executing AI-generated code, which is inherently untrusted. The principle of sandboxing is straightforward: any code produced by an AI model should only run in an environment where its capabilities are restricted, preventing access to sensitive resources. This approach is analogous to the containment strategies employed in software development pipelines, particularly for user-uploaded code. 
+
+### Evaluating Leading Sandbox Solutions for AI Code
+
+As of 2026, several sandbox solutions have emerged as frontrunners in the field, each offering distinct features and trade-offs. The four prominent contenders—E2B, Vercel Sandbox, Modal, and Daytona—provide varying levels of isolation, performance, and ease of integration. When evaluating these solutions, it is crucial to consider metrics such as security posture, resource allocation, scalability, and developer experience. 
+
+### Comparison of Sandbox Solutions: Features and Trade-offs
+
+| Feature                | E2B                     | Vercel Sandbox          | Modal                   | Daytona                  |
+|------------------------|-------------------------|-------------------------|-------------------------|--------------------------|
+| Isolation Type         | Firecracker microVM     | Firecracker microVM     | Serverless architecture  | Full development environment |
+| Resource Limits        | Configurable            | Limited to Vercel tiers | High for compute tasks   | Flexible, session-based   |
+| Developer Experience    | SDK-like simplicity     | Integrated with Vercel  | Function decorators      | Full IDE-like interface    |
+| Long-Running Jobs      | Limited                 | Not suitable            | Optimized for long tasks | Ideal for collaborative work |
+| Cost Structure         | Tiered pricing          | Integrated billing      | Pay-per-use             | Developer seat model      |
+
+### E2B: Prioritizing Developer Experience
+
+E2B distinguishes itself by focusing on developer experience, allowing users to create sandboxes with minimal overhead. Utilizing Firecracker microVMs, E2B offers a writable filesystem and configurable lifespan for each sandbox. This design facilitates rapid iteration, enabling developers to maintain state across multiple executions. However, scaling E2B for high volumes of concurrent executions can become costly, necessitating careful financial modeling before deployment. Furthermore, as a third-party service, E2B may pose challenges for organizations with strict data residency requirements.
+
+### Vercel Sandbox: Seamless Integration with Existing Workflows
+
+For teams already utilizing Vercel, the Vercel Sandbox offers a compelling solution that integrates seamlessly with existing projects. This integration allows users to spawn sandboxes directly from functions or middleware, significantly reducing operational overhead. The shared environment variables and observability tools streamline the development process. However, Vercel Sandbox is best suited for short-lived tasks and may struggle with more intensive workloads, particularly in machine learning scenarios. Its recent launch means it may still be evolving in terms of edge case handling.
+
+### Modal: Optimized for Computational Workloads
+
+Modal is designed for computationally intensive tasks, providing a robust sandboxing solution that supports significant resource demands. Its serverless architecture allows users to define functions with decorators that specify execution environments and resource requirements. This design is particularly beneficial for workloads involving model training or large data processing. However, Modal's opinionated structure may not suit all use cases, especially those requiring a more flexible execution environment. Additionally, the cost of active CPU and GPU time can be significant, necessitating careful budget planning.
+
+### Daytona: Development Environments as a Service
+
+Daytona takes a different approach by offering a full-featured development workspace rather than a one-off sandbox. This environment is ideal for scenarios where an AI agent collaborates with human developers or when the workload necessitates a more interactive approach. Daytona's configurable network and filesystem policies allow for tailored experiences, accommodating various development workflows. However, its cost structure aligns more closely with developer seats than with function invocations, which may not be suitable for all use cases.
+
+### Common Pitfalls in Sandboxing AI Code Execution
+
+Despite the advantages of sandboxing, several common pitfalls can undermine its effectiveness. A significant risk arises from failing to enforce strict network policies, which could allow an AI agent to exfiltrate sensitive data through unauthorized network calls. Additionally, granting write access to critical files can lead to data loss or corruption. Implementing read-only mounts and carefully managing permissions are essential strategies for mitigating these risks. 
+
+### Best Practices for Securing AI Code Execution
+
+To maximize the security of AI-generated code execution, several best practices should be adopted. First, network egress should be blocked by default, with explicit allowlisting for necessary connections. Second, resource limits must be established to prevent runaway processes from consuming excessive resources. Third, comprehensive logging should capture all commands and outputs for debugging purposes. Finally, sandboxes should have aggressive lifetimes, minimizing the potential attack surface by ensuring they are short-lived.
+
+### Real-World Case Study: The Cost of Inadequate Sandboxing
+
+A notable case involved a financial services company that deployed an AI agent for automating code generation. The agent was allowed to execute code in a loosely configured Docker container, leading to a prompt injection vulnerability. An attacker exploited this vulnerability, causing the agent to exfiltrate sensitive customer data. The incident resulted in significant financial and reputational damage, highlighting the importance of robust sandboxing solutions. The organization subsequently adopted a more secure sandboxing approach, implementing strict network policies and resource limits to prevent future occurrences.
+
+### Future Trends in Sandboxing Technology
+
+The future of sandboxing technology is poised for significant advancements, particularly in integrating AI frameworks and sandboxing primitives. The convergence of these technologies will streamline the development process, enabling more efficient execution of untrusted code. Emerging policy layers may provide higher-level abstractions for managing permissions and resource access across different sandbox environments, enhancing security while simplifying the developer experience.
+
+### Conclusion: Making Informed Decisions on Sandboxing Solutions
+
+In the rapidly evolving landscape of AI-generated code, selecting the appropriate sandbox solution is paramount. The decision should be guided by the specific requirements of the application, including the nature of the workload, resource needs, and security constraints. By leveraging the strengths of established sandbox solutions like E2B, Vercel Sandbox, Modal, and Daytona, organizations can effectively manage the risks associated with executing untrusted code. As the tooling continues to mature, the importance of robust sandboxing will only increase, making it an indispensable component of any AI-driven infrastructure.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/alexcloudstar/sandboxing-ai-generated-code-e2b-vs-vercel-sandbox-vs-modal-vs-daytona-in-2026-3c7g)
+
+---
+
+<SocialShare title="Securing the Execution of AI-Generated Code: A Deep Dive into Sandboxing Solutions" slug="securing-the-execution-of-ai-generated-code-a-deep-dive-into-sandboxing-solutions" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
