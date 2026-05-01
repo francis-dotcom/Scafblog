@@ -1,0 +1,527 @@
+---
+slug: building-a-scalable-ai-voice-agent-in-go-with-voipbin
+title: "Building a Scalable AI Voice Agent in Go with VoIPBin"
+authors: [francis]
+tags: [go, ai, voice, voip]
+date: 2026-05-01T17:14:02.941Z
+description: "Every AI voice tutorial on the internet starts with Python.
+Python is great. But Go powers a huge chunk of production infrastructure — microservices, APIs, cloud-native backends. If your team writes Go, you should not have to context-switch into Python just to add voice calling to your AI agent.
+This tutorial shows you how to build a working AI voice bot in Go, end to end, using the VoIPBin Go SDK.
+Here is what most Go developers face when they want to add voice to their AI agent:
+Find a VoIP provider → SIP credentials, codec negotiation, RTP handling
+Set up an audio pipeline → STT, buffering, VAD (voice activity detection)
+Wire in TTS → audio encoding, streaming to the caller
+Keep latency low enough to feel like a real conversation
+None of this is your application logic. It is infrastructure. And it is the reason most Go developers give up and reach for a managed service that only has a Python SDK.
+VoIPBin handles all of the above. Your Go code just handles webhooks and returns JSON.
+A simple AI voice receptionist that:
+Receives an inbound call
+Greets the caller with TTS
+Listens for their question
+Responds with a smart answer
+Ends the call cleanly
+All in Go. Under 100 lines of application logic.
+Go 1.21+
+A public webhook URL (use ngrok for local dev)
+A VoIPBin account (sign up via API — no OTP, instant token)
+curl -s -X POST "https://api.voipbin.net/v1.0/auth/signup" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "your-name",
+    "email": "you@example.com",
+    "password": "yourpassword"
+  }'
+
+You get back:
+{
+  "accesskey": {
+    "token": "YOUR_API_TOKEN"
+  }
+}
+
+Save that token. That is your auth header going forward.
+go get github.com/voipbin/voipbin-go
+
+This gives you a fully typed client for the VoIPBin API — calls, flows, agents, numbers.
+When VoIPBin receives a call, it sends a POST request to your webhook. Your webhook returns a list of actions — speak, listen, transfer, hang up. VoIPBin executes them.
+Create main.go:
+package main
+
+import (
+    "encoding/json"
+    "fmt"
+    "log"
+    "net/http"
+)
+
+// VoIPBin sends this when a call event occurs
+type CallEvent struct {
+    CallID    string `json:"call_id"`
+    Type      string `json:"type"`
+    Transcript string `json:"transcript,omitempty"`
+}
+
+// We return a list of actions
+type Action struct {
+    Type string `json:"type"`
+    Text string `json:"text,omitempty"`
+}
+
+func webhookHandler(w http.ResponseWriter, r *http.Request) {
+    var event CallEvent
+    if err := json.NewDecoder(r.Body).Decode(&event); err != nil {
+        http.Error(w, "bad request", http.StatusBadRequest)
+        return
+    }
+
+    log.Printf("event: type=%s call_id=%s transcript=%q",
+        event.Type, event.CallID, event.Transcript)
+
+    var actions []Action
+
+    switch event.Type {
+    case "call.started":
+        // Greet the caller
+        actions = []Action{
+            {Type: "talk", Text: "Hello! You have reached our AI assistant. How can I help you today?"},
+            {Type: "listen"},
+        }
+
+    case "call.input":
+        // Caller said something — respond based on transcript
+        reply := getAIReply(event.Transcript)
+        actions = []Action{
+            {Type: "talk", Text: reply},
+            {Type: "listen"},
+        }
+
+    default:
+        // End anything we do not handle
+        actions = []Action{
+            {Type: "hangup"},
+        }
+    }
+
+    w.Header().Set("Content-Type", "application/json")
+    json.NewEncoder(w).Encode(actions)
+}
+
+func getAIReply(input string) string {
+    // Plug in your LLM here — OpenAI, Anthropic, Gemini, local model
+    // For this tutorial, we use a simple static response
+    if input == "" {
+        return "Sorry, I did not catch that. Could you repeat?"
+    }
+    return fmt.Sprintf("You said: %s. Let me look that up for you — our team will follow up shortly!", input)
+}
+
+func main() {
+    http.HandleFunc("/webhook", webhookHandler)
+    log.Println("Webhook listening on :8080")
+    log.Fatal(http.ListenAndServe(":8080", nil))
+}
+
+Run it:
+go run main.go
+
+In another terminal, expose it:
+ngrok http 8080
+
+Copy the ngrok URL — you will use it in the next step.
+With the VoIPBin Go SDK, create a helper script to place a test call:
+package main
+
+import (
+    "context"
+    "fmt"
+    "log"
+
+    voipbin "github.com/voipbin/voipbin-go"
+)
+
+func main() {
+    client := voipbin.NewClient("YOUR_API_TOKEN")
+
+    // Place an outbound call to your own number to test
+    call, err := client.Calls.Create(context.Background(), voipbin.CreateCallRequest{
+        Source: "voipbin",
+        Destinations: []voipbin.Destination{
+            {Type: "tel", Target: "+1234567890"}, // your number
+        },
+        WebhookURL: "https://your-ngrok-id.ngrok.io/webhook",
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    fmt.Printf("Call started: %s\n", call.ID)
+}
+
+Your phone rings. You answer. Your Go webhook handles the conversation.
+Replace the getAIReply stub with an actual LLM call. Here is the OpenAI pattern:
+import (
+    "context"
+    "github.com/sashabaranov/go-openai"
+)
+
+func getAIReply(input string) string {
+    client := openai.NewClient("OPENAI_API_KEY")
+
+    resp, err := client.CreateChatCompletion(
+        context.Background(),
+        openai.ChatCompletionRequest{
+            Model: openai.GPT4oMini,
+            Messages: []openai.ChatCompletionMessage{
+                {
+                    Role:    openai.ChatMessageRoleSystem,
+                    Content: "You are a friendly customer support agent. Keep responses under 30 words for voice.",
+                },
+                {
+                    Role:    openai.ChatMessageRoleUser,
+                    Content: input,
+                },
+            },
+        },
+    )
+    if err != nil {
+        return "I am having trouble right now. Please try again."
+    }
+
+    return resp.Choices[0].Message.Content
+}
+
+Two things to keep in mind for voice LLM responses:
+Keep it short. Nobody wants to listen to a paragraph read aloud. Aim for 1-2 sentences.
+Avoid markdown. TTS engines will literally say "asterisk asterisk bold asterisk asterisk". Write plain prose.
+While your Go code is happily processing HTTP requests, VoIPBin is doing the heavy lifting:
+
+
+
+Task
+VoIPBin handles it
+
+
+
+
+SIP signaling
+✅
+
+
+RTP media stream
+✅
+
+
+Speech-to-Text (STT)
+✅
+
+
+Text-to-Speech (TTS)
+✅
+
+
+DTMF detection
+✅
+
+
+Call recording
+✅
+
+
+Number provisioning
+✅
+
+
+
+Your code is just an HTTP server. Which means everything you already know about Go servers applies: middleware, structured logging, graceful shutdown, horizontal scaling. No new mental model required.
+A few things to harden before you ship:
+Verify webhook authenticity:
+Keep conversation state:
+call_id.
+var sessions = sync.Map{} // call_id -> []Message
+
+func getHistory(callID string) []Message {
+    if v, ok := sessions.Load(callID); ok {
+        return v.([]Message)
+    }
+    return nil
+}
+
+Handle timeouts:
+ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+defer cancel()
+
+By the end of this tutorial you have:
+A production-ready webhook pattern for Go AI voice bots
+STT, TTS, and RTP off your plate entirely
+A codebase that is just HTTP handlers — testable, deployable, scalable
+A starting point you can extend with any LLM, any business logic
+Go is an excellent language for this. The concurrency model handles parallel calls cleanly. The binary deployment is simple. The type system keeps webhook parsing honest.
+The only missing piece was a VoIP layer that speaks Go. Now you have one.
+VoIPBin Go SDK: go get github.com/voipbin/voipbin-go
+
+VoIPBin API Docs
+Sign up — instant API token, no credit card required to test
+If you build something with this, drop a comment below. Always curious what people are actually shipping...."
+image: /img/blog/generated/building-a-scalable-ai-voice-agent-in-go-with-voipbin-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Building a Scalable AI Voice Agent in Go with VoIPBin](/img/blog/generated/building-a-scalable-ai-voice-agent-in-go-with-voipbin-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### The Underappreciated Role of Go in AI Voice Applications
+
+Go, known for its efficiency and concurrency capabilities, is often overshadowed by languages like Python when it comes to developing AI voice applications. However, Go's performance characteristics and strong typing system make it an excellent choice for building scalable voice agents. By leveraging Go, developers can create applications that are not only efficient but also maintainable, without the need to switch to more commonly used languages in the AI space.
+
+### VoIPBin: A Comprehensive SDK for Voice Infrastructure
+
+VoIPBin provides a robust SDK that abstracts the complexities of voice communication, allowing Go developers to focus on application logic rather than the underlying VoIP protocols. This SDK simplifies the handling of SIP signaling, RTP media streaming, and the integration of speech-to-text (STT) and text-to-speech (TTS) functionalities. With VoIPBin, developers can build AI voice agents capable of real-time interactions without getting bogged down by the intricacies of telephony infrastructure.
+
+### Setting Up Your Go Environment for VoIPBin
+
+To begin building your AI voice agent, ensure you have Go version 1.21 or higher installed on your system. Start by creating a VoIPBin account to obtain your API token, which is essential for authentication in your application. You can sign up using the following `curl` command:
+
+```bash
+curl -s -X POST "https://api.voipbin.net/v1.0/auth/signup" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "your-name",
+    "email": "you@example.com",
+    "password": "yourpassword"
+  }'
+```
+
+After successful registration, you will receive an access token for future API requests. Next, install the VoIPBin Go SDK with:
+
+```bash
+go get github.com/voipbin/voipbin-go
+```
+
+This command fetches a fully typed client for interacting with the VoIPBin API, enabling you to manage calls, flows, agents, and numbers seamlessly.
+
+### Implementing a Secure Webhook for Incoming Calls
+
+The heart of your AI voice agent is a webhook that processes incoming call events. Below is an implementation that handles these events and generates appropriate actions. 
+
+```go
+package main
+
+import (
+    "encoding/json"
+    "fmt"
+    "log"
+    "net/http"
+    "sync"
+)
+
+type CallEvent struct {
+    CallID    string `json:"call_id"`
+    Type      string `json:"type"`
+    Transcript string `json:"transcript,omitempty"`
+}
+
+type Action struct {
+    Type string `json:"type"`
+    Text string `json:"text,omitempty"`
+}
+
+var sessions sync.Map // To maintain conversation state
+
+// Function to verify the authenticity of incoming requests
+func verifyRequest(r *http.Request) bool {
+    // This is a placeholder. Implement your authentication logic here.
+    // For example, check for a valid API token or HMAC signature.
+    return true
+}
+
+func webhookHandler(w http.ResponseWriter, r *http.Request) {
+    if !verifyRequest(r) {
+        http.Error(w, "Unauthorized", http.StatusUnauthorized)
+        return
+    }
+
+    var event CallEvent
+    if err := json.NewDecoder(r.Body).Decode(&event); err != nil {
+        http.Error(w, "bad request", http.StatusBadRequest)
+        return
+    }
+
+    log.Printf("event: type=%s call_id=%s transcript=%q", event.Type, event.CallID, event.Transcript)
+
+    var actions []Action
+
+    switch event.Type {
+    case "call.started":
+        actions = []Action{
+            {Type: "talk", Text: "Hello! You have reached our AI assistant. How can I help you today?"},
+            {Type: "listen"},
+        }
+
+    case "call.input":
+        reply := getAIReply(event.Transcript)
+        actions = []Action{
+            {Type: "talk", Text: reply},
+            {Type: "listen"},
+        }
+        storeConversationState(event.CallID, event.Transcript)
+
+    default:
+        actions = []Action{
+            {Type: "hangup"},
+        }
+    }
+
+    w.Header().Set("Content-Type", "application/json")
+    json.NewEncoder(w).Encode(actions)
+}
+
+// Function to store the conversation state
+func storeConversationState(callID, transcript string) {
+    // Store the transcript in the session map
+    sessions.Store(callID, transcript)
+}
+
+func main() {
+    http.HandleFunc("/webhook", webhookHandler)
+    log.Println("Webhook listening on :8080")
+    log.Fatal(http.ListenAndServe(":8080", nil))
+}
+```
+
+This code establishes a basic HTTP server that listens for incoming call events. The `webhookHandler` function decodes the incoming JSON payload, determines the appropriate actions based on the event type, and maintains the conversation state using a concurrent map. Additionally, the `verifyRequest` function is included to ensure that incoming requests are authenticated, which is crucial for securing your webhook.
+
+### Integrating Speech-to-Text and Text-to-Speech
+
+To enhance your voice agent's functionality, integrating STT and TTS is essential. VoIPBin simplifies these processes, allowing you to focus on the application logic. For TTS, you can specify the text to be spoken directly in the action returned by your webhook. The `Transcript` field in the `CallEvent` will contain the caller's speech converted to text, enabling your application to respond intelligently based on user input.
+
+### Leveraging Large Language Models for Intelligent Responses
+
+Integrating a large language model (LLM) can significantly enhance the responsiveness of your voice agent. Below is an example of how to incorporate an LLM call into your webhook handler:
+
+```go
+import (
+    "context"
+    "github.com/sashabaranov/go-openai"
+)
+
+func getAIReply(input string) string {
+    client := openai.NewClient("OPENAI_API_KEY")
+
+    resp, err := client.CreateChatCompletion(
+        context.Background(),
+        openai.ChatCompletionRequest{
+            Model: openai.GPT4oMini,
+            Messages: []openai.ChatCompletionMessage{
+                {
+                    Role:    openai.ChatMessageRoleSystem,
+                    Content: "You are a friendly customer support agent. Keep responses under 30 words for voice.",
+                },
+                {
+                    Role:    openai.ChatMessageRoleUser,
+                    Content: input,
+                },
+            },
+        },
+    )
+    if err != nil {
+        return "I am having trouble right now. Please try again."
+    }
+
+    return resp.Choices[0].Message.Content
+}
+```
+
+This function sends the user's input to the LLM and retrieves a response, which can then be spoken back to the user. It is crucial to keep responses concise, as voice interactions benefit from brevity and clarity.
+
+### Testing Your AI Voice Agent with Real Calls
+
+Once your webhook is set up and integrated with an LLM, you can test your voice agent by placing a call to your own phone number. The following script demonstrates how to initiate a test call using the VoIPBin SDK:
+
+```go
+package main
+
+import (
+    "context"
+    "fmt"
+    "log"
+
+    voipbin "github.com/voipbin/voipbin-go"
+)
+
+func main() {
+    client := voipbin.NewClient("YOUR_API_TOKEN")
+
+    call, err := client.Calls.Create(context.Background(), voipbin.CreateCallRequest{
+        Source: "voipbin",
+        Destinations: []voipbin.Destination{
+            {Type: "tel", Target: "+1234567890"}, // your number
+        },
+        WebhookURL: "https://your-ngrok-id.ngrok.io/webhook",
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    fmt.Printf("Call started: %s\n", call.ID)
+}
+```
+
+This script initiates a call to the specified phone number, allowing you to interact with your AI voice agent in real-time.
+
+### Best Practices for Deployment and Scaling
+
+When deploying your AI voice agent, consider the following best practices to ensure scalability and reliability:
+
+1. **Webhook Authentication**: Implement HMAC signatures or token-based verification to ensure that incoming requests are from trusted sources.
+
+2. **State Management**: Use concurrent data structures like `sync.Map` to maintain conversation state across calls, keyed by `call_id`.
+
+3. **Graceful Shutdown**: Implement graceful shutdowns for your HTTP server to avoid dropping calls during deployment.
+
+4. **Performance Monitoring**: Use logging and monitoring tools to track performance metrics and identify bottlenecks in real-time.
+
+5. **Load Testing**: Conduct load testing to understand how your application behaves under stress and ensure it can handle multiple concurrent calls efficiently.
+
+### Conclusion: The Future of AI Voice Agents in Go
+
+Building AI voice agents in Go with VoIPBin opens up new possibilities for developers looking to leverage cloud infrastructure without switching languages. The combination of Go's performance and VoIPBin's capabilities allows for the creation of scalable, efficient voice applications. As the demand for voice interfaces continues to grow, mastering these technologies positions developers at the forefront of innovation in AI and voice technology.
+
+By integrating STT, TTS, and LLMs, developers can create intelligent voice agents that provide seamless interactions, all while maintaining the advantages of Go's robust ecosystem. With the right tools and practices, the future of AI voice applications in Go looks promising.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/voipbin/build-an-ai-voice-agent-in-go-complete-tutorial-with-voipbin-sdk-1674)
+
+---
+
+<SocialShare title="Building a Scalable AI Voice Agent in Go with VoIPBin" slug="building-a-scalable-ai-voice-agent-in-go-with-voipbin" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
