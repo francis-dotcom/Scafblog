@@ -1,0 +1,151 @@
+---
+slug: understanding-silent-failures-in-ai-agents-a-deep-dive-into-openclaw-skill-complaints
+title: "Understanding Silent Failures in AI Agents: A Deep Dive into OpenClaw Skill Complaints"
+authors: [francis]
+tags: [ai, agents, security, openclaw]
+date: 2026-05-06T08:07:25.217Z
+description: "The OpenClaw registry tracks whether skills install. The dominant user complaint is not installation failure. It is a skill that installs cleanly, runs without error, and produces wrong or missing output, with no signal that anything went wrong.
+We classified 16,635 user mentions to find out what actually breaks.
+Three sources:
+GitHub Issues: scraped across openclaw/openclaw, openclaw/skills, and NVIDIA/NemoClaw via the GitHub Issues API
+Hacker News: 16,840 raw mentions via the Algolia API, filtered to 54.7% noise (keyword collisions unrelated to the skills ecosystem)
+Reddit: across 12 subreddits where OpenClaw skills discussions appear
+Each mention was classified into one of 12 categories using Claude Haiku 4.5 with an enum-constrained schema. We validated a 500-item sample against Claude Sonnet 4.6. Exact agreement: 73.8%, κ = 0.71. Zero operational-versus-security confusions in the validation set.
+The methodology, prompt, and validation data are published at vesselofone.com/research/ai-agent-skills-ecosystem. The full dataset is at doi.org/10.5281/zenodo.19691714 under CC BY 4.0. Reproducing the full classification pipeline requires an Anthropic API key and runs in approximately two hours at $10-30 in API cost.
+Aggregated across all three sources:
+
+
+
+Category
+Share of all mentions
+
+
+
+
+Operational correctness failures
+20.7%
+
+
+Silent failures (wrong output, no error)
+18.4%
+
+
+Compatibility problems
+9.0%
+
+
+Installation issues
+7.3%
+
+
+Security concerns
+1.4% (GitHub) / 5.1% (Hacker News)
+
+
+Discovery friction
+1.7% (GitHub) / 8.3% (Reddit)
+
+
+
+The top two categories together (39.1% of all classified mentions) describe the same underlying failure: a skill that appears to work but does not. The agent returns a result. The result is wrong. No error is raised. The user has to notice on their own.
+Installation is 7.3%. It is the failure mode that gets the most tooling attention and causes the fewest complaints.
+The three sources surface different problems. This is not sampling noise; it reflects how each platform is used.
+GitHub skews toward operational correctness. Developers who encounter wrong output file detailed bug reports: reproduction steps, expected versus actual output, version numbers. 55.5% of GitHub-filed complaints describe correctness failures of this kind. These are the most actionable reports, but they require the user to know the output was wrong.
+Hacker News surfaces security at 5.1% versus 1.4% on GitHub. Security researchers and people following incident reports congregate there. Discussions of supply-chain attacks and OAuth over-scoping appear in HN threads well before they produce GitHub issues.
+Reddit surfaces discovery friction at 8.3% versus 1.7% on GitHub. Finding the right skill in a catalog of 6,993 is a genuine problem that never produces a bug report. Users who cannot find what they need leave a subreddit comment, not a GitHub issue.
+If you only read GitHub Issues, you miss the security risk distribution and the discovery problem entirely.
+Security complaints represent 1.4% of GitHub mentions. That figure almost certainly understates actual exposure.
+A successful supply-chain attack is silent by design. Users whose agents were compromised by the ClawHavoc campaign (skills that installed cleanly, ran without errors, and exfiltrated data through the agent's normal output channel) are not in this dataset. They do not know they were compromised. They filed no issues.
+The 1.4% counts users who recognized a security problem and filed a report. It does not count users who were affected.
+The dominant failure mode (silent wrong output) has no automatic detection. No error is raised. No alert fires. The skill appears healthy by every operational metric.
+For skill authors: return explicit errors on unexpected input rather than plausible-looking wrong output. A skill that fails loudly is easier to debug than one that succeeds silently with bad results. Write correctness tests against representative data before publishing.
+For installers: test skills with representative inputs before putting them in any workflow that touches real data. Monitor outputs, not just uptime. A skill that returns something is not the same as a skill that returns the right thing.
+Full methodology and dataset: vesselofone.com/research/ai-agent-skills-ecosystem. Dataset at doi.org/10.5281/zenodo.19691714. Scan scripts at github.com/vesselofone/openclaw-skills under MIT + CC BY 4.0.
+A free per-skill auditor covering SKILL.md intent, OAuth scope width, and injection patterns: vesselofone.com/tools/skill-check.
+Vessel is managed OpenClaw hosting on private Linux VMs. Every agent we provision runs the skill auditor at setup. The research and dataset are open source...."
+image: /img/blog/generated/understanding-silent-failures-in-ai-agents-a-deep-dive-into-openclaw-skill-complaints-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Understanding Silent Failures in AI Agents: A Deep Dive into OpenClaw Skill Complaints](/img/blog/generated/understanding-silent-failures-in-ai-agents-a-deep-dive-into-openclaw-skill-complaints-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+Silent failures in AI systems are a critical concern that can significantly undermine user trust and operational integrity. Unlike visible failures that trigger alerts or error messages, silent failures occur without any indication of malfunction, leading to incorrect or missing outputs. In the context of the OpenClaw ecosystem, a recent analysis of over 16,000 skill complaints revealed that nearly 40% stemmed from silent failures and operational correctness failures. Specifically, 18.4% of complaints were classified as silent failures, while 20.7% were operational correctness failures. This stark reality emphasizes the urgent need for AI developers to address silent failures to enhance the reliability and security of their systems.
+
+### Differentiating Between Failure Modes
+
+To effectively address silent failures, it is essential to distinguish them from operational correctness failures. Operational correctness failures are characterized by visible issues, such as a skill that fails to install or crashes during execution. In contrast, silent failures manifest when a skill appears to function correctly while producing erroneous or misleading outputs. The OpenClaw dataset's classification indicates that both categories significantly impact user experience, with silent failures often being more insidious due to their lack of visibility. Developers must recognize this distinction to enhance the robustness of their AI agents and prioritize error handling strategies.
+
+### The Impact of Silent Failures on User Trust
+
+Silent failures can have profound implications for user trust in AI systems. Users expect reliable and accurate outputs; when these expectations are not met due to silent failures, it can lead to poor decision-making based on flawed information. For instance, consider a financial analysis skill that outputs incorrect data without signaling an error. Users relying on this skill may experience significant financial losses, as seen in a case where users faced a 30% drop in portfolio value due to misleading projections. Such incidents not only erode individual user trust but also hinder broader adoption of AI technologies, as users become increasingly wary of systems that do not consistently deliver accurate results.
+
+### Security Risks Associated with Silent Failures
+
+The security implications of silent failures are equally concerning. The OpenClaw study revealed that only 1.4% of complaints on GitHub were related to security concerns, a figure that likely underrepresents the actual risks. Silent failures can obscure malicious activities, such as supply-chain attacks, where compromised skills function normally while exfiltrating sensitive data. For example, during the ClawHavoc campaign, users unknowingly installed compromised skills that operated without error messages, highlighting the urgent need for enhanced monitoring and alerting mechanisms in AI systems to detect such anomalies. A notable case involved a skill that appeared to provide accurate weather forecasts but was actually sending user location data to unauthorized servers, demonstrating the potential for silent failures to mask serious security vulnerabilities.
+
+### Methodology: Insights from the OpenClaw Study
+
+The methodology employed in the OpenClaw study provides a robust framework for understanding skill complaints. Researchers utilized data from GitHub Issues, Hacker News, and Reddit to capture a diverse range of user experiences. They employed a machine learning model, Claude Haiku 4.5, to classify mentions into 12 distinct failure modes. This rigorous approach ensured that findings were not anecdotal but reflected a comprehensive analysis of the AI ecosystem. The validation of a 500-item sample achieved a 73.8% exact agreement rate, underscoring the reliability of the results and the importance of thorough classification in understanding operational challenges.
+
+### Case Study: The ClawHavoc Campaign
+
+The ClawHavoc campaign serves as a poignant example of the dangers associated with silent failures. Users unknowingly installed compromised skills that appeared to function correctly while secretly exfiltrating their data. The absence of explicit error messages or alerts meant that users were oblivious to the security breach, illustrating the need for developers to implement robust error handling and monitoring practices. This case emphasizes that silent failures can mask significant security vulnerabilities, necessitating a proactive approach to error detection and user awareness.
+
+### Recommendations for Skill Authors: Prioritizing Error Handling
+
+To mitigate the risks associated with silent failures, skill authors must prioritize explicit error handling and output validation. Instead of allowing skills to return plausible but incorrect outputs, developers should design their systems to raise clear errors when unexpected input is encountered. For example, implementing type checks and validation rules can prevent misleading outputs. This proactive approach not only aids in debugging but also enhances user confidence in the reliability of the AI agent. Additionally, conducting comprehensive correctness tests against representative data prior to deployment can help identify potential failure modes early in the development process.
+
+### Best Practices for Users: Vigilance in Monitoring Outputs
+
+For users of AI agents, effective monitoring of outputs is crucial to ensure operational integrity. Users should not only verify the uptime of skills but also scrutinize the accuracy of the outputs generated. Testing skills with representative inputs before integrating them into workflows that handle real data is essential. By actively monitoring outputs and being vigilant for discrepancies, users can catch silent failures before they lead to adverse outcomes, thereby safeguarding their operations against potential pitfalls. Utilizing logging mechanisms to track output history can also help users identify patterns indicative of silent failures.
+
+### Enhancing Error Detection Mechanisms in AI Systems
+
+The findings from the OpenClaw study underscore the urgent need for improved error handling mechanisms across the AI ecosystem. Developers should strive to implement comprehensive logging and alerting systems capable of detecting anomalies in output patterns. This could involve establishing thresholds for acceptable output ranges and triggering alerts when outputs deviate significantly from expected values. Such measures would not only enhance operational correctness but also provide users with greater assurance regarding the reliability of AI agents.
+
+### The Broader Implications for AI Security
+
+Addressing silent failures is not just a matter of improving individual skills; it also relates to the broader context of AI security. The AI community must recognize that silent failures can mask security vulnerabilities that may go unnoticed until significant damage occurs. By fostering a culture of transparency and accountability in AI development, we can enhance the security posture of AI systems and build user trust. Collaborative efforts to share best practices and case studies can help create a more resilient AI ecosystem.
+
+### Conclusion: A Collective Responsibility
+
+In conclusion, addressing silent failures in AI agents is imperative for enhancing the reliability and trustworthiness of these systems. By recognizing the prevalence of silent failures and their implications for user experience and security, the AI community can take proactive steps toward developing more robust error handling and monitoring practices. As AI continues to evolve and integrate into various sectors, ensuring operational correctness must remain a top priority. Through collective efforts, we can build AI systems that users can trust to deliver accurate and secure outputs, ultimately fostering a more resilient AI ecosystem.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/mehul_bhardwaj_8a2d2aaecb/we-classified-16635-openclaw-skill-complaints-wrong-output-is-the-1-failure-mode-a0o)
+
+---
+
+<SocialShare title="Understanding Silent Failures in AI Agents: A Deep Dive into OpenClaw Skill Complaints" slug="understanding-silent-failures-in-ai-agents-a-deep-dive-into-openclaw-skill-complaints" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
