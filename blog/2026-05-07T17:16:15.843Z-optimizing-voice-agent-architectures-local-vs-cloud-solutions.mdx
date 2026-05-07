@@ -1,0 +1,2196 @@
+---
+slug: optimizing-voice-agent-architectures-local-vs-cloud-solutions
+title: "Optimizing Voice Agent Architectures: Local vs Cloud Solutions"
+authors: [francis]
+tags: [ai, cloud, infrastructure, voice agents]
+date: 2026-05-07T17:16:15.844Z
+description: "Voice Agent Tech Stack Comparison: Local vs Cloud with Shared Booking Backend
+
+
+ElevenLabs Cloud vs Deepgram+Groq+Cartesia Local -- Architecture, Latency, Cost, and Migration
+A production-tested comparison of two voice agent architectures that answer live phone calls through Asterisk, share the same booking backend APIs, and can run side-by-side for overflow routing. Includes complete code for the shared webhook APIs, database schemas, the ElevenLabs cloud setup automation, and a step-by-step migration guide.
+Introduction: Why Two Stacks
+Architecture Overview
+Tech Stack Evolution: v1 to v2
+Head-to-Head Comparison
+Local Agent v1: Deepgram + Groq + ElevenLabs TTS
+Local Agent v2: Deepgram + Groq + Cartesia TTS
+Cloud Agent: ElevenLabs Conversational AI
+Shared Backend: DID Context API
+Shared Backend: Booking API
+Database Schema
+ElevenLabs Cloud Setup Automation
+ElevenLabs Tool Configuration
+Asterisk Routing: Local vs Cloud
+Migration Guide: Switching Between Stacks
+Cost Analysis
+When to Use Which
+Running Both Side-by-Side
+Production Considerations
+Real-world voice agent deployments rarely use a single architecture. You need:
+A local agent for primary call handling -- low latency, low cost, full control over prompts, tools, and voice parameters.
+A cloud agent for overflow, disaster recovery, and rapid deployment -- zero infrastructure, built-in SIP, scales to hundreds of concurrent calls.
+The key insight: both agents can share the same backend APIs. The DID-to-company lookup, the booking creation, the repeat caller detection -- all of it runs on the same PHP webhooks regardless of whether the caller is talking to your local Python agent or to ElevenLabs' cloud infrastructure.
+This tutorial documents a production system where:
+The local agent (Deepgram + Groq + Cartesia) handles primary inbound calls at 200-250ms latency
+The ElevenLabs cloud agent handles overflow when the local agent is at capacity
+Both agents call the same did_context.php and create_booking.php endpoints
+Bookings from either agent land in the same ai_agent_bookings table
+The dispatch team sees a unified view regardless of which agent took the call
+By the end of this tutorial, you will have:
+A complete understanding of three voice agent architectures (local v1, local v2, cloud)
+Two PHP webhook APIs that serve as the shared backend for any agent
+Database schemas for DID-to-company mapping, booking storage, and repeat caller detection
+An automated setup script that provisions an ElevenLabs cloud agent via API
+Asterisk dialplan patterns for routing calls to local or cloud agents
+A migration checklist for switching between stacks
+An Asterisk/ViciDial server with AudioSocket support (Asterisk 18+)
+PHP 7.4+ with PDO MySQL extension
+MariaDB/MySQL database
+Python 3.11+ (for local agent)
+API accounts: Deepgram, Groq, Cartesia (local) and/or ElevenLabs (cloud)
+                    ┌─────────────────────────────────────────────┐
+                    │              PSTN / SIP Trunks               │
+                    └──────────────────┬──────────────────────────┘
+                                       │
+                                       ▼
+                    ┌─────────────────────────────────────────────┐
+                    │              Asterisk PBX                    │
+                    │                                             │
+                    │   Inbound DID → Check local agent capacity  │
+                    │        │                     │              │
+                    │        ▼                     ▼              │
+                    │   ┌─────────┐         ┌───────────┐        │
+                    │   │ Local   │         │ Cloud     │        │
+                    │   │ Agent   │         │ Agent     │        │
+                    │   │ (9099)  │         │ (SIP out) │        │
+                    │   └────┬────┘         └─────┬─────┘        │
+                    └────────┼────────────────────┼──────────────┘
+                             │                    │
+                             ▼                    ▼
+                    ┌─────────────────────────────────────────────┐
+                    │         Shared Backend APIs (PHP)            │
+                    │                                             │
+                    │   ┌──────────────┐    ┌─────────────────┐  │
+                    │   │ did_context   │    │ create_booking   │  │
+                    │   │   .php        │    │   .php           │  │
+                    │   └──────┬───────┘    └────────┬────────┘  │
+                    │          │                      │           │
+                    │          ▼                      ▼           │
+                    │   ┌─────────────────────────────────────┐  │
+                    │   │          MariaDB / MySQL             │  │
+                    │   │                                     │  │
+                    │   │  did_company_map │ ai_agent_bookings │  │
+                    │   │  doppia_calls    │                   │  │
+                    │   └─────────────────────────────────────┘  │
+                    └─────────────────────────────────────────────┘
+
+LOCAL v1 (Feb 2026):
+  Caller → Asterisk → AudioSocket(:9099)
+    → Deepgram Nova-2 STT
+    → Groq Llama 3.3 70B (versatile)
+    → ElevenLabs Flash v2 TTS (WebSocket, ulaw→PCM resample)
+    → AudioSocket → Caller
+  Latency: ~395ms
+
+LOCAL v2 (Feb 23, 2026):
+  Caller → Asterisk → AudioSocket(:9099)
+    → Deepgram Nova-3 STT
+    → Groq Llama 3.3 70B (specdec)
+    → Cartesia Sonic-3 TTS (WebSocket, native 8kHz PCM)
+    → AudioSocket → Caller
+  Latency: ~200-250ms
+
+CLOUD (ElevenLabs Conversational AI):
+  Caller → Asterisk → SIP INVITE → sip.rtc.elevenlabs.io
+    → ElevenLabs STT (built-in)
+    → GPT-4o LLM (ElevenLabs-hosted)
+    → ElevenLabs v3 TTS (built-in)
+    → SIP RTP → Asterisk → Caller
+  Latency: ~500-800ms
+
+The local agent evolved through two major versions in a two-week period. Understanding what changed and why is critical for making your own technology choices.
+
+
+
+Component
+Choice
+Why
+
+
+
+
+STT
+Deepgram Nova-2
+Best streaming accuracy for British English at the time
+
+
+LLM
+Groq Llama 3.3 70B (versatile)
+~800 tok/s, fast enough for real-time
+
+
+TTS
+ElevenLabs Flash v2
+Natural British voices, low-latency streaming
+
+
+Audio
+8kHz ulaw from ElevenLabs, converted to PCM
+Requires audioop.ulaw2lin() conversion
+
+
+
+v1 latency breakdown:
+STT final transcript:     ~150ms
+LLM first token (TTFT):   ~80ms
+TTS first byte (TTFB):   ~120ms
+Audio conversion overhead:  ~15ms
+Network + queue overhead:   ~30ms
+─────────────────────────────────
+Total mouth-to-ear:       ~395ms
+
+The bottleneck was the TTS pipeline. ElevenLabs Flash v2 outputs audio in ulaw format at 8kHz. AudioSocket expects 16-bit signed linear PCM at 8kHz. Every audio chunk needed audioop.ulaw2lin() conversion -- a blocking CPU operation that added ~15ms per chunk and prevented true token-level streaming.
+Additionally, ElevenLabs' WebSocket API uses a request-response pattern per utterance: you open a connection, send text, receive audio, close. There is no "continuation" concept -- each new sentence starts a fresh synthesis context, adding ~100ms of cold-start overhead per sentence.
+Three simultaneous upgrades eliminated the bottlenecks:
+1. Deepgram Nova-2 to Nova-3
+# v1 -- Nova-2
+"&model=nova-2&language=en-GB"
+
+# v2 -- Nova-3
+"&model=nova-3&language=en-GB"
+"&keywords=postcode:2&keywords=plumber:2&keywords=callout:1"
+
+Nova-3 brought better accuracy on domain-specific vocabulary (postcodes, trade terms) and faster partial results. The keywords parameter biases the model toward domain vocabulary, reducing misrecognitions of "postcode" as "post code" or "callout" as "call out."
+2. Groq versatile to specdec
+# v1
+GROQ_MODEL = "llama-3.3-70b-versatile"   # ~800 tok/s
+
+# v2
+GROQ_MODEL = "llama-3.3-70b-specdec"     # ~1,665 tok/s
+
+Speculative decoding (specdec) uses a small draft model to predict multiple tokens, then verifies them in parallel on the 70B model. Same quality, roughly double the throughput. TTFT dropped from ~80ms to ~50ms.
+3. ElevenLabs TTS to Cartesia Sonic-3
+This was the game-changing upgrade. Cartesia solved both v1 bottlenecks:
+Native 8kHz PCM output -- no conversion needed:
+# v1 -- ElevenLabs: ulaw output, must convert
+audio_ulaw = base64.b64decode(data["audio"])
+audio_pcm = audioop.ulaw2lin(audio_ulaw, 2)  # CPU blocking
+
+# v2 -- Cartesia: native PCM output, zero conversion
+output_format={
+    "container": "raw",
+    "encoding": "pcm_s16le",
+    "sample_rate": 8000,   # Native 8kHz, no resampling
+}
+# Audio bytes go straight to AudioSocket -- zero conversion overhead
+
+Continuation API -- tokens stream directly into TTS:
+# v1 -- ElevenLabs: one WebSocket per sentence, sentence boundary detection
+sentence, remainder = self._split_sentence(buffer)
+if sentence:
+    await self._speak(sentence)  # New WS connection each time
+
+# v2 -- Cartesia: persistent context, token-level streaming
+ctx, recv_task = await tts.stream_tokens(audio_queue, cancel)
+async for event in llm.generate(messages):
+    if event["type"] == "text":
+        await ctx.send(
+            model_id="sonic-3",
+            transcript=event["text"],   # Individual token
+            voice=voice,
+            output_format=fmt,
+            continue_=True,             # Same context, no cold start
+        )
+await ctx.no_more_inputs()  # Signal end of stream
+
+With the continuation API, each LLM token goes directly to Cartesia without waiting for a sentence boundary. Cartesia begins synthesizing audio from the first few tokens and streams it back while more tokens arrive. There is no sentence-detection regex, no per-sentence WebSocket overhead, and no audio format conversion.
+v2 latency breakdown:
+STT final transcript:     ~120ms (Nova-3 faster partials)
+LLM first token (TTFT):   ~50ms (specdec)
+TTS first byte (TTFB):    ~40ms (Cartesia continuation, native PCM)
+Network + queue overhead:  ~20ms
+─────────────────────────────────
+Total mouth-to-ear:       ~230ms (typical)
+
+In v1, the agent had to detect sentence boundaries in the LLM output to know when to send text to ElevenLabs:
+# v1 -- sentence splitting required
+def _split_sentence(self, text):
+    """Split text at first sentence boundary."""
+    match = re.search(r'[.!?]\s', text)
+    if match:
+        idx = match.end()
+        return text[:idx].strip(), text[idx:]
+    return None, text
+
+# Usage in think_and_speak:
+async for event in self.llm.generate(self.messages):
+    if event["type"] == "text":
+        sentence_buffer += event["text"]
+        sentence, remainder = self._split_sentence(sentence_buffer)
+        if sentence:
+            sentence_buffer = remainder
+            await self._speak(sentence)  # Each sentence = new TTS call
+
+# Remaining buffer after LLM finishes
+if sentence_buffer.strip():
+    await self._speak(sentence_buffer.strip())
+
+This approach has inherent latency: the agent waits for a complete sentence before speaking. If the LLM generates "I can get a plumber out to you within thirty minutes to an hour." as one sentence, the caller hears nothing until the period arrives. That is easily 500ms+ of silence.
+In v2, the token-streaming pipeline eliminates this entirely. The caller hears "I" almost immediately, then "can", "get", etc. -- the voice synthesizes as the LLM thinks.
+
+
+
+Aspect
+Local (Deepgram+Groq+Cartesia)
+Cloud (ElevenLabs Conversational AI)
+
+
+
+
+Latency
+200-250ms mouth-to-ear
+500-800ms mouth-to-ear
+
+
+Cost per minute
+~$0.02
+~$0.08
+
+
+Voice quality
+Cartesia Sonic-3 (excellent)
+ElevenLabs v3 (excellent)
+
+
+STT engine
+Deepgram Nova-3 (best-in-class)
+ElevenLabs built-in
+
+
+LLM
+Groq Llama 3.3 70B (your choice)
+GPT-4o (configurable)
+
+
+Control
+Full -- code, prompts, tools, voice
+Limited -- dashboard/API config
+
+
+Setup effort
+High (Python, AudioSocket, systemd)
+Low (API calls + SIP trunk)
+
+
+Scalability
+Limited by server CPU/RAM
+Unlimited (ElevenLabs infra)
+
+
+Barge-in
+Custom VAD implementation
+Built-in, well-tuned
+
+
+Audio format
+Native 8kHz PCM (zero conversion)
+G.711 ulaw (SIP native)
+
+
+Tool calling
+OpenAI-compatible function calling
+Webhook-based server tools
+
+
+Prompt changes
+Edit code, restart service
+API call or dashboard
+
+
+Voice cloning
+Cartesia voice library
+ElevenLabs voice library + cloning
+
+
+SIP integration
+AudioSocket (local TCP)
+Direct SIP trunk to ElevenLabs
+
+
+Failure mode
+Service crash = missed calls
+ElevenLabs outage = missed calls
+
+
+Data privacy
+Audio stays on your server
+Audio processed by ElevenLabs
+
+
+Concurrent calls
+~5-10 per server (CPU bound)
+5-500+ (plan dependent)
+
+
+
+
+
+
+Aspect
+v1 (ElevenLabs TTS)
+v2 (Cartesia TTS)
+
+
+
+
+TTS latency
+~120ms TTFB
+~40ms TTFB
+
+
+Audio pipeline
+ulaw → PCM conversion required
+Native PCM, zero conversion
+
+
+Token streaming
+Sentence-boundary detection
+True token-level continuation
+
+
+Barge-in
+Not implemented
+RMS-based VAD with TTS cancel
+
+
+STT model
+Deepgram Nova-2
+Deepgram Nova-3 + keywords
+
+
+LLM speed
+~800 tok/s (versatile)
+~1,665 tok/s (specdec)
+
+
+Total latency
+~395ms
+~200-250ms
+
+
+Code complexity
+Simpler (no barge-in, no continuation)
+More complex (worth it)
+
+
+
+The v1 agent used ElevenLabs Flash v2 for text-to-speech. The key architectural difference from v2 is the TTS class and the sentence-boundary pipeline.
+class ElevenLabsTTS:
+    """Streaming TTS via ElevenLabs WebSocket API."""
+
+    async def synthesize_streaming(self, text, audio_out_queue):
+        """Send text to ElevenLabs, stream audio chunks to queue."""
+        url = (
+            f"wss://api.elevenlabs.io/v1/text-to-speech/"
+            f"{ELEVENLABS_VOICE_ID}/stream-input"
+            f"?model_id={ELEVENLABS_MODEL}"
+            f"&output_format=ulaw_8000"
+        )
+
+        t0 = time.monotonic()
+        first_audio = True
+
+        try:
+            async with ws_connect(url) as ws:
+                # BOS -- begin of stream
+                await ws.send(json.dumps({
+                    "text": " ",
+                    "voice_settings": {
+                        "stability": 0.4,
+                        "similarity_boost": 0.85,
+                        "speed": 1.0,
+                    },
+                    "xi_api_key": ELEVENLABS_API_KEY,
+                }))
+
+                # Send text
+                await ws.send(json.dumps({
+                    "text": text + " ",
+                    "try_trigger_generation": True,
+                }))
+
+                # EOS -- flush
+                await ws.send(json.dumps({"text": ""}))
+
+                # Receive audio chunks
+                async for msg in ws:
+                    try:
+                        data = json.loads(msg)
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+
+                    if data.get("audio"):
+                        if first_audio:
+                            log.info("TTS TTFB: %.0fms",
+                                     (time.monotonic() - t0) * 1000)
+                            first_audio = False
+
+                        audio_ulaw = base64.b64decode(data["audio"])
+                        # Convert ulaw (8kHz) to signed linear 16-bit PCM
+                        audio_pcm = audioop.ulaw2lin(audio_ulaw, 2)
+
+                        # Split into 320-byte chunks (20ms at 8kHz)
+                        for i in range(0, len(audio_pcm), CHUNK_SIZE):
+                            chunk = audio_pcm[i:i + CHUNK_SIZE]
+                            if len(chunk) < CHUNK_SIZE:
+                                chunk += b'\x00' * (CHUNK_SIZE - len(chunk))
+                            await audio_out_queue.put(chunk)
+
+                    if data.get("isFinal"):
+                        break
+
+        except Exception as e:
+            log.error("TTS error: %s", e)
+
+Key characteristics:
+Opens a new WebSocket connection per sentence
+Sends text as a single block (not token-streaming)
+Receives audio in ulaw format, must decode base64 and convert to PCM
+try_trigger_generation: True tells ElevenLabs to start synthesis immediately
+No continuation context between sentences
+The sentence-boundary approach was necessary because ElevenLabs expects complete text, not tokens:
+async def _think_and_speak(self):
+    """Stream LLM response, detect sentence boundaries, speak each one."""
+    full_response = []
+    sentence_buffer = ""
+
+    async for event in self.llm.generate(self.messages):
+        if event["type"] == "text":
+            full_response.append(event["text"])
+            sentence_buffer += event["text"]
+
+            # Detect sentence boundary
+            sentence, remainder = self._split_sentence(sentence_buffer)
+            if sentence:
+                sentence_buffer = remainder
+                await self._speak(sentence)
+
+        elif event["type"] == "tool_call":
+            # Handle tool calls (same as v2)
+            ...
+
+    # Speak remaining buffer
+    if sentence_buffer.strip():
+        await self._speak(sentence_buffer.strip())
+
+The v1 agent simply muted STT during playback to avoid echo, but had no barge-in capability:
+async def _audio_reader(self, reader):
+    """Read audio from AudioSocket, forward to STT."""
+    try:
+        while not self.hangup_event.is_set():
+            frame_type, payload = await read_as_frame(reader)
+
+            if frame_type == AS_TYPE_HANGUP:
+                self.hangup_event.set()
+                return
+
+            if frame_type == AS_TYPE_AUDIO and payload:
+                # Only forward to STT when agent is NOT speaking
+                if not self.is_speaking.is_set():
+                    await self.stt.send_audio(payload)
+    except asyncio.IncompleteReadError:
+        self.hangup_event.set()
+
+No energy detection, no barge-in event, no TTS cancellation. If the caller interrupted, they had to wait for the agent to finish speaking.
+The v2 agent replaced ElevenLabs TTS with Cartesia Sonic-3, added barge-in detection, and switched to token-streaming. For the complete v2 agent code, refer to Tutorial 03: Building a Real-Time AI Voice Agent for Asterisk. This section highlights the key differences.
+from cartesia import AsyncCartesia
+
+class CartesiaTTS:
+    """Streaming TTS via Cartesia Sonic-3 WebSocket with continuation API."""
+
+    def __init__(self):
+        self.client = None
+        self.connection = None
+
+    async def connect(self):
+        """Open persistent WebSocket connection (reused across utterances)."""
+        self.client = AsyncCartesia(api_key=CARTESIA_API_KEY)
+        self.connection = await self.client.tts.websocket_connect().__aenter__()
+        log.info("Cartesia TTS connected (Sonic-3)")
+
+    async def stream_tokens(self, audio_out_queue, cancel_event):
+        """
+        Token-streaming TTS context. Returns (ctx, receive_task).
+        Caller pushes LLM tokens into ctx, audio arrives in queue.
+        """
+        if not self.connection:
+            await self.connect()
+
+        ctx = self.connection.context()
+        recv_task = asyncio.create_task(
+            self._receive_audio(ctx, audio_out_queue, cancel_event)
+        )
+        return ctx, recv_task
+
+    async def _receive_audio(self, ctx, audio_out_queue, cancel_event):
+        """Background: receive audio from Cartesia, chunk to queue."""
+        first_audio = True
+        t0 = time.monotonic()
+
+        try:
+            async for response in ctx.receive():
+                if cancel_event.is_set():
+                    break
+
+                if response.type == "chunk" and response.audio:
+                    if first_audio:
+                        log.info("TTS TTFB: %.0fms",
+                                 (time.monotonic() - t0) * 1000)
+                        first_audio = False
+
+                    # Audio is already 8kHz PCM -- no conversion needed
+                    pcm_bytes = response.audio
+                    for i in range(0, len(pcm_bytes), CHUNK_SIZE):
+                        if cancel_event.is_set():
+                            return
+                        chunk = pcm_bytes[i:i + CHUNK_SIZE]
+                        if len(chunk) < CHUNK_SIZE:
+                            chunk += b'\x00' * (CHUNK_SIZE - len(chunk))
+                        await audio_out_queue.put(chunk)
+        except asyncio.CancelledError:
+            pass
+
+    async def cancel_context(self, ctx):
+        """Cancel in-progress TTS (for barge-in)."""
+        try:
+            if self.connection:
+                await self.connection.send({
+                    "context_id": ctx._context_id,
+                    "cancel": True,
+                })
+        except Exception:
+            pass
+
+Key differences from v1:
+Persistent WebSocket -- one connection reused across all utterances in a call
+Context API -- self.connection.context() creates a streaming context that accepts tokens
+continue_=True -- each token send tells Cartesia "more is coming"
+Native PCM -- pcm_s16le at 8000 Hz, bytes go straight to AudioSocket
+Cancellable -- cancel_context() stops mid-utterance for barge-in
+async def _audio_reader(self, reader):
+    """Read audio, forward to STT. During speech: run barge-in VAD."""
+    speech_energy_start = None
+
+    try:
+        while not self.hangup_event.is_set():
+            frame_type, payload = await read_as_frame(reader)
+
+            if frame_type == AS_TYPE_AUDIO and payload:
+                if self.is_speaking.is_set():
+                    # While agent speaks, monitor caller energy
+                    try:
+                        rms = audioop.rms(payload, 2)
+                    except audioop.error:
+                        rms = 0
+
+                    if rms > BARGEIN_RMS_THRESHOLD:  # 800
+                        if speech_energy_start is None:
+                            speech_energy_start = time.monotonic()
+                        elif (time.monotonic() - speech_energy_start
+                              >= BARGEIN_DURATION):  # 0.3s
+                            # Caller is interrupting
+                            self.barge_in_event.set()
+                            speech_energy_start = None
+
+                            # Clear audio queue
+                            while not self.audio_out_queue.empty():
+                                self.audio_out_queue.get_nowait()
+
+                            # Cancel TTS context
+                            if self._current_tts_ctx:
+                                await self.tts.cancel_context(
+                                    self._current_tts_ctx
+                                )
+
+                            # Resume STT
+                            self.is_speaking.clear()
+                            await self.stt.send_audio(payload)
+                    else:
+                        speech_energy_start = None
+                else:
+                    speech_energy_start = None
+                    await self.stt.send_audio(payload)
+    except asyncio.IncompleteReadError:
+        self.hangup_event.set()
+
+The barge-in system requires 300ms of sustained speech energy above RMS 800 to trigger. This prevents false positives from background noise while being responsive enough that callers feel heard. When triggered, it:
+Sets the barge-in event (which stops the LLM generation loop)
+Clears the audio output queue (stops playback immediately)
+Cancels the Cartesia TTS context (stops synthesis)
+Clears the speaking flag and resumes forwarding audio to STT
+The ElevenLabs cloud agent is a fully managed voice AI that connects via SIP. You configure it through API calls or the ElevenLabs dashboard -- no Python code runs on your server.
+Customer dials DID (e.g., +44 20 3996 2952)
+    │
+    ▼
+Your Asterisk receives the call
+    │
+    ▼
+Dialplan routes overflow → SIP INVITE to sip.rtc.elevenlabs.io
+    │
+    ▼
+ElevenLabs answers, starts agent
+    │
+    ▼
+Agent calls getCallContext webhook → your did_context.php
+    │
+    ▼
+Your API returns: company="Acme Plumbing", trade="plumbing", fee=48
+    │
+    ▼
+Agent greets: "Hello, Acme Plumbing, good afternoon."
+Agent collects: problem, postcode, address, name
+    │
+    ▼
+Agent calls createBooking webhook → your create_booking.php
+    │
+    ▼
+Your API stores booking in ai_agent_bookings table
+    │
+    ▼
+Agent confirms: "That's booked. The plumber will be with you
+                  within the hour. Thanks for calling."
+
+The cloud agent is configured with:
+ASR: ElevenLabs built-in, quality: high, input format ulaw_8000
+
+
+LLM: GPT-4o with temperature: 0.4, custom system prompt
+TTS: ElevenLabs v3 conversational model, British voice, output ulaw_8000
+
+
+Turn management: 10s turn timeout, 15s silence end-call, patient eagerness
+Tools: Two webhook-based server tools (getCallContext, createBooking)
+Limits: 5 concurrent calls, 500 daily limit, 300s max duration
+The cloud agent uses essentially the same prompt as the local agent, injecting dynamic variables from the getCallContext tool response:
+You work at {{company_name}}, a UK {{trade_type}} company.
+You answer the phone. Casual British English.
+Short replies, 1 sentence max. Never sound scripted.
+
+# Context
+- Company: {{company_name}}
+- Trade: {{trade_type}} / {{trade_label}}
+- Callout: {{callout_fee}}
+- Repeat: {{is_repeat}}
+
+# Workflow
+Step 1: Greet with company name and time of day.
+Step 2: Listen to the problem. One follow-up max.
+Step 3: Quote callout fee. Wait for agreement.
+Step 4: Postcode. Step 5: Address. Step 6: Name.
+Step 7: Book using createBooking tool.
+Step 8: Confirm and close.
+
+The {{variable}} syntax is ElevenLabs' dynamic variable injection -- values are populated from tool response assignments.
+This API is called by both the local and cloud agents at the start of every call. It maps the dialled number (DID) to a company context and checks whether the caller has called recently.
+did_context.php
+
+
+
+
+
+<?php
+/**
+ * Voice Agent -- DID Context API
+ *
+ * Called at the start of each call by both local and cloud agents.
+ * Returns company name, trade type, callout fee, repeat caller status.
+ *
+ * POST /api/voice-agent/did_context.php
+ * Body: { "did_number": "442039962952", "caller_id": "447963155448" }
+ * Auth: X-API-Key header
+ */
+
+header('Content-Type: application/json');
+
+// --- Auth ---
+$API_TOKEN = getenv('VOICE_AGENT_API_KEY') ?: 'YOUR_API_KEY_HERE';
+
+$auth = $_SERVER['HTTP_X_API_KEY'] ?? '';
+if ($auth !== $API_TOKEN) {
+    http_response_code(401);
+    echo json_encode(['error' => 'Unauthorized']);
+    exit;
+}
+
+// --- Input ---
+$input = json_decode(file_get_contents('php://input'), true);
+if (!$input) {
+    http_response_code(400);
+    echo json_encode(['error' => 'Invalid JSON body']);
+    exit;
+}
+
+$did_number = preg_replace('/[^0-9]/', '', $input['did_number'] ?? '');
+$caller_id  = preg_replace('/[^0-9]/', '', $input['caller_id'] ?? '');
+
+if (empty($did_number)) {
+    http_response_code(400);
+    echo json_encode(['error' => 'did_number is required']);
+    exit;
+}
+
+// --- DB ---
+// Read database credentials from your config file
+// Adjust this path to match your installation
+$db_conf = [];
+$lines = file('/etc/astguiclient.conf',
+              FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+foreach ($lines as $line) {
+    if (preg_match('/^(VARDB_\w+)\s*=>\s*(.+)$/', $line, $m)) {
+        $db_conf[$m[1]] = trim($m[2]);
+    }
+}
+
+$dsn = sprintf(
+    'mysql:host=%s;port=%s;dbname=%s;charset=utf8',
+    $db_conf['VARDB_server'] ?? 'localhost',
+    $db_conf['VARDB_port'] ?? '3306',
+    $db_conf['VARDB_database'] ?? 'asterisk'
+);
+
+try {
+    $pdo = new PDO(
+        $dsn,
+        $db_conf['VARDB_user'] ?? 'cron',
+        $db_conf['VARDB_pass'] ?? '',
+        [
+            PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+            PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+        ]
+    );
+} catch (PDOException $e) {
+    http_response_code(500);
+    echo json_encode(['error' => 'Database connection failed']);
+    exit;
+}
+
+// --- Look up DID ---
+$stmt = $pdo->prepare(
+    'SELECT clean_name, trade_type, callout_fee, area
+     FROM did_company_map WHERE did = ?'
+);
+$stmt->execute([$did_number]);
+$row = $stmt->fetch();
+
+if (!$row) {
+    // Fallback for unmapped DIDs
+    $result = [
+        'company_name' => 'Home Services',
+        'trade_type'   => 'plumbing',
+        'callout_fee'  => 49,
+        'area'         => null,
+        'is_repeat'    => false,
+        'greeting'     => 'Hello, how can I help you?',
+    ];
+    echo json_encode($result);
+    exit;
+}
+
+// --- Check repeat caller (last 7 days) ---
+$is_repeat = false;
+if (!empty($caller_id)) {
+    $cutoff = date('Y-m-d H:i:s', time() - 604800); // 7 days
+    $stmt2 = $pdo->prepare(
+        'SELECT 1 FROM doppia_calls
+         WHERE phone_number = ? AND did = ? AND last_call_time >= ?
+         LIMIT 1'
+    );
+    $stmt2->execute([$caller_id, $did_number, $cutoff]);
+    $is_repeat = (bool)$stmt2->fetch();
+}
+
+// --- Build trade label ---
+$trade_labels = [
+    'plumbing'   => 'plumber',
+    'electrical'  => 'electrician',
+    'drainage'   => 'drainage engineer',
+    'locksmith'  => 'locksmith',
+];
+$trade_label = $trade_labels[$row['trade_type']] ?? 'engineer';
+
+// --- Build time-appropriate greeting ---
+$hour = (int)date('H');
+if ($hour < 12) {
+    $time_greeting = 'good morning';
+} elseif ($hour < 18) {
+    $time_greeting = 'good afternoon';
+} else {
+    $time_greeting = 'good evening';
+}
+$greeting = "Hello, $time_greeting. How can I help you?";
+
+// --- Response ---
+$result = [
+    'company_name'  => $row['clean_name'],
+    'trade_type'    => $row['trade_type'],
+    'trade_label'   => $trade_label,
+    'callout_fee'   => (int)$row['callout_fee'],
+    'area'          => $row['area'],
+    'is_repeat'     => $is_repeat,
+    'did_number'    => $did_number,
+    'caller_id'     => $caller_id,
+    'greeting'      => $greeting,
+];
+
+echo json_encode($result);
+
+curl -X POST https://YOUR_SERVER/api/voice-agent/did_context.php \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: YOUR_API_KEY_HERE" \
+  -d '{"did_number": "442039962952", "caller_id": "447963155448"}'
+
+{
+  "company_name": "Acme Plumbing",
+  "trade_type": "plumbing",
+  "trade_label": "plumber",
+  "callout_fee": 48,
+  "area": "London",
+  "is_repeat": false,
+  "did_number": "442039962952",
+  "caller_id": "447963155448",
+  "greeting": "Hello, good afternoon. How can I help you?"
+}
+
+Local agent (Python):
+async def get_call_context(self, did, cli):
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            CONTEXT_API_URL,
+            json={"did_number": did, "caller_id": cli},
+            headers={"X-API-Key": CONTEXT_API_KEY},
+            timeout=aiohttp.ClientTimeout(total=3),
+        ) as resp:
+            if resp.status == 200:
+                return await resp.json()
+    # Fallback
+    return {"company_name": "Home Services", ...}
+
+Cloud agent (ElevenLabs webhook):
+The ElevenLabs agent calls this automatically as a "server tool" with execution_mode: immediate -- it fires before the agent speaks its first word. ElevenLabs sends the POST request with the DID and caller ID from the SIP INVITE headers.
+This API is called by both agents when the caller agrees to book a job. It stores the booking in a shared database table.
+create_booking.php
+
+
+
+
+
+<?php
+/**
+ * Voice Agent -- Create Booking API
+ *
+ * Called by both local and cloud agents after collecting customer details.
+ * Stores the booking in ai_agent_bookings table.
+ *
+ * POST /api/voice-agent/create_booking.php
+ * Auth: X-API-Key header
+ */
+
+header('Content-Type: application/json');
+
+// --- Auth ---
+$API_TOKEN = getenv('VOICE_AGENT_API_KEY') ?: 'YOUR_API_KEY_HERE';
+
+$auth = $_SERVER['HTTP_X_API_KEY'] ?? '';
+if ($auth !== $API_TOKEN) {
+    http_response_code(401);
+    echo json_encode(['error' => 'Unauthorized']);
+    exit;
+}
+
+// --- Input ---
+$input = json_decode(file_get_contents('php://input'), true);
+if (!$input) {
+    http_response_code(400);
+    echo json_encode(['error' => 'Invalid JSON body']);
+    exit;
+}
+
+$required = [
+    'customer_name', 'customer_phone', 'postcode',
+    'address', 'problem_description', 'trade_type'
+];
+foreach ($required as $field) {
+    if (empty($input[$field])) {
+        http_response_code(400);
+        echo json_encode(['error' => "Missing required field: $field"]);
+        exit;
+    }
+}
+
+// --- Sanitize ---
+$customer_name  = trim($input['customer_name']);
+$customer_phone = preg_replace('/[^0-9+]/', '', $input['customer_phone']);
+$postcode       = strtoupper(trim($input['postcode']));
+$address        = trim($input['address']);
+$problem        = trim($input['problem_description']);
+$trade_type     = $input['trade_type'];
+$callout_fee    = (int)($input['callout_fee'] ?? 49);
+$did_number     = preg_replace('/[^0-9]/', '', $input['did_number'] ?? '');
+$company_name   = trim($input['company_name'] ?? '');
+$is_repeat      = !empty($input['is_repeat']);
+$outcome        = $input['outcome'] ?? 'booked';
+
+// --- DB ---
+$db_conf = [];
+$lines = file('/etc/astguiclient.conf',
+              FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+foreach ($lines as $line) {
+    if (preg_match('/^(VARDB_\w+)\s*=>\s*(.+)$/', $line, $m)) {
+        $db_conf[$m[1]] = trim($m[2]);
+    }
+}
+
+$dsn = sprintf(
+    'mysql:host=%s;port=%s;dbname=%s;charset=utf8',
+    $db_conf['VARDB_server'] ?? 'localhost',
+    $db_conf['VARDB_port'] ?? '3306',
+    $db_conf['VARDB_database'] ?? 'asterisk'
+);
+
+try {
+    $pdo = new PDO(
+        $dsn,
+        $db_conf['VARDB_user'] ?? 'cron',
+        $db_conf['VARDB_pass'] ?? '',
+        [
+            PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+            PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+        ]
+    );
+} catch (PDOException $e) {
+    http_response_code(500);
+    echo json_encode(['error' => 'Database connection failed']);
+    exit;
+}
+
+// --- Ensure bookings table exists ---
+$pdo->exec("
+    CREATE TABLE IF NOT EXISTS ai_agent_bookings (
+        id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        customer_name VARCHAR(255) NOT NULL,
+        customer_phone VARCHAR(30) NOT NULL,
+        postcode VARCHAR(10) NOT NULL,
+        address VARCHAR(500) NOT NULL,
+        problem_description TEXT NOT NULL,
+        trade_type VARCHAR(20) NOT NULL,
+        callout_fee INT NOT NULL DEFAULT 49,
+        did_number VARCHAR(30) DEFAULT NULL,
+        company_name VARCHAR(255) DEFAULT NULL,
+        is_repeat TINYINT(1) DEFAULT 0,
+        outcome VARCHAR(30) DEFAULT 'booked',
+        dispatched TINYINT(1) DEFAULT 0,
+        notes TEXT DEFAULT NULL,
+        PRIMARY KEY (id),
+        KEY idx_phone (customer_phone),
+        KEY idx_created (created_at),
+        KEY idx_dispatched (dispatched)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8
+");
+
+// --- Insert booking ---
+$stmt = $pdo->prepare("
+    INSERT INTO ai_agent_bookings
+        (customer_name, customer_phone, postcode, address,
+         problem_description, trade_type, callout_fee,
+         did_number, company_name, is_repeat, outcome)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+");
+
+$stmt->execute([
+    $customer_name, $customer_phone, $postcode, $address,
+    $problem, $trade_type, $callout_fee, $did_number,
+    $company_name, $is_repeat ? 1 : 0, $outcome,
+]);
+
+$booking_id = $pdo->lastInsertId();
+
+// --- Response ---
+echo json_encode([
+    'success'    => true,
+    'booking_id' => (int)$booking_id,
+    'message'    => "Booking #{$booking_id} created for "
+                    . "{$customer_name} at {$postcode}",
+]);
+
+curl -X POST https://YOUR_SERVER/api/voice-agent/create_booking.php \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: YOUR_API_KEY_HERE" \
+  -d '{
+    "customer_name": "Ahmed Lekan",
+    "customer_phone": "447963155448",
+    "postcode": "E5 9ES",
+    "address": "42 Amhurst Road",
+    "problem_description": "Leaking pipe under kitchen sink",
+    "trade_type": "plumbing",
+    "callout_fee": 48,
+    "did_number": "442039962952",
+    "company_name": "Acme Plumbing",
+    "is_repeat": false,
+    "outcome": "booked"
+  }'
+
+{
+  "success": true,
+  "booking_id": 1,
+  "message": "Booking #1 created for Ahmed Lekan at E5 9ES"
+}
+
+Local agent -- calls via aiohttp after collecting details through conversation:
+async def create_booking(self, args):
+    ctx = self.call_context
+    payload = {
+        "customer_name": args.get("customer_name", ""),
+        "customer_phone": ctx.get("caller_id", ""),   # From context, never asked
+        "postcode": args.get("postcode", ""),
+        "address": args.get("address", ""),
+        "problem_description": args.get("problem_description", ""),
+        "trade_type": ctx.get("trade_type", "plumbing"),
+        "callout_fee": ctx.get("callout_fee", 49),
+        "did_number": ctx.get("did_number", ""),
+        "company_name": ctx.get("company_name", ""),
+        "is_repeat": ctx.get("is_repeat", False),
+        "outcome": "booked",
+    }
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            BOOKING_API_URL, json=payload,
+            headers={"X-API-Key": CONTEXT_API_KEY},
+            timeout=aiohttp.ClientTimeout(total=5),
+        ) as resp:
+            return await resp.json()
+
+Cloud agent -- ElevenLabs sends the webhook automatically when the LLM calls the createBooking tool. The LLM populates parameters from the conversation and from getCallContext dynamic variables.
+did_company_map -- DID-to-Company Mapping
+
+
+
+
+
+CREATE TABLE IF NOT EXISTS did_company_map (
+    did          VARCHAR(50)  NOT NULL,
+    company_name VARCHAR(255) NOT NULL COMMENT 'Original messy name from provider',
+    clean_name   VARCHAR(255) NOT NULL COMMENT 'Display name for agent to speak',
+    trade_type   ENUM('plumbing','electrical','drainage','locksmith') NOT NULL,
+    callout_fee  INT          NOT NULL DEFAULT 49,
+    area         VARCHAR(100) DEFAULT NULL COMMENT 'e.g. London, Birmingham',
+    created_at   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (did)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8;
+
+Example data:
+INSERT INTO did_company_map (did, company_name, clean_name, trade_type, callout_fee, area) VALUES
+('442039962952', 'GEORGE THE PLUMBER LTD', 'George The Plumber', 'plumbing', 48, 'London'),
+('442071234567', 'SPARK ELEC SERVICES', 'Spark Electrical', 'electrical', 50, 'London'),
+('441211234567', 'DRAIN CLEAR BHAM', 'Drain Clear Birmingham', 'drainage', 49, 'Birmingham'),
+('443001234567', 'LOCKFIX 24/7', 'LockFix', 'locksmith', 47, 'Manchester');
+
+Why two name columns? The company_name comes from the DID provider or CRM -- often uppercase, abbreviated, or containing "LTD". The clean_name is what the agent actually speaks: natural, title-cased, no corporate suffixes.
+ai_agent_bookings -- Booking Storage
+
+
+
+
+
+CREATE TABLE IF NOT EXISTS ai_agent_bookings (
+    id                  INT UNSIGNED NOT NULL AUTO_INCREMENT,
+    created_at          DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    customer_name       VARCHAR(255) NOT NULL,
+    customer_phone      VARCHAR(30)  NOT NULL,
+    postcode            VARCHAR(10)  NOT NULL,
+    address             VARCHAR(500) NOT NULL,
+    problem_description TEXT         NOT NULL,
+    trade_type          VARCHAR(20)  NOT NULL,
+    callout_fee         INT          NOT NULL DEFAULT 49,
+    did_number          VARCHAR(30)  DEFAULT NULL,
+    company_name        VARCHAR(255) DEFAULT NULL,
+    is_repeat           TINYINT(1)   DEFAULT 0,
+    outcome             VARCHAR(30)  DEFAULT 'booked'
+                        COMMENT 'booked, declined, callback, cancelled',
+    dispatched          TINYINT(1)   DEFAULT 0
+                        COMMENT '0=pending, 1=assigned to engineer',
+    notes               TEXT         DEFAULT NULL,
+    PRIMARY KEY (id),
+    KEY idx_phone (customer_phone),
+    KEY idx_created (created_at),
+    KEY idx_dispatched (dispatched)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8;
+
+Workflow:
+Agent creates booking with outcome=booked, dispatched=0
+
+Dispatch team queries: SELECT * FROM ai_agent_bookings WHERE dispatched = 0 ORDER BY created_at
+
+After assigning an engineer: UPDATE ai_agent_bookings SET dispatched = 1, notes = 'Assigned to John, ETA 14:30' WHERE id = ?
+
+
+
+
+  
+  
+  doppia_calls -- Call History for Repeat Detection
+
+
+
+
+
+-- This table typically already exists if you use repeat-caller routing.
+-- The did_context.php API queries it to detect repeat callers.
+
+CREATE TABLE IF NOT EXISTS doppia_calls (
+    id              INT UNSIGNED NOT NULL AUTO_INCREMENT,
+    phone_number    VARCHAR(30)  NOT NULL,
+    did             VARCHAR(50)  NOT NULL,
+    last_call_time  DATETIME     NOT NULL,
+    call_count      INT          NOT NULL DEFAULT 1,
+    PRIMARY KEY (id),
+    UNIQUE KEY idx_phone_did (phone_number, did),
+    KEY idx_last_call (last_call_time)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8;
+
+The following script provisions a complete ElevenLabs cloud agent via API -- tools, agent, voice, and all configuration. Run it once to set up the cloud agent; it outputs the IDs you need for SIP routing.
+elevenlabs_setup.sh
+
+
+
+
+
+#!/bin/bash
+#
+# ElevenLabs AI Voice Agent -- Full Setup via API
+# Usage: EL_API_KEY="your-key-here" bash elevenlabs_setup.sh
+#
+
+set -euo pipefail
+
+EL_API_KEY="${EL_API_KEY:-}"
+EL_BASE="https://api.elevenlabs.io/v1/convai"
+OUR_HOST="https://YOUR_SERVER_DOMAIN"
+OUR_API_KEY="YOUR_API_KEY_HERE"
+
+if [ -z "$EL_API_KEY" ]; then
+    echo "ERROR: Set EL_API_KEY first."
+    exit 1
+fi
+
+echo "=== Step 1: Create getCallContext server tool ==="
+
+GET_CONTEXT_RESP=$(python3 -c "
+import json, urllib.request
+
+tool = {
+    'tool_config': {
+        'type': 'webhook',
+        'name': 'getCallContext',
+        'description': (
+            'Get the company context for this incoming call. '
+            'Returns company name, trade type, callout fee, and '
+            'whether the caller is a repeat customer. Must be '
+            'called at the very start of every call before '
+            'greeting the customer.'
+        ),
+        'response_timeout_secs': 10,
+        'force_pre_tool_speech': False,
+        'api_schema': {
+            'url': '${OUR_HOST}/api/voice-agent/did_context.php',
+            'method': 'POST',
+            'request_headers': {
+                'X-API-Key': '${OUR_API_KEY}'
+            },
+            'request_body_schema': {
+                'type': 'object',
+                'description': 'DID and caller ID for context lookup',
+                'properties': {
+                    'did_number': {
+                        'type': 'string',
+                        'description': (
+                            'The DID phone number the customer dialed, '
+                            'digits only e.g. 442039962952'
+                        )
+                    },
+                    'caller_id': {
+                        'type': 'string',
+                        'description': (
+                            'The customer phone number from caller ID, '
+                            'digits only e.g. 447963155448'
+                        )
+                    }
+                },
+                'required': ['did_number', 'caller_id']
+            },
+            'content_type': 'application/json'
+        },
+        'assignments': [
+            {'dynamic_variable': 'company_name',
+             'value_path': '\$.company_name'},
+            {'dynamic_variable': 'trade_type',
+             'value_path': '\$.trade_type'},
+            {'dynamic_variable': 'trade_label',
+             'value_path': '\$.trade_label'},
+            {'dynamic_variable': 'callout_fee',
+             'value_path': '\$.callout_fee'},
+            {'dynamic_variable': 'area',
+             'value_path': '\$.area'},
+            {'dynamic_variable': 'is_repeat',
+             'value_path': '\$.is_repeat'},
+            {'dynamic_variable': 'greeting',
+             'value_path': '\$.greeting'}
+        ],
+        'tool_error_handling_mode': 'summarized',
+        'execution_mode': 'immediate'
+    }
+}
+
+data = json.dumps(tool).encode()
+req = urllib.request.Request(
+    '${EL_BASE}/tools',
+    data=data,
+    headers={
+        'xi-api-key': '${EL_API_KEY}',
+        'Content-Type': 'application/json'
+    }
+)
+try:
+    resp = urllib.request.urlopen(req)
+    print(resp.read().decode())
+except urllib.error.HTTPError as e:
+    print(e.read().decode())
+    raise
+")
+
+GET_CONTEXT_TOOL_ID=$(echo "$GET_CONTEXT_RESP" | \
+    python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))" \
+    2>/dev/null || echo "")
+
+if [ -z "$GET_CONTEXT_TOOL_ID" ]; then
+    echo "ERROR creating getCallContext tool:"
+    echo "$GET_CONTEXT_RESP" | python3 -m json.tool 2>/dev/null \
+        || echo "$GET_CONTEXT_RESP"
+    exit 1
+fi
+echo "  Tool ID: $GET_CONTEXT_TOOL_ID"
+
+
+echo "=== Step 2: Create createBooking server tool ==="
+
+CREATE_BOOKING_RESP=$(python3 -c "
+import json, urllib.request
+
+tool = {
+    'tool_config': {
+        'type': 'webhook',
+        'name': 'createBooking',
+        'description': (
+            'Create a new job booking after collecting all customer '
+            'details including name phone postcode address and problem '
+            'description plus context values from getCallContext.'
+        ),
+        'response_timeout_secs': 15,
+        'force_pre_tool_speech': True,
+        'api_schema': {
+            'url': '${OUR_HOST}/api/voice-agent/create_booking.php',
+            'method': 'POST',
+            'request_headers': {
+                'X-API-Key': '${OUR_API_KEY}'
+            },
+            'request_body_schema': {
+                'type': 'object',
+                'description': 'Complete booking details',
+                'properties': {
+                    'customer_name': {
+                        'type': 'string',
+                        'description': 'Customer full name in title case'
+                    },
+                    'customer_phone': {
+                        'type': 'string',
+                        'description': (
+                            'Phone number with country code, no spaces'
+                        )
+                    },
+                    'postcode': {
+                        'type': 'string',
+                        'description': (
+                            'Full UK postcode uppercase with space'
+                        )
+                    },
+                    'address': {
+                        'type': 'string',
+                        'description': (
+                            'Full street address including flat/house number'
+                        )
+                    },
+                    'problem_description': {
+                        'type': 'string',
+                        'description': 'One line summary of the issue'
+                    },
+                    'trade_type': {
+                        'type': 'string',
+                        'description': 'From getCallContext',
+                        'enum': [
+                            'plumbing', 'electrical',
+                            'drainage', 'locksmith'
+                        ]
+                    },
+                    'callout_fee': {
+                        'type': 'number',
+                        'description': 'Callout fee from getCallContext'
+                    },
+                    'did_number': {
+                        'type': 'string',
+                        'description': 'DID number from getCallContext'
+                    },
+                    'company_name': {
+                        'type': 'string',
+                        'description': 'Company name from getCallContext'
+                    },
+                    'is_repeat': {
+                        'type': 'boolean',
+                        'description': 'Whether repeat caller'
+                    },
+                    'outcome': {
+                        'type': 'string',
+                        'description': 'Always set to booked',
+                        'enum': ['booked']
+                    }
+                },
+                'required': [
+                    'customer_name', 'customer_phone', 'postcode',
+                    'address', 'problem_description', 'trade_type'
+                ]
+            },
+            'content_type': 'application/json'
+        },
+        'tool_call_sound': 'typing',
+        'tool_call_sound_behavior': 'auto',
+        'tool_error_handling_mode': 'summarized',
+        'execution_mode': 'post_tool_speech'
+    }
+}
+
+data = json.dumps(tool).encode()
+req = urllib.request.Request(
+    '${EL_BASE}/tools',
+    data=data,
+    headers={
+        'xi-api-key': '${EL_API_KEY}',
+        'Content-Type': 'application/json'
+    }
+)
+try:
+    resp = urllib.request.urlopen(req)
+    print(resp.read().decode())
+except urllib.error.HTTPError as e:
+    print(e.read().decode())
+    raise
+")
+
+CREATE_BOOKING_TOOL_ID=$(echo "$CREATE_BOOKING_RESP" | \
+    python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))" \
+    2>/dev/null || echo "")
+
+if [ -z "$CREATE_BOOKING_TOOL_ID" ]; then
+    echo "ERROR creating createBooking tool:"
+    echo "$CREATE_BOOKING_RESP" | python3 -m json.tool 2>/dev/null \
+        || echo "$CREATE_BOOKING_RESP"
+    exit 1
+fi
+echo "  Tool ID: $CREATE_BOOKING_TOOL_ID"
+
+
+echo "=== Step 3: Create the agent ==="
+
+# Write your agent prompt to a file first, or inline it here.
+# This example assumes /root/agent_prompt.md exists.
+
+AGENT_RESP=$(python3 -c "
+import json, urllib.request
+
+prompt = '''You work at {{company_name}}, a UK {{trade_type}} company.
+You answer the phone. Casual British English. Short replies, 1 sentence max.
+
+# Workflow
+Step 1: Greet. \"Hello, {{company_name}}, good [morning/afternoon/evening].\"
+Step 2: Listen to the problem. One follow-up max.
+Step 3: Quote. \"There is a {{callout_fee}} pound callout, the {{trade_label}}
+        will quote on-site before starting.\"
+Step 4: Postcode. Step 5: Address. Step 6: Name.
+Step 7: Book using createBooking tool.
+Step 8: \"That is booked. The {{trade_label}} will be with you within the hour.\"
+'''
+
+tool1_id = '${GET_CONTEXT_TOOL_ID}'
+tool2_id = '${CREATE_BOOKING_TOOL_ID}'
+
+agent = {
+    'name': 'Home Services Voice Agent',
+    'tags': ['production', 'inbound', 'uk-trades'],
+    'conversation_config': {
+        'asr': {
+            'quality': 'high',
+            'provider': 'elevenlabs',
+            'user_input_audio_format': 'ulaw_8000',
+            'keywords': [
+                'postcode', 'plumber', 'electrician',
+                'drainage', 'locksmith', 'callout',
+                'leaking', 'tripped', 'blocked',
+            ]
+        },
+        'turn': {
+            'turn_timeout': 10,
+            'silence_end_call_timeout': 15,
+            'turn_eagerness': 'patient',
+            'spelling_patience': 'auto'
+        },
+        'tts': {
+            'model_id': 'eleven_v3_conversational',
+            'voice_id': 'YOUR_VOICE_ID_HERE',
+            'agent_output_audio_format': 'ulaw_8000',
+            'stability': 0.55,
+            'speed': 1.0,
+            'similarity_boost': 0.75
+        },
+        'conversation': {
+            'max_duration_seconds': 300
+        },
+        'agent': {
+            'first_message': '',
+            'language': 'en',
+            'prompt': {
+                'prompt': prompt,
+                'llm': 'gpt-4o',
+                'temperature': 0.4,
+                'max_tokens': -1,
+                'tool_ids': [tool1_id, tool2_id],
+                'ignore_default_personality': True
+            }
+        }
+    },
+    'platform_settings': {
+        'call_limits': {
+            'agent_concurrency_limit': 5,
+            'daily_limit': 500
+        }
+    }
+}
+
+data = json.dumps(agent).encode()
+req = urllib.request.Request(
+    '${EL_BASE}/agents/create',
+    data=data,
+    headers={
+        'xi-api-key': '${EL_API_KEY}',
+        'Content-Type': 'application/json'
+    }
+)
+try:
+    resp = urllib.request.urlopen(req)
+    print(resp.read().decode())
+except urllib.error.HTTPError as e:
+    print(e.read().decode())
+    raise
+")
+
+AGENT_ID=$(echo "$AGENT_RESP" | \
+    python3 -c "import sys,json; print(json.load(sys.stdin).get('agent_id',''))" \
+    2>/dev/null || echo "")
+
+if [ -z "$AGENT_ID" ]; then
+    echo "ERROR creating agent:"
+    echo "$AGENT_RESP" | python3 -m json.tool 2>/dev/null \
+        || echo "$AGENT_RESP"
+    exit 1
+fi
+echo "  Agent ID: $AGENT_ID"
+
+
+echo ""
+echo "=========================================="
+echo "  SETUP COMPLETE"
+echo "=========================================="
+echo ""
+echo "Agent ID:              $AGENT_ID"
+echo "getCallContext tool:   $GET_CONTEXT_TOOL_ID"
+echo "createBooking tool:    $CREATE_BOOKING_TOOL_ID"
+echo ""
+echo "Voice: British male, conversational"
+echo "Model: GPT-4o"
+echo "Audio: G711 ulaw 8kHz (SIP compatible)"
+echo ""
+
+# Save IDs for later reference
+cat > /root/elevenlabs_ids.env <<EOF
+# ElevenLabs Agent IDs -- $(date)
+EL_API_KEY="${EL_API_KEY}"
+EL_AGENT_ID="${AGENT_ID}"
+EL_TOOL_GET_CONTEXT="${GET_CONTEXT_TOOL_ID}"
+EL_TOOL_CREATE_BOOKING="${CREATE_BOOKING_TOOL_ID}"
+EL_SIP_ENDPOINT="sip.rtc.elevenlabs.io"
+EL_SIP_PORT="5060"
+OUR_API_HOST="${OUR_HOST}"
+EOF
+chmod 600 /root/elevenlabs_ids.env
+echo "IDs saved to /root/elevenlabs_ids.env"
+
+getCallContext tool -- a webhook server tool that fires immediately when a call starts. ElevenLabs POSTs the DID and caller ID to your did_context.php. The response is mapped to dynamic variables ({{company_name}}, {{trade_type}}, etc.) that the prompt can reference.
+
+
+createBooking tool -- a webhook server tool that fires when the LLM decides to book. It plays a "typing" sound while waiting for the webhook response. force_pre_tool_speech: True means the agent will say something like "Just a moment" before calling the tool.
+
+
+The agent itself -- configured with the system prompt, tool IDs, voice, audio format, turn management, and call limits.
+
+
+
+
+
+
+
+  
+  
+  12. ElevenLabs Tool Configuration
+
+
+
+  
+  
+  getCallContext -- Detailed Configuration
+
+
+
+Setting
+Value
+Purpose
+
+
+
+
+type
+webhook
+Server-side HTTP call
+
+
+execution_mode
+immediate
+Fires before agent speaks
+
+
+force_pre_tool_speech
+false
+No filler speech before tool
+
+
+response_timeout_secs
+10
+Max wait for your API
+
+
+tool_error_handling_mode
+summarized
+Agent sees error summary, not raw
+
+
+
+Dynamic variable assignments map JSON response fields to template variables:
+$.company_name  → {{company_name}}
+$.trade_type    → {{trade_type}}
+$.trade_label   → {{trade_label}}
+$.callout_fee   → {{callout_fee}}
+$.area          → {{area}}
+$.is_repeat     → {{is_repeat}}
+$.greeting      → {{greeting}}
+
+
+
+
+Setting
+Value
+Purpose
+
+
+
+
+type
+webhook
+Server-side HTTP call
+
+
+execution_mode
+post_tool_speech
+Agent speaks after tool returns
+
+
+force_pre_tool_speech
+true
+Agent says filler before calling
+
+
+response_timeout_secs
+15
+Allow time for DB insert
+
+
+tool_call_sound
+typing
+Plays typing sound during wait
+
+
+tool_call_sound_behavior
+auto
+Sound plays automatically
+
+
+
+┌─────────────────────────────────────────────────────────────────────┐
+│                      ElevenLabs Cloud Agent                         │
+│                                                                     │
+│  SIP INVITE arrives                                                 │
+│       │                                                             │
+│       ▼                                                             │
+│  Agent starts → calls getCallContext(did, caller_id)                │
+│       │              │                                              │
+│       │              ▼                                              │
+│       │         ┌────────────────────┐                              │
+│       │         │  Your Server       │                              │
+│       │         │  did_context.php   │                              │
+│       │         │  (returns JSON)    │                              │
+│       │         └────────────────────┘                              │
+│       │              │                                              │
+│       ▼              ▼                                              │
+│  Variables populated: company_name, trade_type, callout_fee, etc.   │
+│       │                                                             │
+│       ▼                                                             │
+│  Agent greets: "Hello, {{company_name}}, good afternoon."           │
+│  Agent collects details through conversation                        │
+│       │                                                             │
+│       ▼                                                             │
+│  LLM decides to book → calls createBooking(all_fields)             │
+│       │              │                                              │
+│       │              ▼                                              │
+│       │         ┌────────────────────┐                              │
+│       │         │  Your Server       │                              │
+│       │         │  create_booking.php│                              │
+│       │         │  (INSERT + return) │                              │
+│       │         └────────────────────┘                              │
+│       │              │                                              │
+│       ▼              ▼                                              │
+│  Agent: "That's booked. The plumber will be with you."              │
+└─────────────────────────────────────────────────────────────────────┘
+
+Add this to your Asterisk SIP configuration:
+; /etc/asterisk/sip.conf or sip-vicidial.conf
+
+[elevenlabs]
+type=peer
+host=sip.rtc.elevenlabs.io
+port=5060
+transport=udp
+dtmfmode=rfc2833
+disallow=all
+allow=ulaw
+insecure=invite,port
+qualify=no
+
+; /etc/asterisk/extensions-custom.conf
+
+; --- Voice Agent routing ---
+; Primary: local agent via AudioSocket
+; Overflow: ElevenLabs cloud via SIP
+
+[voice-agent]
+; Step 1: Try local agent
+exten => s,1,NoOp(Voice Agent: trying local)
+exten => s,n,Set(VA_UUID=${SHELL(uuidgen)})
+exten => s,n,System(echo '{"did":"${DID}","cli":"${CALLERID(num)}"}' \
+    > /tmp/va_${VA_UUID}.json)
+exten => s,n,AudioSocket(${VA_UUID},127.0.0.1:9099)
+
+; Step 2: If local agent is down or busy, try cloud
+exten => s,n,NoOp(Local agent failed, trying cloud)
+exten => s,n,Set(CALLERID(name)=${DID})
+exten => s,n,SIPAddHeader(X-EL-Agent-ID: YOUR_ELEVENLABS_AGENT_ID)
+exten => s,n,Dial(SIP/elevenlabs/${EXTEN},,30)
+
+; Step 3: Final fallback -- voicemail or ring group
+exten => s,n,NoOp(Cloud agent failed, fallback)
+exten => s,n,Goto(ringgroup-fallback,s,1)
+
+[voice-agent-cloud]
+exten => s,1,NoOp(Voice Agent: cloud only)
+exten => s,n,Set(CALLERID(name)=${DID})
+exten => s,n,SIPAddHeader(X-EL-Agent-ID: YOUR_ELEVENLABS_AGENT_ID)
+exten => s,n,Dial(SIP/elevenlabs/${EXTEN},,60)
+exten => s,n,Goto(ringgroup-fallback,s,1)
+
+[voice-agent-local]
+exten => s,1,NoOp(Voice Agent: local only)
+exten => s,n,Set(VA_UUID=${SHELL(uuidgen)})
+exten => s,n,System(echo '{"did":"${DID}","cli":"${CALLERID(num)}"}' \
+    > /tmp/va_${VA_UUID}.json)
+exten => s,n,AudioSocket(${VA_UUID},127.0.0.1:9099)
+exten => s,n,Goto(ringgroup-fallback,s,1)
+
+Step 1: Install Cartesia SDK
+pip3.11 install cartesia
+
+Step 2: Get Cartesia API key and voice ID
+Sign up at cartesia.ai, create an API key, and browse the voice library. Choose a voice and note its ID.
+Step 3: Update environment file
+# voice_agent.env
+CARTESIA_API_KEY=your_cartesia_api_key_here
+CARTESIA_VOICE_ID=a01c369f-6d2d-4185-bc20-b32c225eab70
+CARTESIA_MODEL=sonic-3
+GROQ_MODEL=llama-3.3-70b-specdec
+
+Step 4: Replace agent code
+The changes are substantial -- effectively a rewrite of the TTS class and the think-and-speak pipeline. Key replacements:
+Replace ElevenLabsTTS class with CartesiaTTS class
+Replace _think_and_speak sentence-boundary loop with token-streaming loop
+Add barge-in detection to _audio_reader
+
+Add barge_in_event and TTS context tracking to VoiceAgent.__init__
+
+Update Deepgram from nova-2 to nova-3 and add keywords parameter
+Step 5: Restart service
+systemctl restart voice-agent
+journalctl -u voice-agent -f  # Watch logs
+
+Step 6: Test
+Call a test DID and verify:
+Greeting plays correctly
+Conversation flows naturally
+Barge-in works (interrupt the agent mid-sentence)
+Booking is created in the database
+Latency feels noticeably faster than v1
+Step 1: Ensure webhook APIs are publicly accessible
+The ElevenLabs cloud needs to reach your did_context.php and create_booking.php. You need either:
+A public IP with HTTPS (recommended)
+A reverse proxy / tunnel (ngrok, Cloudflare Tunnel)
+Verify access:
+curl -X POST https://YOUR_PUBLIC_URL/api/voice-agent/did_context.php \
+  -H "X-API-Key: YOUR_API_KEY_HERE" \
+  -H "Content-Type: application/json" \
+  -d '{"did_number": "442039962952", "caller_id": "441234567890"}'
+
+Step 2: Run the setup script
+EL_API_KEY="your_elevenlabs_api_key" bash elevenlabs_setup.sh
+
+Step 3: Configure SIP peer in Asterisk
+Add the [elevenlabs] SIP peer (see Section 13).
+Step 4: Update dialplan routing
+Point your inbound DIDs to the cloud agent context.
+Step 5: Verify end-to-end
+Call a test DID
+Confirm the agent greets with the correct company name
+Complete a test booking
+Check ai_agent_bookings table for the new record
+Step 1: Update dialplan
+Change the inbound context to route to voice-agent-local instead of voice-agent-cloud.
+Step 2: Ensure local agent service is running
+systemctl status voice-agent
+
+Step 3: Reload Asterisk dialplan
+asterisk -rx "dialplan reload"
+
+That is the entire migration. The backend APIs do not change -- only the routing.
+Local Agent v2 (Deepgram + Groq + Cartesia):
+
+
+
+Service
+Pricing
+Per minute
+
+
+
+
+Deepgram Nova-3 STT
+$0.0043/min
+$0.0043
+
+
+Groq Llama 3.3 70B specdec
+~$0.003/min (token-based)
+$0.003
+
+
+Cartesia Sonic-3 TTS
+$0.010/min
+$0.010
+
+
+Server (amortized)
+~$0.002/min
+$0.002
+
+
+Total
+
+~$0.019/min
+
+
+
+Cloud Agent (ElevenLabs Conversational AI):
+
+
+
+Plan tier
+Included minutes
+Cost per minute
+
+
+
+
+Starter
+500/mo
+~$0.10/min
+
+
+Creator
+2,000/mo
+~$0.08/min
+
+
+Scale
+Custom
+~$0.06/min
+
+
+
+Cost comparison at scale (1,000 minutes/month):
+
+
+
+Stack
+Monthly cost
+
+
+
+
+Local v2
+~$19 + server cost
+
+
+ElevenLabs Starter
+~$100
+
+
+ElevenLabs Creator
+~$80
+
+
+
+The local agent is roughly 4x cheaper per minute, but requires server infrastructure and engineering time. The break-even point where cloud becomes cheaper than local (including engineering time) depends on your call volume and team size.
+Assuming an engineer costs $50/hour and the local agent takes 40 hours to build and 5 hours/month to maintain:
+Initial build: 40 hours x $50 = $2,000
+Monthly maintenance: 5 hours x $50 = $250
+Monthly API cost at 1,000 min: $19
+Local monthly total after build: $269
+Cloud monthly total at 1,000 min: $80-100
+At low volumes (under 3,000 min/mo), the cloud is cheaper when you factor in engineering time. At high volumes (over 5,000 min/mo), the local agent saves significant money.
+Latency is critical -- 200ms vs 500ms+ makes a real difference for caller experience
+Call volume is high -- cost savings compound; 5,000+ min/mo makes local clearly cheaper
+You need full control -- custom barge-in behavior, custom VAD, custom audio processing
+Data privacy matters -- audio never leaves your server (Deepgram and Groq process ephemerally, but you control the data flow)
+You want to choose your own models -- swap LLM, STT, or TTS independently
+You have engineering capacity -- someone to build, deploy, and maintain it
+Rapid deployment -- zero code, set up in hours not weeks
+Overflow capacity -- handle traffic spikes without scaling infrastructure
+Disaster recovery -- if your server goes down, calls still get answered
+Low volume -- under 2,000 min/mo, the engineering cost of local is not justified
+Testing new prompts -- change prompts via dashboard, no code deploy needed
+Multiple concurrent calls -- ElevenLabs scales to hundreds of simultaneous calls
+Primary local, overflow cloud -- local handles first 5 calls, overflow goes to cloud
+A/B testing -- route 50% of calls to each and compare booking rates
+Gradual migration -- start with cloud to validate the business case, then build local
+Redundancy -- if either system fails, the other catches the call
+The most resilient setup uses both stacks simultaneously. Here is the recommended architecture:
+[voice-agent-dual]
+; Try local first (lower latency, lower cost)
+exten => s,1,NoOp(Dual-stack: trying local agent)
+exten => s,n,Set(VA_UUID=${SHELL(uuidgen)})
+exten => s,n,System(echo '{"did":"${DID}","cli":"${CALLERID(num)}"}' \
+    > /tmp/va_${VA_UUID}.json)
+exten => s,n,AudioSocket(${VA_UUID},127.0.0.1:9099)
+
+; Local failed -- try cloud
+exten => s,n,NoOp(Local agent unavailable, trying cloud)
+exten => s,n,Set(CALLERID(name)=${DID})
+exten => s,n,SIPAddHeader(X-EL-Agent-ID: YOUR_ELEVENLABS_AGENT_ID)
+exten => s,n,Dial(SIP/elevenlabs/${EXTEN},,60)
+
+; Both failed -- ring group fallback
+exten => s,n,NoOp(All agents unavailable, ringing fallback)
+exten => s,n,Goto(ringgroup-fallback,s,1)
+
+Add a simple health check to know which agent is handling calls:
+# Check local agent
+curl -s --connect-timeout 2 http://127.0.0.1:9099 >/dev/null 2>&1 \
+    && echo "Local: UP" || echo "Local: DOWN"
+
+# Check ElevenLabs
+curl -s --connect-timeout 5 \
+    -H "xi-api-key: YOUR_API_KEY" \
+    "https://api.elevenlabs.io/v1/convai/agents/YOUR_AGENT_ID" \
+    | python3 -c "import sys,json; d=json.load(sys.stdin); \
+    print('Cloud: UP' if d.get('agent_id') else 'Cloud: ERROR')"
+
+Since both agents write to the same ai_agent_bookings table, a single dashboard shows all bookings regardless of source. To track which agent created the booking, add a source column:
+ALTER TABLE ai_agent_bookings
+    ADD COLUMN source VARCHAR(20) DEFAULT 'local'
+    COMMENT 'local or cloud';
+
+Then update each agent to pass the source:
+Local agent: add "source": "local" to booking payload
+Cloud agent: add source to the createBooking tool schema, hardcode to "cloud"
+
+
+
+
+
+
+
+  
+  
+  18. Production Considerations
+
+
+
+  
+  
+  Security
+
+
+
+
+API key rotation: Rotate the X-API-Key header value periodically. Both agents and both PHP endpoints must be updated simultaneously.
+HTTPS required: The cloud agent calls your webhooks over the internet. Always use HTTPS with a valid certificate.
+IP allowlisting: If possible, restrict webhook access to ElevenLabs' IP ranges plus your own server.
+Rate limiting: Add rate limiting to the PHP endpoints to prevent abuse (e.g., max 10 requests/second).
+Local agent supervision: Run the Python agent under systemd with Restart=always and RestartSec=2.
+Health checks: Monitor the AudioSocket port (9099) and the PHP endpoints. Alert if either is down.
+Database backups: The ai_agent_bookings table contains customer data. Include it in your backup rotation.
+Timeout handling: Both APIs have timeouts (3s for context, 5s for booking). If the database is slow, the agent will fall back gracefully.
+Track these metrics to compare the two stacks in production:
+
+
+
+Metric
+How to measure
+
+
+
+
+Booking conversion rate
+Bookings / total calls, grouped by source
+
+
+Average call duration
+From call start to hangup
+
+
+Latency (local)
+Parse LLM TTFT and TTS TTFB from agent logs
+
+
+Latency (cloud)
+ElevenLabs dashboard analytics
+
+
+Error rate
+Failed webhook calls / total webhook calls
+
+
+Barge-in frequency
+Count Barge-in detected log entries (local only)
+
+
+
+
+
+
+Scenario
+Local capacity
+Cloud capacity
+
+
+
+
+1 server, 4 CPU
+~5 concurrent calls
+N/A
+
+
+1 server, 8 CPU
+~10 concurrent calls
+N/A
+
+
+ElevenLabs Starter
+N/A
+5 concurrent
+
+
+ElevenLabs Scale
+N/A
+Custom (100+)
+
+
+Dual-stack, 8 CPU
+10 primary + unlimited overflow
+5-100+ overflow
+
+
+
+Both stacks can be extended with:
+lookupBooking tool -- let repeat callers check their booking status
+cancelBooking tool -- let callers cancel without speaking to a human
+createCallback tool -- schedule a callback when no engineer is available
+transferToHuman -- route complex calls to a live agent via Asterisk queue
+Multi-language -- detect caller language and switch prompts/voice accordingly
+
+
+
+Decision
+Recommendation
+
+
+
+
+Starting from scratch
+Start with ElevenLabs cloud to validate the concept
+
+
+Proven concept, scaling up
+Build the local agent for cost savings and latency
+
+
+High-reliability deployment
+Run both with local primary, cloud overflow
+
+
+Which local TTS
+Cartesia Sonic-3 (v2) -- the latency improvement over ElevenLabs Flash v2 (v1) is substantial
+
+
+Which LLM
+Groq Llama 3.3 70B specdec for local; GPT-4o for cloud
+
+
+Backend APIs
+Always shared -- same did_context.php and create_booking.php regardless of agent
+
+
+
+The real power of this architecture is the decoupling. The backend APIs do not care which agent calls them. The database does not care where the booking came from. The dispatch team sees a single queue. This means you can swap, upgrade, or run multiple agents without touching the booking workflow.
+Build the backend first. Then add whichever agent stack fits your current needs. When your needs change, add the other one. The APIs remain the same...."
+image: /img/blog/generated/optimizing-voice-agent-architectures-local-vs-cloud-solutions-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Optimizing Voice Agent Architectures: Local vs Cloud Solutions](/img/blog/generated/optimizing-voice-agent-architectures-local-vs-cloud-solutions-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### The Architectural Landscape of Voice Agents
+
+Voice agents have become integral to modern communication systems, enabling businesses to automate customer interactions efficiently. The choice between local and cloud-based architectures is pivotal, as it influences latency, cost, and overall control over the system. Understanding the nuances of each architecture is essential for developers, system architects, and decision-makers who aim to implement effective voice solutions tailored to their specific operational needs.
+
+### Latency: A Crucial Performance Indicator
+
+Latency is one of the most critical performance metrics when evaluating voice agent architectures. Local agents, such as those built with Deepgram and Groq, typically achieve mouth-to-ear latencies of approximately 200-250 milliseconds. In contrast, cloud-based solutions like ElevenLabs often experience latencies ranging from 500 to 800 milliseconds. This significant difference can dramatically affect user experience, particularly in scenarios requiring real-time interactions, such as customer service. For instance, a local agent's lower latency can lead to quicker response times, reducing user frustration and enhancing engagement.
+
+To further illustrate, consider a scenario where a customer is seeking assistance with a technical issue. A local agent can provide instantaneous responses, while a cloud-based agent may introduce delays that could lead to customer dissatisfaction. The ability to maintain low latency is essential for industries such as telecommunications and emergency services, where every millisecond counts.
+
+### Cost Structures: Analyzing Financial Implications
+
+A thorough cost analysis reveals distinct financial implications for local versus cloud solutions. Local architectures generally incur a lower per-minute operational cost, averaging around $0.02 compared to cloud solutions that can reach $0.08 per minute. However, the initial setup for local solutions requires substantial investment in infrastructure and development resources. For instance, developing a local agent may demand approximately 40 hours of engineering time, translating to an upfront cost of around $2,000. Conversely, cloud solutions typically offer a pay-as-you-go pricing model, which may be more economical for low-volume use cases but can become cost-prohibitive as usage scales.
+
+Moreover, organizations must consider ongoing maintenance costs for local solutions, which can include server upkeep, software updates, and potential hardware failures. In contrast, cloud providers often handle these aspects as part of their service, allowing organizations to focus on their core competencies rather than IT management.
+
+### Shared Backend APIs: Bridging Local and Cloud Solutions
+
+A key advantage of both local and cloud architectures is the ability to share backend APIs, enabling seamless integration and data consistency. For example, both architectures can utilize shared endpoints such as `did_context.php` for context lookups and `create_booking.php` for booking creation. This shared infrastructure allows local and cloud agents to interact with the same data sources and functionalities, ensuring a unified operational view.
+
+To enhance the technical depth, consider the implementation of a RESTful API for shared services. Local agents can cache frequently accessed data to minimize latency, while cloud agents can leverage scalable server resources for complex data processing. This hybrid approach not only optimizes performance but also allows for better fault tolerance, as local agents can continue to function independently in case of cloud service disruptions.
+
+### Deployment Strategies: Navigating Implementation Challenges
+
+Deployment strategies differ markedly between local and cloud architectures. Local agents necessitate a more complex setup, requiring careful management of server infrastructure, API integrations, and ongoing maintenance. In contrast, cloud solutions facilitate rapid deployment with minimal infrastructure overhead, enabling organizations to provision agents within hours. For example, a cloud agent can be set up through simple API calls, while a local agent may require weeks of development and testing.
+
+Additionally, organizations must consider the skill sets of their teams. Deploying a local solution may require specialized knowledge in server management and network configurations, while cloud solutions often come with user-friendly dashboards and documentation that simplify the deployment process. This distinction is crucial for businesses needing to respond quickly to market demands or operational challenges.
+
+### Real-World Use Cases: Optimizing Performance and Cost
+
+In practice, many organizations adopt a hybrid approach, leveraging both local and cloud architectures to optimize performance and cost. For instance, a local agent might handle primary call routing due to its lower latency and cost, while a cloud agent serves as an overflow solution during peak traffic periods. This strategy not only ensures timely call responses but also provides redundancy in case of system failures. 
+
+A real-world example can be seen in a plumbing service that uses a local agent for regular call handling while routing overflow calls to ElevenLabs during high-demand periods, ensuring consistent service delivery without compromising user experience. Similarly, a financial services firm may use local agents for sensitive transactions requiring low latency, while employing cloud agents for general inquiries that can tolerate higher latency.
+
+### Security Considerations: Safeguarding Data Integrity
+
+Security remains a paramount concern when choosing between local and cloud architectures. Local solutions offer greater control over data privacy, as all audio data remains within the organization’s servers. This is particularly crucial for industries dealing with sensitive customer information, such as healthcare or finance. Conversely, cloud solutions may expose data to third-party processing, raising compliance and security concerns. 
+
+Organizations must carefully assess their security requirements and select an architecture that adequately protects sensitive information while meeting performance expectations. Implementing encryption for data at rest and in transit, along with regular security audits, can help mitigate risks associated with cloud solutions.
+
+### Integration Challenges: Navigating Technical Hurdles
+
+Despite the benefits of shared backend APIs, integration challenges can arise when deploying voice agent architectures. For example, ensuring that both local and cloud agents can effectively communicate with shared APIs requires careful design and implementation. Developers must consider potential discrepancies in data formats, authentication methods, and error handling protocols. 
+
+Moreover, organizations must be prepared to address issues related to network latency and reliability, particularly when integrating cloud services that depend on external internet connectivity. Implementing robust monitoring tools can help identify and resolve integration issues promptly, ensuring seamless operation across both architectures.
+
+### The Future of Voice Agent Architectures: Trends and Innovations
+
+As voice technology continues to evolve, organizations must stay informed about emerging trends and innovations that could impact their architectural choices. For instance, advancements in machine learning and natural language processing are driving improvements in voice recognition accuracy and response generation. Additionally, the rise of edge computing may offer new opportunities for local architectures to enhance performance by processing data closer to the source.
+
+Organizations should evaluate how these trends align with their strategic goals and operational requirements, ensuring they remain competitive in an increasingly automated landscape. By investing in continuous learning and adaptation, companies can leverage new technologies to enhance their voice agent solutions.
+
+### Conclusion: Making Strategic Choices
+
+Ultimately, the decision between local and cloud-based voice agent architectures hinges on a comprehensive understanding of the specific needs and constraints of the organization. Factors such as latency, cost, deployment strategies, security considerations, and integration challenges must all be carefully weighed. By leveraging the strengths of both architectures, organizations can create robust voice agent solutions that enhance user experience while maintaining operational efficiency. As technology continues to advance, staying informed about the latest developments and best practices will be crucial for success in implementing voice agent solutions.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/moisi_trungu_31647b7ac300/voice-agent-tech-stack-comparison-local-vs-cloud-with-shared-booking-backend-lll)
+
+---
+
+<SocialShare title="Optimizing Voice Agent Architectures: Local vs Cloud Solutions" slug="optimizing-voice-agent-architectures-local-vs-cloud-solutions" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
