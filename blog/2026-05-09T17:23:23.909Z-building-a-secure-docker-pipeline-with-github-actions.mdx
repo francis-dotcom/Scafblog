@@ -1,0 +1,519 @@
+---
+slug: building-a-secure-docker-pipeline-with-github-actions
+title: "Building a Secure Docker Pipeline with GitHub Actions"
+authors: [francis]
+tags: [docker, devops, github-actions, security]
+date: 2026-05-09T17:23:23.910Z
+description: "I recently completed a hands-on Docker and DevSecOps lab as part of my learning track, and I wanted to write up the full walkthrough — including the parts where things broke, because that's honestly where the real learning happened.
+By the end of this lab, I had:
+Pulled and inspected a public container image from Docker Hub
+Built a Python Flask web app and packaged it into a secure Docker image
+Pushed it to Docker Hub and shared it
+Automated the entire workflow with a GitHub Actions pipeline that includes Trivy vulnerability scanning as a hard security gate
+
+
+
+This article walks you through each phase exactly as I did it, including the three issues I ran into and how I resolved them. If you're replicating this yourself, this should save you some time.
+Before you start, make sure you have:
+Docker Desktop installed and running
+A GitHub account
+
+A Docker Hub account
+
+A code editor (VS Code recommended)
+You'll also need a Docker Hub Personal Access Token — not your password. Generate one at:
+hub.docker.com → Avatar → Account Settings → Security → New Access Token
+Give it Read & Write permissions and copy it straight away. You only see it once.
+The first phase is simple but important. Before building anything yourself, you act as a consumer — you pull a public image, run it, and observe what happens.
+# Pull the lightweight Nginx image
+docker pull nginx:alpine
+
+# Run it in detached mode, mapping host port 8080 to container port 80
+docker run -d -p 8080:80 --name my-nginx nginx:alpine
+
+# Check it's running
+docker ps
+
+# View the logs
+docker logs my-nginx
+
+# Clean up
+docker rm -f my-nginx
+
+Open http://localhost:8080 in your browser and you'll see the Nginx welcome page.
+What just happened? You downloaded a pre-built filesystem (the image) from Docker Hub, and Docker spun up an isolated process (the container) from it. The -p 8080:80 flag mapped port 80 inside the container to port 8080 on your machine, making it reachable from your browser.
+This pull-and-run flow is the foundation of everything else in the lab.
+ Pulling the nginx:alpine image from Docker Hub in the terminal
+Now you become the image creator. This phase has you build a Python Flask web application, write a Dockerfile, push the image to Docker Hub, and share it.
+your-project/
+├── app.py
+├── templates/
+│   └── index.html
+├── requirements.txt
+├── Dockerfile
+└── .dockerignore
+
+ Project folder structure in VS Code showing all the required files
+app.py — A minimal Flask app with a home page and a /health endpoint.
+from flask import Flask, render_template, jsonify
+import os, datetime
+
+app = Flask(__name__)
+APP_NODE = os.environ.get("APP_NODE", "developer")
+
+@app.route("/")
+def home():
+    return render_template("index.html", node=APP_NODE)
+
+@app.route("/health")
+def health():
+    return jsonify({
+        "status": "healthy",
+        "node": APP_NODE,
+        "time": datetime.datetime.utcnow().isoformat() + "Z"
+    })
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000)
+
+The APP_NODE variable is read from the environment. This externalises configuration from code — you can inject any identifier at runtime without rebuilding the image.
+templates/index.html
+<!DOCTYPE html>
+<html>
+<head><title>Welcome</title></head>
+<body style="font-family: sans-serif; text-align: center; padding-top: 5rem;">
+    <h1>Hello from <span style="color: #2b6cb0;">{{ node }}</span></h1>
+    <p>This container is alive and running!</p>
+</body>
+</html>
+
+requirements.txt
+flask==3.0.0
+
+Pinning the version ensures reproducible builds.
+FROM python:3.11-slim
+
+LABEL maintainer="your-name@example.com"
+LABEL version="1.0.0"
+LABEL description="Simple Flask web app for Docker/GitHub Actions lab"
+
+# Create a non-root user — running as root in a container is a security risk
+RUN groupadd -r appuser && useradd -r -g appuser appuser
+
+WORKDIR /app
+
+# Copy requirements first to leverage Docker layer caching
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+RUN chown -R appuser:appuser /app
+USER appuser
+
+EXPOSE 5000
+
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:5000/health || exit 1
+
+CMD ["python", "app.py"]
+
+Two things worth calling out here:
+Non-root user: If the application is ever compromised, an attacker running as a non-root user has far less access than one running as root. It's a foundational security hardening step.
+Layer caching order: Copying requirements.txt before the rest of the application code means Docker's build cache is preserved for the pip install layer as long as dependencies haven't changed. If you only modified app.py, Docker doesn't reinstall packages — it reuses the cached layer. This significantly speeds up builds, especially in CI pipelines.
+.dockerignore
+__pycache__
+*.pyc
+*.pyo
+.git
+.env
+*.md
+Dockerfile
+.dockerignore
+
+Without .dockerignore, your entire .git directory and any local .env files would be copied into the image — inflating its size and potentially exposing secrets.
+docker build -t my-web-app .
+docker run -d -p 5000:5000 --name webapp-test my-web-app
+
+Visit http://localhost:5000 for the home page and http://localhost:5000/health for the health check.
+ docker build output showing all layers building successfully
+ Flask app home page loading at localhost:5000
+ The /health endpoint returning a JSON response in the browser
+docker login -u your-dockerhub-username
+docker tag my-web-app your-dockerhub-username/my-web-app:v1.0.0-yourname
+docker push your-dockerhub-username/my-web-app:v1.0.0-yourname
+
+The tag format <version>-<yourname> makes your image personally traceable — useful when you're sharing a registry with other learners.
+ Pushing the tagged image to Docker Hub in the terminal
+ Docker Hub showing the repository set to public
+To simulate being a new user, delete your local copy and pull it from Docker Hub:
+docker rmi your-dockerhub-username/my-web-app:v1.0.0-yourname
+docker pull your-dockerhub-username/my-web-app:v1.0.0-yourname
+docker run -d -p 5000:5000 --name pulled-app your-dockerhub-username/my-web-app:v1.0.0-yourname
+
+* Pulling the image back from Docker Hub after deleting the local copy*
+ Running a container from the freshly pulled image
+![Testing the pulled image]](https://dev-to-uploads.s3.amazonaws.com/uploads/articles/4wwzlfwsj8ejpvb3i632.png) Home page working correctly from the pulled image
+ Health endpoint responding correctly from the pulled image
+The image should behave identically to your local build — which is the point. Portability is a core Docker guarantee.
+This is where it gets interesting. Phase 2 takes everything manual from Phase 1 and automates it in a CI/CD pipeline that runs on every push to main.
+The pipeline:
+Builds the Docker image
+Scans it for vulnerabilities with Trivy
+
+Only pushes to Docker Hub if the scan passes
+Runs a smoke test to verify the pushed image works
+Go to your repo → Settings → Secrets and variables → Actions → New repository secret
+Add two secrets:
+DOCKERHUB_USERNAME — your Docker Hub username
+DOCKERHUB_TOKEN — your access token
+These must be two separate secrets. More on why this matters in the issues section below.
+Create .github/workflows/docker-build-push.yml:
+name: Build, Scan, Push and Verify Docker Image
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  DOCKER_HUB_USER: ${{ secrets.DOCKERHUB_USERNAME }}
+  IMAGE_NAME: my-web-app
+  TAG_SUFFIX: yourname
+
+jobs:
+  build-scan-push-verify:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build Docker image (load locally, do not push yet)
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          load: true
+          push: false
+          tags: |
+            ${{ env.DOCKER_HUB_USER }}/${{ env.IMAGE_NAME }}:v1.0.0-${{ env.TAG_SUFFIX }}
+            ${{ env.DOCKER_HUB_USER }}/${{ env.IMAGE_NAME }}:latest
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@v0.20.0
+        with:
+          image-ref: "${{ env.DOCKER_HUB_USER }}/${{ env.IMAGE_NAME }}:v1.0.0-${{ env.TAG_SUFFIX }}"
+          format: 'table'
+          exit-code: '1'
+          ignore-unfixed: true
+          severity: 'HIGH,CRITICAL'
+
+      - name: Push Docker image to Hub
+        if: success()
+        run: |
+          docker push ${{ env.DOCKER_HUB_USER }}/${{ env.IMAGE_NAME }}:v1.0.0-${{ env.TAG_SUFFIX }}
+          docker push ${{ env.DOCKER_HUB_USER }}/${{ env.IMAGE_NAME }}:latest
+
+      - name: Pull image and run smoke tests
+        if: success()
+        run: |
+          docker pull ${{ env.DOCKER_HUB_USER }}/${{ env.IMAGE_NAME }}:v1.0.0-${{ env.TAG_SUFFIX }}
+          docker run -d -p 5000:5000 --name verify-container \
+            ${{ env.DOCKER_HUB_USER }}/${{ env.IMAGE_NAME }}:v1.0.0-${{ env.TAG_SUFFIX }}
+          sleep 5
+          curl -f http://localhost:5000/health || (echo "Health check failed!" && exit 1)
+          curl -s http://localhost:5000/ | grep -i "hello" || (echo "Home page missing greeting!" && exit 1)
+          echo "All smoke tests passed."
+
+      - name: Remove test container
+        if: always()
+        run: docker rm -f verify-container || true
+
+Two conditional flags worth understanding:
+if: success() on the push step — this ensures we never push an image that hasn't passed all previous steps, especially the vulnerability scan.
+if: always() on the cleanup step — this guarantees the test container is removed even if earlier steps failed, preventing orphaned processes on the runner.
+git add .github/workflows/docker-build-push.yml
+git commit -m "Add DevSecOps CI pipeline"
+git push
+
+Then go to the Actions tab in your repo and watch it run.
+This is the section I actually want people to read. The happy path above is clean, but this is what happened in practice.
+The first pipeline run failed at login. The runner couldn't authenticate with Docker Hub.
+The problem was that I hadn't properly separated the credentials into two distinct GitHub secrets. The docker/login-action needs username and password as completely separate values:
+username: ${{ secrets.DOCKERHUB_USERNAME }}
+password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+Once I added them as two separate secrets — DOCKERHUB_USERNAME and DOCKERHUB_TOKEN — the login step worked.
+Key takeaway: Never combine credentials into a single secret, and never use your Docker Hub password here — use the Personal Access Token.
+v Prefix
+
+
+The pipeline got past login and build, then failed at the Trivy step with an "Unable to resolve action" error.
+The cause was a missing v in the action version tag:
+# Broken
+uses: aquasecurity/trivy-action@0.20.0
+
+# Correct
+uses: aquasecurity/trivy-action@v0.20.0
+
+GitHub Actions resolves action versions against the actual Git tags in the action's repository. The official release tag is v0.20.0 — without the v, it can't find it.
+Key takeaway: Always check the official action repository for the exact tag format. Most actions use v prefixes — a missing v is an easy mistake and produces an unhelpful error message.
+With the version tag corrected, Trivy finally ran — and immediately failed the pipeline. It found HIGH and CRITICAL severity vulnerabilities in transitive dependencies (wheel and jaraco.context) coming from the python:3.11-slim base image.
+ Trivy scan output listing HIGH and CRITICAL vulnerabilities that blocked the push
+This was the pipeline working exactly as intended. The exit-code: '1' setting means any HIGH or CRITICAL finding blocks the push — that's the security gate in action.
+The question was how to fix it. The wrong approach would have been to add patching packages directly to requirements.txt — those are transitive dependencies that the application itself doesn't actually use, and bloating the requirements file with them is bad practice.
+The correct approach was a base image upgrade. By moving to a more recent patch version of python:3.11-slim, the image inherits upstream security fixes that the Python Docker team had already applied. The vulnerabilities were resolved without touching the application's dependencies at all.
+ Final successful end-to-end pipeline run with all steps passing
+Key takeaway: When Trivy flags base image vulnerabilities, upgrade the base image — don't suppress the finding or patch transitive dependencies directly. Keeping base images current is a core DevSecOps practice, and this is exactly the kind of thing an automated pipeline should surface and enforce.
+Looking back, the manual steps in Phase 1 exist to give you a clear mental model before Phase 2 automates all of it. By the time you write the workflow file, you understand exactly what each step is doing because you've done it yourself.
+The pipeline is also a good introduction to what a real supply chain security gate looks like:
+The image is built but not pushed
+It's scanned before any push happens
+A vulnerable image is blocked, not just warned about
+The push only happens if everything passes
+That ordering matters. It's the difference between security as an afterthought and security baked into the delivery process.
+docker rm -f $(docker ps -aq) 2>/dev/null
+docker rmi my-web-app your-dockerhub-username/my-web-app:v1.0.0-yourname nginx:alpine 2>/dev/null
+
+Docker Documentation
+GitHub Actions Documentation
+Trivy by Aqua Security
+Original lab by Samuel Nartey
+-My Github repo
+
+
+
+
+
+
+If you're working through a similar lab and hit any of the same issues, I hope this saved you some debugging time. Feel free to drop a comment if anything needs more explanation...."
+image: /img/blog/generated/building-a-secure-docker-pipeline-with-github-actions-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Building a Secure Docker Pipeline with GitHub Actions](/img/blog/generated/building-a-secure-docker-pipeline-with-github-actions-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### The Security Imperative in Modern CI/CD
+
+As the software development landscape evolves, integrating security practices within Continuous Integration/Continuous Deployment (CI/CD) pipelines has become essential. The DevSecOps approach emphasizes embedding security checks throughout the development lifecycle, particularly in environments utilizing Docker. This integration is critical because vulnerabilities can quickly proliferate across containerized applications, leading to significant risks. By automating security checks within the CI/CD pipeline, developers can substantially mitigate the risks associated with deploying insecure Docker images, fostering a more resilient application deployment strategy.
+
+### Establishing a Robust Development Environment
+
+Before diving into building a secure Docker pipeline, a well-configured environment is paramount. Ensure that Docker Desktop is installed and operational on your machine. Additionally, create accounts on GitHub and Docker Hub, as these platforms will be integral to your CI/CD workflow.
+
+1. **Install Docker Desktop**: Follow the official installation guide for your operating system.
+2. **Create a GitHub Account**: Sign up at [GitHub](https://github.com) if you don’t have an account.
+3. **Create a Docker Hub Account**: Register at [Docker Hub](https://hub.docker.com).
+
+One critical step is generating a Docker Hub Personal Access Token with read and write permissions. This token is essential for authenticating your CI/CD pipeline when pushing Docker images to Docker Hub. Neglecting proper credential management can lead to authentication failures, which can derail your automation efforts. For example, if your token is not set as a secret in GitHub, you might encounter a `401 Unauthorized` error during the Docker login step. 
+
+To set your token as a secret in GitHub, navigate to your repository, click on "Settings," then "Secrets and variables," and finally "Actions." Here, you can add a new repository secret named `DOCKERHUB_TOKEN`.
+
+### Engaging with Docker: Pulling a Public Image
+
+To familiarize yourself with Docker, start by pulling a public image from Docker Hub, such as the lightweight Nginx image. This exercise serves as a practical introduction to container behavior and the Docker runtime environment. Execute the following commands to pull and run the Nginx image:
+
+```bash
+docker pull nginx:alpine
+docker run -d -p 8080:80 --name my-nginx nginx:alpine
+docker ps
+docker logs my-nginx
+```
+
+After executing these commands, you can access the Nginx welcome page by navigating to `http://localhost:8080` in your browser. This initial interaction with Docker establishes a foundational understanding that will be pivotal when creating and deploying your own applications.
+
+### Transitioning to Application Development: Building a Flask App
+
+With a basic understanding of Docker, the next step is to transition into application development. Create a simple Python Flask application and organize your project directory as follows:
+
+```
+your-project/
+├── app.py
+├── templates/
+│   └── index.html
+├── requirements.txt
+├── Dockerfile
+└── .dockerignore
+```
+
+The `app.py` file should contain a minimal Flask application, while `requirements.txt` specifies the necessary Python dependencies. Here’s an example of a basic `Dockerfile` that emphasizes security:
+
+```dockerfile
+FROM python:3.11-slim
+
+LABEL maintainer="your-name@example.com"
+LABEL version="1.0.0"
+LABEL description="Simple Flask web app for Docker/GitHub Actions lab"
+
+RUN groupadd -r appuser && useradd -r -g appuser appuser
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+RUN chown -R appuser:appuser /app
+USER appuser
+
+EXPOSE 5000
+
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:5000/health || exit 1
+
+CMD ["python", "app.py"]
+```
+
+This Dockerfile adopts best practices by creating a non-root user and managing dependencies efficiently. The layering strategy ensures that only necessary files are copied, reducing both the image size and potential attack surface. 
+
+### Pushing Docker Images to Docker Hub
+
+Once the Docker image is built, the next step is to push it to Docker Hub. Authenticate with Docker Hub using your credentials and execute the following commands:
+
+```bash
+docker login -u your-dockerhub-username
+docker tag my-web-app your-dockerhub-username/my-web-app:v1.0.0-yourname
+docker push your-dockerhub-username/my-web-app:v1.0.0-yourname
+```
+
+Utilizing a tagging convention that includes your username enhances traceability, especially in collaborative environments. After pushing the image, verify its accessibility by pulling it from Docker Hub and running a new container instance.
+
+### Automating the Workflow: GitHub Actions Integration
+
+With the Docker image successfully uploaded, the next phase is to automate the entire workflow using GitHub Actions. Create a workflow file at `.github/workflows/docker-build-push.yml` to define the CI/CD process. Below is an example of what that file might look like:
+
+```yaml
+name: Build, Scan, Push and Verify Docker Image
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  DOCKER_HUB_USER: ${{ secrets.DOCKERHUB_USERNAME }}
+  IMAGE_NAME: my-web-app
+  TAG_SUFFIX: yourname
+
+jobs:
+  build-scan-push-verify:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          load: true
+          push: false
+          tags: |
+            ${{ env.DOCKER_HUB_USER }}/${{ env.IMAGE_NAME }}:v1.0.0-${{ env.TAG_SUFFIX }}
+            ${{ env.DOCKER_HUB_USER }}/${{ env.IMAGE_NAME }}:latest
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@v0.20.0
+        with:
+          image-ref: "${{ env.DOCKER_HUB_USER }}/${{ env.IMAGE_NAME }}:v1.0.0-${{ env.TAG_SUFFIX }}"
+          format: 'table'
+          exit-code: '1'
+          ignore-unfixed: true
+          severity: 'HIGH,CRITICAL'
+
+      - name: Push Docker image to Hub
+        if: success()
+        run: |
+          docker push ${{ env.DOCKER_HUB_USER }}/${{ env.IMAGE_NAME }}:v1.0.0-${{ env.TAG_SUFFIX }}
+          docker push ${{ env.DOCKER_HUB_USER }}/${{ env.IMAGE_NAME }}:latest
+
+      - name: Pull image and run smoke tests
+        if: success()
+        run: |
+          docker pull ${{ env.DOCKER_HUB_USER }}/${{ env.IMAGE_NAME }}:v1.0.0-${{ env.TAG_SUFFIX }}
+          docker run -d -p 5000:5000 --name verify-container \
+            ${{ env.DOCKER_HUB_USER }}/${{ env.IMAGE_NAME }}:v1.0.0-${{ env.TAG_SUFFIX }}
+          sleep 5
+          curl -f http://localhost:5000/health || (echo "Health check failed!" && exit 1)
+          curl -s http://localhost:5000/ | grep -i "hello" || (echo "Home page missing greeting!" && exit 1)
+          echo "All smoke tests passed."
+
+      - name: Remove test container
+        if: always()
+        run: docker rm -f verify-container || true
+```
+
+This workflow automates the image building, vulnerability scanning, and conditional pushing to Docker Hub, ensuring that only secure images are deployed.
+
+### Implementing Vulnerability Scanning with Trivy
+
+Integrating Trivy into the CI/CD pipeline serves as a critical security gate. Trivy scans the Docker image for vulnerabilities before it is pushed to Docker Hub. If any vulnerabilities of high or critical severity are found, the pipeline will fail, preventing the deployment of insecure images. This proactive approach to security is essential in modern DevOps practices, as it minimizes the risk of vulnerabilities being introduced into production environments. For example, if Trivy detects a critical vulnerability in a library used by your Flask application, the pipeline will halt, giving you the chance to address the issue before deployment.
+
+### Common Pitfalls and Troubleshooting Strategies
+
+While automating the pipeline, you may encounter several common issues. For instance, misconfigured GitHub secrets can lead to authentication failures during the Docker login step. Ensure that your secrets are correctly defined under your repository settings and that they match the names used in your workflow file.
+
+Another common pitfall is versioning issues with actions in your workflow file; a missing prefix can lead to unresolved action errors. Always refer to the official documentation for the correct versioning format. Additionally, be aware that network issues can prevent Docker from pulling images or pushing to Docker Hub, so ensure your network connection is stable.
+
+### Best Practices for Securing Docker Images
+
+To maintain a secure Docker environment, adhere to best practices such as using minimal base images, regularly updating dependencies, and employing non-root users within containers. Furthermore, utilize `.dockerignore` files to prevent sensitive files from being included in the image. Regularly scanning images for vulnerabilities and maintaining an automated CI/CD pipeline that incorporates security checks will help ensure that your Docker images remain secure throughout their lifecycle.
+
+### Conclusion: Fostering a Security-First Development Culture
+
+By automating the Docker image build and scan process with GitHub Actions, developers can create a secure and efficient CI/CD workflow that minimizes vulnerabilities. The integration of security practices within the pipeline enhances the overall security posture and fosters a culture of security-first development. As the landscape of software development continues to evolve, embracing these practices will be essential for delivering secure applications in a timely manner. Following the outlined steps and best practices, developers can significantly mitigate risks and ensure the integrity of their deployments.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/yaak/how-i-built-scanned-and-automated-a-docker-pipeline-4dgc)
+
+---
+
+<SocialShare title="Building a Secure Docker Pipeline with GitHub Actions" slug="building-a-secure-docker-pipeline-with-github-actions" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
