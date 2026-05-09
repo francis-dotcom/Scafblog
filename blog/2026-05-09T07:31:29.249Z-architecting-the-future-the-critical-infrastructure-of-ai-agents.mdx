@@ -1,0 +1,342 @@
+---
+slug: architecting-the-future-the-critical-infrastructure-of-ai-agents
+title: "Architecting the Future: The Critical Infrastructure of AI Agents"
+authors: [francis]
+tags: [ai, agents, cloud, infrastructure]
+date: 2026-05-09T07:31:29.249Z
+description: "If you've spent any time building with AI lately, you've probably heard the word "agent" thrown around a lot. But here's something that doesn't get talked about nearly as much: before you can have a real AI agent, you need a harness.
+I know that term might sound unfamiliar or even a little abstract. When I first came across it, I had the same reaction. But once it clicked, I couldn't unsee it — and I genuinely think it's one of the most important concepts to understand if you want to go beyond just calling an LLM API and actually building something that does things autonomously.
+Let's break it all down from scratch.
+Picture this: you've got API access to a powerful model like Claude or GPT-4. You send it a prompt, it sends back a response. That's great for chatbots and one-shot completions — but what if you want the model to:
+Browse the web and pull real-time data?
+Execute Python code to analyze that data?
+Remember what you told it last week?
+Coordinate across multiple steps — each one depending on the last?
+Call your internal APIs or tools?
+A raw model, on its own, can't do any of that. It can talk about doing those things, but it has no way to actually carry them out. It's like hiring a brilliant analyst who has no laptop, no internet, and can only communicate by passing notes. The intelligence is there — the infrastructure is not.
+That missing infrastructure is the harness.
+An agent harness is everything you build around a model to transform it from a text-generator into an agent that can act in the real world.
+The cleanest formula I've come across is:
+Agent = Model + Harness
+Anything in your agent that isn't the model itself — is part of the harness.
+In concrete terms, the harness typically includes:
+The orchestration loop — the logic that takes a user message, asks the model what to do, runs that action, feeds the result back, and repeats until the task is complete.
+Tool connections — the plumbing that lets the model call a browser, run code, query a database, or hit an external API.
+Memory — short-term context within a session AND long-term memory that persists across sessions.
+Context management — deciding what information goes into the prompt at each step (you can't just keep appending forever — models have token limits).
+Compute and sandboxing — somewhere safe for the agent to run code without blowing up your system.
+Authentication — so your agent can securely call external APIs without leaking credentials.
+Observability — logs, traces, and debugging tools so you know what happened when things go sideways at 2 AM.
+Session management — the ability for users to pause and resume, pick up right where they left off.
+Look at any AI-powered product you use today — Claude Code, GitHub Copilot, Cursor, Perplexity — and behind the scenes, there's a harness doing all of this work. The model is just one piece of a much larger machine.
+Here's the honest reality: building a harness from scratch is hard and time-consuming.
+If you've done it before, you know the drill. You pick a framework — LangGraph, LlamaIndex, CrewAI, Strands Agents — and start writing code. You wire up your tools. You manage your prompt structure carefully so the model doesn't get confused. You add error handling for when tool calls fail. You build retry logic. You handle streaming output. You set up logging. You package everything into a container, provision some compute, and deploy it.
+And then you realize you need session persistence. So you add a database. And then you realize you need the agent to authenticate with an external API. So you set up credential management. And now you need to understand why the agent went down a weird reasoning path, so you add tracing.
+For a straightforward use case, this might take a few days. For a complex one, it could take weeks — and a whole team.
+This is the real barrier to building with AI agents. Not the model. The harness.
+Tooling has finally started catching up to this problem. The idea behind a managed harness is simple: instead of writing all that orchestration and infrastructure code yourself, you declare what your agent needs as configuration, and the service builds the harness for you.
+Think of it like the difference between setting up your own server (writing harness code from scratch) versus using a managed cloud service (declaring config and letting the platform handle the rest).
+Amazon Bedrock AgentCore is one of the services taking this approach. With AgentCore's harness feature, you define your agent in a JSON config file — model, system prompt, tools, memory settings — and the platform compiles that into a fully running agent, handling all the infrastructure underneath.
+Under the hood, AgentCore harness uses Strands Agents (AWS's open-source agent SDK) to assemble the orchestration loop, tool execution, memory management, context handling, and streaming. Then it runs the whole thing inside an isolated microVM — its own dedicated CPU, memory, and filesystem — without you provisioning a single server.
+To make this concrete, here's how you'd go from zero to a working AI agent using AgentCore harness — and yes, this genuinely takes about 5 minutes.
+Build an agent that browses HackerNews and dev.to, pulls today's top AI and developer tools posts, clusters them by topic, and produces a ranked summary with a chart — all autonomously.
+npm install -g @aws/agentcore@preview
+
+agentcore create
+
+This command walks you through a set of prompts — which model to use, which tools to enable, authentication type, and so on. At the end, it generates a config file like this:
+{
+  "name": "TrendsAgentHarness",
+  "model": {
+    "provider": "bedrock",
+    "modelId": "global.anthropic.claude-sonnet-4-6"
+  },
+  "tools": [
+    {
+      "type": "agentcore_browser",
+      "name": "browser"
+    },
+    {
+      "type": "agentcore_code_interpreter",
+      "name": "code-interpreter"
+    }
+  ],
+  "skills": [],
+  "authorizerType": "AWS_IAM"
+}
+
+That's it. The browser tool lets the agent navigate real websites. The code interpreter gives it a Python sandbox to crunch data and generate charts.
+Edit the system-prompt.md file that was created alongside the config:
+Your job is to keep a pulse on what the AI and dev community is buzzing 
+about right now. Every session, head over to HackerNews and dev.to, 
+scrape today's hottest posts, then use the code interpreter to make sense 
+of it all — cluster the topics, rank them by how often they show up, and 
+summarize the top 5 in plain language. Throw in a bar chart. No fluff.
+
+The system prompt is your agent's personality and operating instructions. This is where you define what it does, how it thinks, and what output you expect from it.
+agentcore deploy
+
+Behind the scenes, this takes your config and system prompt, assembles a Strands Agents program, and deploys it into a managed microVM environment. No Dockerfile, no Kubernetes, no EC2 instance. Just one command.
+agentcore invoke --harness TrendsAgentHarness \
+  --session-id "$(uuidgen)" \
+  "What's trending in IT today?"
+
+What happens when you run this:
+The agent opens a browser and navigates to HackerNews.
+It scrolls through and reads the top posts.
+It does the same on dev.to.
+It pulls all the results into the code interpreter.
+It runs Python to cluster topics, calculate frequency, and build a bar chart.
+It streams a formatted summary back to your terminal.
+All of this runs in an isolated microVM that spins up for this session and tears down when it's done. No cross-session data leakage, no noisy neighbors.
+Here's a breakdown of what AgentCore harness gives you without any extra setup:
+
+
+
+Capability
+What It Actually Means For You
+
+
+
+
+Isolated microVM per session
+Your agent gets its own CPU, memory, and filesystem. Sessions are completely isolated from each other.
+
+
+Shell access
+The agent can run shell commands directly without going through the model's reasoning loop — faster and cheaper.
+
+
+Persistent filesystem
+Mid-session, the agent can save files, pause, and resume exactly where it left off.
+
+
+Model-agnostic routing
+Switch between Bedrock, OpenAI, and Google Gemini. You can even change providers mid-session and the conversation context stays intact.
+
+
+Built-in browser tool
+Powered by AgentCore Browser — the agent can navigate real websites, not just search APIs.
+
+
+Built-in code interpreter
+A full Python sandbox. The agent can write and execute code, generate charts, process files, and more.
+
+
+MCP server support
+Connect to any MCP-compatible tool server — Slack, Notion, GitHub, whatever your workflow needs.
+
+
+AgentCore Gateway
+Connect to APIs you've registered centrally, so credentials are managed outside the agent.
+
+
+Custom tool definitions
+Define your own inline function tools for the agent to call.
+
+
+Skills
+Package domain knowledge as markdown + scripts and give your agent expert-level context on demand.
+
+
+Full observability
+Every action is auto-traced via AgentCore Observability, so you can debug and audit everything that happened.
+
+
+
+One feature worth calling out specifically is skills. An agent skill is a bundle of markdown instructions and (optionally) scripts that gives your agent deep knowledge about a specific domain or workflow.
+Think of it this way: you can train a general model on your specific context. For example:
+A skill that teaches the agent how to work with your internal data format.
+A skill that walks the agent through your company's API conventions.
+A skill that gives the agent step-by-step knowledge of how to process Excel reports your way.
+You package the skill into the agent's environment, point the harness at it, and the agent picks it up and uses it automatically when relevant. No fine-tuning. No custom model training. Just structured knowledge the agent can reference.
+One question you might be asking: "What happens when my use case gets complex enough that a config file isn't enough?"
+That's a fair and important question. Maybe you need:
+Custom multi-agent orchestration where agents hand off tasks to each other.
+Specialized routing logic based on the content of a message.
+A fully custom memory layer with your own vector database.
+Integration with internal infrastructure that doesn't fit a standard pattern.
+AgentCore harness has an answer for this: export to code.
+When you need full control, you can export your harness configuration to Strands Agents code. You get the equivalent Python program that AgentCore was running for you — fully readable, fully editable — and you can extend it however you need. You stay on the same platform, just with more control.
+This is a smart design. You start with the fast path (config), and you graduate to the custom path (code) only when you actually need it. You're not locked into one or the other.
+Do I need to build a harness if I'm just using Claude.ai or ChatGPT?
+No. Those are consumer products where someone else already built the harness for you. You need to build your own when you're creating custom agents — ones that call your specific tools, connect to your internal systems, maintain state, or run autonomously over multiple steps.
+Is a harness the same as an agent framework?
+Not quite. A framework (like Strands Agents, LangGraph, or CrewAI) gives you the building blocks — tool interfaces, loop patterns, model connectors. A harness is the fully assembled, running system: framework code plus compute, sandboxing, memory, auth, and observability. You use a framework to build a harness, or you use a managed service to build one for you.
+Can I build a harness without a framework?
+Technically yes, but you'd be writing the entire orchestration loop, tool dispatch, error recovery, and context management from scratch. Frameworks exist precisely so you don't have to. It's a bit like writing raw socket code instead of using Express.js — possible, but almost never the right call.
+Is the browser tool expensive on tokens?
+Yes, it does consume more tokens than simpler tools since it's processing full web pages. For the trends analyst use case, it's absolutely worth it. For agents that need lighter-weight data fetching, you might want to explore API-based tools or MCP servers that return structured data instead.
+For a long time, building a production-grade AI agent required deep expertise across model APIs, orchestration frameworks, cloud infrastructure, and security. That's a lot of disciplines to combine, and it's been a genuine barrier for developers who want to experiment and build.
+Managed harness services like AgentCore change that equation. The gap between "I have an idea for an agent" and "I have a running agent" is now measured in minutes for straightforward use cases. That's genuinely exciting.
+It also means the interesting work shifts. Instead of spending your energy on infrastructure plumbing, you can focus on:
+What should your agent actually do?
+What domain knowledge does it need?
+What tools should it have access to?
+How should it reason and communicate?
+Those are the questions worth spending your time on.
+AgentCore harness is currently in public preview in four AWS regions: US West (Oregon), US East (N. Virginia), Europe (Frankfurt), and Asia Pacific (Sydney).
+Here are the resources to get started:
+AgentCore harness documentation
+Strands Agents SDK (open source)
+AgentCore pricing
+The trends analyst agent described in this post — browsing HackerNews, clustering AI topics, generating a chart — took about 5 minutes from idea to first working invocation. The JSON config is 15 lines. The system prompt is 5 lines.
+What would you build with 5 minutes and a config file? I'd love to see what the community comes up with. Drop your ideas or experiments in the comments.
+If this post helped you understand agent harnesses better, consider sharing it with someone who's been struggling to wrap their head around the agent architecture puzzle. And if you're already building harnesses the hard way, maybe it's time to let the factory do some of that work for you...."
+image: /img/blog/generated/architecting-the-future-the-critical-infrastructure-of-ai-agents-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Architecting the Future: The Critical Infrastructure of AI Agents](/img/blog/generated/architecting-the-future-the-critical-infrastructure-of-ai-agents-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### The Paradigm Shift in AI Development
+
+The rise of AI agents marks a significant shift in how we approach problem-solving in technology. Traditional models, such as those based on large language models (LLMs), have primarily focused on generating text or responding to prompts. However, the potential of these models extends far beyond simple interactions. To harness this potential, developers need to build a robust infrastructure around these models, known as an agent harness. This infrastructure is essential for enabling AI agents to perform complex tasks autonomously, making them capable of acting in the real world rather than merely simulating conversation.
+
+### Defining the Agent Harness Framework
+
+An agent harness can be defined as the comprehensive framework that encompasses all components necessary for transforming a basic AI model into a fully operational agent. This includes orchestration, tool connections, memory management, and context handling. The fundamental equation that encapsulates this concept is:
+
+$$ \text{Agent} = \text{Model} + \text{Harness} $$
+
+In this equation, the model represents the AI's core capabilities, while the harness provides the necessary infrastructure to facilitate real-world interactions. Each component of the harness plays a critical role in ensuring that the agent can effectively execute tasks, maintain state, and interact with various tools and APIs.
+
+### The Components of an Effective Agent Harness
+
+To understand the significance of an agent harness, it is crucial to delve into its core components. The orchestration loop is the backbone of any agent harness, controlling the flow of information and actions. It takes user inputs, queries the model for actions, executes those actions, and manages the feedback loop until the task is completed. 
+
+Tool connections are equally vital, as they enable the agent to interface with external systems, such as databases, APIs, or even web browsers. Memory management is another essential aspect; it allows the agent to retain context over multiple interactions, enhancing its ability to provide relevant responses based on past interactions. Additionally, context management ensures that the agent can handle the limitations of token counts in LLMs by intelligently structuring the input data.
+
+### The Complexity of Building a Harness from Scratch
+
+While the concept of an agent harness is straightforward, the practical implementation is anything but simple. Building a harness from scratch involves navigating a labyrinth of complexities, including selecting the appropriate frameworks, managing tool integrations, and ensuring robust error handling. For instance, developers must consider session persistence, authentication protocols, and observability mechanisms to track and debug agent behavior.
+
+The time investment required to build a harness can be substantial. For a straightforward use case, a developer might spend several days constructing the necessary components. For complex scenarios, this timeline can extend to weeks or even months, particularly when a team is involved. This complexity often acts as a barrier to entry for developers looking to experiment with AI agents, as the infrastructure demands can overshadow the creative aspects of AI development.
+
+### Managed Harness Services: A Game Changer
+
+Recognizing the challenges associated with building agent harnesses from scratch, the industry has begun to shift towards managed harness services. These services streamline the development process by allowing developers to define their agent's requirements via configuration files rather than writing extensive orchestration code. This approach significantly reduces the time and expertise needed to deploy functional AI agents.
+
+For example, Amazon Bedrock's AgentCore provides a managed environment where developers can define their agents in a JSON configuration file. This configuration specifies the model, tools, memory settings, and more, allowing the platform to handle the underlying infrastructure automatically. The result is a dramatic reduction in the time from concept to deployment, enabling developers to focus on the agent's functionality rather than the complexities of its infrastructure.
+
+### A Step-by-Step Guide to Creating an AI Agent
+
+To illustrate the power of managed harness services, let’s walk through the process of creating an AI agent using Amazon Bedrock’s AgentCore. This example will highlight the simplicity and efficiency of using a managed service.
+
+1. **Install AgentCore**: Begin by installing the AgentCore CLI tool.
+
+   ```bash
+   npm install -g @aws/agentcore@preview
+   ```
+
+2. **Create an Agent**: Use the CLI to initiate the creation of a new agent.
+
+   ```bash
+   agentcore create
+   ```
+
+   This command will guide you through a series of prompts to configure your agent, including selecting the model and enabling the necessary tools.
+
+3. **Edit the Configuration**: Once the agent is created, a configuration file is generated. This file defines the agent's name, model provider, tools, and authorization type. For instance:
+
+   ```json
+   {
+     "name": "TrendsAgentHarness",
+     "model": {
+       "provider": "bedrock",
+       "modelId": "global.anthropic.claude-sonnet-4-6"
+     },
+     "tools": [
+       {
+         "type": "agentcore_browser",
+         "name": "browser"
+       },
+       {
+         "type": "agentcore_code_interpreter",
+         "name": "code-interpreter"
+       }
+     ],
+     "authorizerType": "AWS_IAM"
+   }
+   ```
+
+4. **Define the System Prompt**: The system prompt outlines the agent's role and behavior. For example:
+
+   ```markdown
+   Your job is to keep a pulse on what the AI and dev community is buzzing about right now. Every session, head over to HackerNews and dev.to, scrape today's hottest posts, then use the code interpreter to make sense of it all — cluster the topics, rank them by how often they show up, and summarize the top 5 in plain language. Throw in a bar chart. No fluff.
+   ```
+
+5. **Deploy the Agent**: Deploy the agent using a single command.
+
+   ```bash
+   agentcore deploy
+   ```
+
+6. **Invoke the Agent**: Finally, run the agent to see it in action.
+
+   ```bash
+   agentcore invoke --harness TrendsAgentHarness --session-id "$(uuidgen)" "What's trending in IT today?"
+   ```
+
+This process exemplifies the streamlined nature of using a managed service, transforming a complex deployment into a matter of minutes.
+
+### Real-World Applications of AI Agents
+
+The implications of utilizing an agent harness extend far beyond mere convenience. AI agents powered by robust harnesses can be deployed across various domains, including customer support, data analysis, and content creation. For instance, an AI agent could autonomously analyze social media trends, providing businesses with actionable insights in real-time.
+
+Moreover, the ability to integrate multiple tools and maintain context over sessions significantly enhances the agent's utility. In a customer support scenario, an agent could access a company's knowledge base, retrieve user data, and provide personalized responses based on previous interactions, all while maintaining security and privacy through robust authentication mechanisms.
+
+### Future Trends in AI Agent Development
+
+As the landscape of AI development continues to evolve, several trends are emerging that will shape the future of agent harnesses. One significant trend is the increasing emphasis on modularity and customization. Developers will demand more flexibility in how they configure and extend their agents, leading to the development of more sophisticated managed services that cater to diverse use cases.
+
+Additionally, the integration of AI agents with emerging technologies, such as edge computing and IoT, will open new avenues for autonomous decision-making. This convergence will necessitate the development of more advanced harnesses capable of handling the complexities of distributed systems while ensuring security and performance.
+
+### The Implications of Harnesses for Future AI Development
+
+The evolution of agent harnesses represents a pivotal moment in AI development. By simplifying the infrastructure required to deploy AI agents, managed services are democratizing access to advanced AI capabilities. This shift allows developers to focus on the creative and functional aspects of their agents, fostering innovation and experimentation.
+
+However, it is essential to recognize the potential limitations of managed services. While they provide significant advantages in terms of speed and ease of use, developers must remain vigilant about vendor lock-in, security concerns, and the trade-offs associated with abstraction layers. As the field progresses, a balanced approach that combines the benefits of managed services with the flexibility of custom implementations will be critical.
+
+### Conclusion: The Future of AI Agents Lies in Robust Infrastructure
+
+In conclusion, the role of an agent harness in the development of AI agents cannot be overstated. As the capabilities of AI models expand, the need for a solid infrastructure to support these advancements becomes increasingly vital. Managed services like Amazon Bedrock's AgentCore are paving the way for a new era of AI development, where the focus shifts from infrastructure plumbing to innovative applications. By embracing these tools, developers can unlock the full potential of AI agents, driving the next wave of technological advancement.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/aws-builders/what-is-an-agent-harness-and-why-every-ai-agent-needs-one-382l)
+
+---
+
+<SocialShare title="Architecting the Future: The Critical Infrastructure of AI Agents" slug="architecting-the-future-the-critical-infrastructure-of-ai-agents" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
