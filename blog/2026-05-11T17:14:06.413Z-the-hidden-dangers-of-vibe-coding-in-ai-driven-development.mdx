@@ -1,0 +1,299 @@
+---
+slug: the-hidden-dangers-of-vibe-coding-in-ai-driven-development
+title: "The Hidden Dangers of Vibe Coding in AI-Driven Development"
+authors: [francis]
+tags: [vibe coding, ai development, software security, performance]
+date: 2026-05-11T17:14:06.413Z
+description: "Three hours. That's all it took.
+I described a SaaS dashboard to Cursor. It generated the React components. I prompted it again — backend routes, database schema, auth flow. Another prompt. Deployment config. CI pipeline. Landing page.
+By lunchtime, I had a working product. Live URL. Login flow. Data persistence. Dark mode. ✨
+I posted on Slack: "Just shipped a new tool in one morning. Vibe coding is insane."
+By dinner, I had 43 messages from users. Not the good kind.
+"I can see other people's data."
+"The export button returns an empty file."
+"I got logged in as someone else."
+That last one. 😬
+Three hours to build. Three weeks to fix. And a very uncomfortable conversation with my manager about what "shipped" actually means.
+If you've been anywhere near tech Twitter in 2026, you've heard the term. Vibe coding is the practice of building software by describing what you want to an AI and iterating through conversation rather than writing code manually.
+The term was coined in early 2025 and has since become one of the most debated practices in software development.
+The promise: Anyone can build software. Just describe what you want. The AI handles the rest.
+The reality: Anyone can build software that looks like it works. The gap between "looks like it works" and "works in production" is where careers go to die.
+I'm not anti-vibe coding. I still do it. But I learned — the hard way — that vibes have a shelf life, and that shelf life ends at git push origin main.
+Here's what I've learned from shipping AI-generated code to real users.
+This is the big one. The one that gets you on a call with legal.
+When I vibe-coded my dashboard, the AI generated auth middleware that looked secure. JWT tokens, bcrypt passwords, rate limiting. Textbook stuff.
+What it didn't do:
+Sanitize the input on the search endpoint (hello, SQL injection)
+Validate that users could only access their own data (hello, IDOR vulnerability)
+Set proper CORS headers (hello, any website can call my API)
+
+
+
+
+What I asked for: "Add user authentication"
+What I got: A login form that works
+What I needed: A security review by someone who thinks like an attacker
+
+The AI doesn't think like an attacker. It thinks like a tutorial. It gives you the happy path, not the threat model.
+📌 The rule: Never ship AI-generated auth, payments, or user data handling without a human security review. Period.
+The AI designed my database schema. It was clean. Normalized. Made sense on paper.
+It also stored user sessions in the same database as user data, with no foreign key constraints, no indexes on the columns I was querying every 50ms, and a deleted_at column that nothing actually checked.
+AI's schema:  ✅ Looks clean
+Reality:      ❌ No indexes = full table scan on every request
+Reality:      ❌ No constraints = orphaned records everywhere
+Reality:      ❌ Soft delete that nothing respects = ghost data
+
+When I hit 200 concurrent users, my database response time went from 50ms to 12 seconds. The AI never mentioned indexes. I never asked. That's the trap — you don't know what you don't know.
+📌 The rule: If you don't understand database design, vibe-code the feature, then ask a human to review the schema before you populate it with real data.
+Here's a conversation I had with Cursor:
+Me: "Write tests for the payment module"
+AI: *writes 23 tests*
+Me: "Run the tests"
+AI: "All 23 tests passed ✅"
+Me: *ships it*
+
+Two weeks later: a user was charged twice for the same subscription. How?
+The AI wrote tests that verified the function calls were made. It never tested what happened when the webhook fired twice. It never tested idempotency. It never tested the thing that actually broke.
+AI-generated tests optimize for coverage numbers, not for finding bugs.
+They test that the code does what the code does. They don't test that the code does what the business needs.
+📌 The rule: Write your own test cases for critical paths. Use AI to generate the boilerplate, but you define the scenarios.
+When you vibe-code, you prompt: "Add email sending." The AI adds nodemailer.
+Then: "Add HTML email templates." It adds mjml and handlebars.
+Then: "Add email scheduling." It adds bull and redis.
+Then: "Add email tracking." It adds open-pixel and three more packages.
+By the end of a 3-hour session, your package.json has 47 new dependencies. You didn't choose any of them. You don't know what half of them do. And one of them has a known CVE that's been open for 6 months.
+
+📌 The rule: After every vibe coding session, run npm audit, read the dependency list, and ask: "Do I actually need all of these?"
+AI is incredible at generating beautiful UI. Give it a prompt, get back a polished component with animations, responsive layout, and dark mode.
+But:
+The "Submit" button doesn't have a loading state → users click it 5 times
+The form doesn't validate on blur, only on submit → frustration
+The error message says "Something went wrong" → zero debugging info
+The mobile layout technically works but the touch targets are 20px → rage tapping
+The modal doesn't trap focus → accessibility nightmare
+Looking done and being done are different things. AI excels at the first. You have to deliver the second.
+📌 The rule: After the AI generates UI, test it like a frustrated user. Click fast. Resize the window. Use keyboard only. Try to break it.
+// What the AI wrote:
+try {
+  const result = await processPayment(amount);
+  return { success: true, data: result };
+} catch (error) {
+  return { success: false, error: error.message };
+}
+
+Looks fine, right? Now what happens when processPayment throws a TimeoutError? The user sees "TimeoutError" on their screen. Not "Payment is processing, please check back in a minute." Just... a raw error message.
+What happens when the network drops mid-request? The AI doesn't retry. It doesn't queue. It doesn't tell the user what state they're in.
+AI writes error handling that catches errors. It doesn't write error handling that handles errors.
+📌 The rule: For every error catch block, ask: "What does the user see? What do they do next?" If you can't answer both, rewrite it.
+My dashboard loaded in 200ms with 10 test users. 
+With 500 real users? 8 seconds.
+The AI had:
+No pagination (loading all records at once)
+No caching (same query on every page load)
+No lazy loading (every component hydrated on mount)
+Three API calls that could've been one
+These aren't bugs. The code works correctly. It just works slowly. And the AI never mentioned performance because you never asked about performance.
+That's the core problem with vibe coding: it optimizes for the request you made, not the requirements you forgot.
+📌 The rule: Before shipping, test with realistic data volumes. 10 test records tell you nothing about 10,000 real ones.
+I'm not here to trash vibe coding. It's genuinely powerful when used correctly. Here's where it shines:
+
+
+
+Use Case
+Why It Works
+
+
+
+
+Prototyping
+Speed > quality. Get the idea on screen fast.
+
+
+Personal tools
+You're the only user. Bugs are learning opportunities.
+
+
+Boilerplate
+Config files, CRUD routes, migration scripts.
+
+
+Learning
+"Explain this code" is the best prompt in vibe coding.
+
+
+UI exploration
+"Try 5 different layouts for this dashboard."
+
+
+
+
+
+
+Use Case
+Why It's Risky
+
+
+
+
+Auth & security
+AI doesn't think like an attacker.
+
+
+Payments
+Real money, real consequences.
+
+
+User data
+Privacy laws don't care that "the AI wrote it."
+
+
+Production systems
+Reliability requires understanding, not just output.
+
+
+Team codebases
+Others have to maintain what you vibe-coded.
+
+
+
+After shipping broken code and spending weeks fixing it, here's my personal vibe coding framework:
+❌ "Build me a user dashboard"
+✅ "Build a user dashboard with: 
+   - Server-side pagination (20 items/page)
+   - Input sanitization on all form fields
+   - Error boundaries with user-friendly messages
+   - Loading states for every async operation
+   - WCAG 2.1 AA compliance"
+
+Specificity is quality control. Vague prompts produce vague code.
+I know. The whole point of vibe coding is not reading code. But if it's going to production, you need to understand what it does. At least at the architecture level.
+You don't need to understand every regex. But you do need to know:
+Where does user input go?
+How is auth handled?
+What happens when things fail?
+What data leaves the server?
+Use AI to generate unit tests for utility functions. But for the paths that matter — login, payments, data access — write the test scenarios yourself.
+Ask yourself: "What's the worst thing that could happen if this breaks?" Then write a test for exactly that.
+Run npm audit. Check for hardcoded secrets. Verify CORS. Test authentication with two different accounts. Try to access data that isn't yours.
+If you don't know how to do these things, learn them before you vibe-code a production app.
+Populate your database with 10,000 records. See what happens. If the page takes 5 seconds to load, you have a problem. Better to find it now than when users are complaining.
+Use AI to generate the feature code. But the architecture — the database schema, the API design, the auth flow — design that yourself. Or have someone review it.
+Features are expendable. Foundations are not.
+If the AI generated something and you don't fully understand it, write a comment. Not for others — for future you. Because when it breaks at 2am, you won't remember what that 40-line function does.
+I've started thinking about vibe coding on a spectrum:
+Level 0: "What's vibe coding?"
+Level 1: "I use AI for autocomplete"  
+Level 2: "I describe features and AI builds them"
+Level 3: "I review and understand everything AI generates"
+Level 4: "I architect the system, AI handles implementation"
+Level 5: "I use AI as a tool, not a crutch"
+
+Most people are at Level 2. The goal is Level 4-5.
+The danger isn't vibe coding itself. It's getting stuck at Level 2 and thinking you're at Level 5.
+
+I still vibe code every day. It's an incredible tool for the right problems. I've built personal tools, prototypes, and internal dashboards in hours that would've taken days.
+But I've also learned — through broken auth, angry users, and 2am debugging sessions — that shipping to real users requires more than vibes.
+It requires judgment. It requires understanding. It requires the humility to say: "The AI wrote this, but I need to verify it works correctly."
+The developers who'll thrive aren't the ones who reject vibe coding. They're the ones who know when to vibe and when to engineer.
+Where are you on the Vibe Coding Maturity Model? And what's the worst thing you've shipped with AI-generated code?
+I'll go first: I shipped a payment integration that double-charged users. The AI's test suite passed with flying colors. 🫠
+Your turn. 👇
+If this saved you from a production incident, share it with a fellow vibe coder. We've all been there.
+More on navigating the AI coding era:
+Junior Devs in 2026: What Bootcamps Won't Tell You
+The Prompt Engineer's Survival Guide: Skills That AI Can't Replace
+Am I a Developer or Just a Prompt Engineer? by @harsh2644
+AI vs Non-AI: Building the Same Project Twice by @nandofm
+Vibe Coding Lessons Nobody Talks About by @konark_13..."
+image: /img/blog/generated/the-hidden-dangers-of-vibe-coding-in-ai-driven-development-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![The Hidden Dangers of Vibe Coding in AI-Driven Development](/img/blog/generated/the-hidden-dangers-of-vibe-coding-in-ai-driven-development-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### The Allure of Instant Gratification
+
+Vibe coding has emerged as a fascinating trend in the software development landscape, offering a tantalizing promise: rapid application development through AI-generated code. Developers can describe features in plain language and see their ideas transformed into functioning code almost instantaneously. This approach is particularly appealing in environments where time-to-market is critical, allowing teams to prototype and iterate quickly. However, the speed of development can lead to complacency, where developers overlook the foundational principles of software engineering that ensure security, performance, and maintainability.
+
+### The False Sense of Security in AI-Generated Code
+
+One of the most significant risks associated with vibe coding is the false sense of security it provides. Developers may assume that because the AI-generated code "works," it is also secure and performant. This assumption is dangerous. For instance, AI-generated authentication middleware may include standard practices like JSON Web Tokens (JWT) and password hashing but often lacks critical security measures such as input validation or proper access controls. A real-world example is a developer who, after using vibe coding to implement user authentication, discovered that the AI had not sanitized input fields, leading to SQL injection vulnerabilities. This oversight can result in severe consequences, including data breaches and legal ramifications.
+
+### Performance Degradation Under Real-World Conditions
+
+While AI can generate code that performs well in controlled environments, it often fails to account for real-world usage patterns. For example, an application that loads quickly with a limited number of test users can experience significant performance degradation under load due to architectural flaws in the generated code. In one case, a developer found that an application, which responded in 200 milliseconds with ten users, took over eight seconds to respond when subjected to 500 concurrent users. This discrepancy was attributed to a lack of database indexing and inefficient query structures generated by the AI. Such performance issues underscore the necessity for rigorous load testing and performance optimization before deploying AI-generated applications.
+
+### The Importance of Comprehensive Testing
+
+Another critical aspect of vibe coding is the need for comprehensive testing. AI-generated tests often focus on verifying that functions execute correctly but fail to cover edge cases or business logic requirements. For instance, an AI might generate a suite of tests for a payment processing module that passes all checks, yet neglects to account for scenarios like webhook retries, leading to double charges for users. This highlights a fundamental rule: developers must write their own test cases for critical paths, ensuring that they reflect real-world scenarios and business requirements. Relying solely on AI-generated tests can lead to significant oversights that may not be discovered until after deployment.
+
+### Establishing a Robust Evaluation Framework
+
+To mitigate the risks associated with vibe coding, developers should establish a robust framework for evaluating AI-generated code. This framework should encompass several critical steps:
+
+1. **Code Review**: Conduct an in-depth review of the AI-generated code, focusing on security vulnerabilities and architectural integrity. This review should involve security experts who can identify potential weaknesses.
+
+2. **Testing Scenarios**: Write and execute tests that cover critical paths, edge cases, and performance under load. This proactive approach ensures that the application behaves as expected in real-world conditions.
+
+3. **Dependency Management**: After generating code, perform audits on dependencies to identify vulnerabilities and ensure that only necessary packages are included. This step is crucial, as AI-generated code can introduce unnecessary libraries, some of which may have known security issues.
+
+4. **User Experience Testing**: Test the application from the perspective of an end user, simulating various scenarios to identify usability issues. This approach helps ensure that the application is not only functional but also user-friendly.
+
+5. **Performance Benchmarking**: Populate the application with realistic data volumes to evaluate its performance under expected loads. This step is essential to uncover potential bottlenecks that may not be apparent with a limited dataset.
+
+### The Role of Human Oversight in Critical Areas
+
+Despite the capabilities of AI, human oversight remains indispensable, especially in areas where failures can have dire consequences. Developers must maintain a clear understanding of the systems they are building, including how user inputs are processed, how authentication is managed, and what happens during error conditions. For instance, a developer who relies solely on AI-generated error handling may find that users are presented with raw error messages rather than user-friendly prompts. This lack of attention to user experience can lead to frustration and a poor perception of the application.
+
+### Learning from Real-World Failures: Case Studies
+
+Real-world failures provide valuable lessons for developers venturing into vibe coding. One notable case involved a developer who shipped a SaaS dashboard that allowed users to see each other's data due to inadequate access controls in the AI-generated code. While the application appeared functional during testing, it quickly became apparent that the security model was fundamentally flawed. This incident underscores the importance of thorough security reviews and the necessity of understanding the implications of AI-generated code.
+
+### Striking a Balance Between Speed and Reliability
+
+In conclusion, while vibe coding offers the potential for rapid development and innovation, it is crucial to approach it with caution. The risks associated with security vulnerabilities, performance issues, and user dissatisfaction cannot be overlooked. By implementing best practices, maintaining human oversight, and learning from past failures, developers can strike a balance between the speed of AI-driven development and the reliability of production-ready software. 
+
+### The Future of Vibe Coding: Navigating the Landscape Responsibly
+
+As the software development landscape continues to evolve, the integration of AI tools like vibe coding will become increasingly prevalent. However, it is essential for developers to recognize the limitations of AI and the importance of human expertise. By fostering a culture of responsibility and diligence in the use of AI-generated code, the industry can harness the benefits of this technology while minimizing its inherent risks. The journey toward mastering vibe coding is ongoing, and developers must continually assess their practices to ensure they are building secure, performant, and user-friendly applications. 
+
+In summary, vibe coding is a powerful tool, but it requires a nuanced understanding of both its capabilities and its limitations. Developers must be vigilant in their approach, ensuring that the code they deploy meets the highest standards of security and performance.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/mamoor_ahmad/vibe-coding-is-fun-until-you-hit-production-42lj)
+
+---
+
+<SocialShare title="The Hidden Dangers of Vibe Coding in AI-Driven Development" slug="the-hidden-dangers-of-vibe-coding-in-ai-driven-development" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
