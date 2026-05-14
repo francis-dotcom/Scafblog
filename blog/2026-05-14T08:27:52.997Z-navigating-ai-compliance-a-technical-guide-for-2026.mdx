@@ -1,0 +1,275 @@
+---
+slug: navigating-ai-compliance-a-technical-guide-for-2026
+title: "Navigating AI Compliance: A Technical Guide for 2026"
+authors: [francis]
+tags: [ai, compliance, iso42001, euai]
+date: 2026-05-14T08:27:52.998Z
+description: "If you ship AI-assisted code in 2026, three regulatory things have changed under your feet.
+In December 2025, OWASP published the Top 10 for Agentic Applications. In April 2026, Microsoft released the Agent Governance Toolkit. In August 2026, the EU AI Act high-risk obligations take effect. ISO 42001 has become the AI management system standard auditors expect. NIST AI RMF is the framework most US agencies and primes will reference. The Colorado AI Act starts enforcement in June 2026. Tool qualification frameworks (DO-178C and DO-330 for avionics, IEC 62304 for medical devices, ISO 26262 for automotive, CMMC for defense) treat AI tooling with the same scrutiny they applied to legacy code generators.
+That is a lot of paper. The good news is that most of it points at the same operational pattern. You need to know what your AI did, you need to enforce policy at the tool surface, you need evidence you can hand to a third party, and you need a retention story.
+This post is a working checklist that maps each of those frameworks to actual Akmon commands. Map to your own controls as needed.
+Almost every AI compliance program asks for five things, in different language.
+A documented inventory of AI systems, with risk classifications and owners.
+A policy framework, ideally enforced at runtime, not only documented.
+An audit trail of agent activity, with the integrity to be admissible.
+A retention story for that audit trail.
+A way to extract evidence on demand, in a format a non-engineer can read.
+If you build those five, you are most of the way to compliance with most frameworks. The frameworks layer on specific controls that fit your risk profile.
+ISO 42001 is a management system standard, like ISO 27001 but for AI. It does not tell you how to build the agent. It tells you how to govern the work.
+The relevant controls for AI coding agents:
+A.5 AI policies. Document who owns what.
+A.6 Internal organization. Roles and responsibilities for AI.
+A.7 Operational planning and control. Including evidence of operations.
+A.8 Performance evaluation. Continuous monitoring and review.
+The translation to engineering work, with the Akmon command that produces the evidence:
+
+
+
+Control
+What you actually do
+Akmon command
+
+
+
+
+A.5
+Maintain an AI inventory with risk classification
+An internal doc, ideally rendered from the agents that emit AGEF
+
+
+A.6
+Assign owners for each agent
+A field in the project's AKMON.md plus your CMDB
+
+
+A.7
+Run policy at the tool boundary, log every call
+
+akmon audit verify, akmon evidence verify
+
+
+
+A.8
+Review evidence regularly, close the loop
+
+akmon slo verify, akmon slo trend
+
+
+
+
+The trust pipeline already does most of A.7 and A.8. The rest is documentation.
+For high-risk AI systems, the EU AI Act requires automatic recording of events that are relevant to the operation of the system. This is not a logging best practice. It is an obligation.
+The recording must:
+Capture events automatically.
+Cover the operating life of the system.
+Be of sufficient detail to investigate incidents.
+Be retained for a period appropriate to the system's purpose.
+The translation to engineering work:
+
+
+
+Requirement
+What you actually do
+Akmon evidence
+
+
+
+
+Automatic recording
+Record on every tool call, every model call, every policy decision
+.akmon/audit/<session>.jsonl
+
+
+Coverage
+Make sure every session produces a record
+Index by session ID, alarm on gaps
+
+
+Sufficient detail
+Inputs, outputs, decisions, parent and child IDs
+AGEF event kinds, content-addressed objects
+
+
+Retention
+Store records for the contractual or legal minimum
+Lifecycle policy on your storage
+
+
+
+Article 12 does not say "use AGEF". It says automatic, sufficient, retained. AGEF satisfies those structurally.
+NIST AI RMF is voluntary, US flavored, and well respected. The four functions are Govern, Map, Measure, Manage.
+For AI coding agents:
+Govern: assign accountability for AI tools used in development.
+Map: classify the risk of each agent and document tools it can use.
+Measure: monitor for misbehavior, track metrics.
+Manage: respond to incidents, retire systems that fail.
+If you have ISO 42001 covered, NIST AI RMF is mostly a vocabulary translation. Same data, different headers in the report.
+For SOC 2 audits, AI coding agents tend to fall under CC4 (monitoring) and CC7 (system operations). Some auditors are starting to ask about CC2.3 (communications about responsibilities) for AI-specific roles.
+What auditors want to see:
+A documented set of AI controls, with owners.
+Evidence that the controls run, not just that they exist.
+Logs that demonstrate operations and exceptions.
+Incident history with root cause and remediation.
+The Akmon trust pipeline maps cleanly. SLO verify gives you the "controls run". Evidence verify gives you the "logs that demonstrate operations". Replay gives you the "incident history" framing.
+This is where Akmon is most differentiated. Generic AI agents do not address tool qualification at all. Akmon does.
+DO-330 covers tool qualification. AI tools used in development have to either qualify or be classified as not affecting the certified output. Akmon's evidence chain is the artifact you need to make the case. The tool qualification kit (TQK) typically wants a deterministic procedure and recorded artifacts. Replay against recorded providers and tools is the closest thing in the AI space to a deterministic procedure.
+IEC 62304 cares about the software life cycle. AI assistance in development is part of that life cycle. The evidence Akmon produces fits the V&V records expected at most safety classifications. The redaction flow is critical for protected health information.
+For ASIL-rated software, traceability is mandatory. AGEF's content-addressed events plus replay give you a defensible answer when an auditor asks where a particular line came from. The spec workflow (akmon spec) is the right entry point for high-ASIL changes.
+CMMC level 2 and above care about access control and audit. Akmon's policy profiles, the explicit deny posture in prod, and the audit chain map to several practices in AC, AU, and CM domains. Local-first execution (Ollama or your hosted endpoint inside a controlled environment) keeps controlled unclassified information inside the boundary.
+Published December 2025. The list is technical, not regulatory, but it has become the shared vocabulary for failure modes. If you have not mapped your agent's risks to the list, do it.
+The most relevant items for an AI coding agent:
+LLM01 prompt injection. Tool inputs that contain hidden instructions. Mitigated by policy at the tool boundary, the prod profile, and constrained web_fetch allow lists.
+LLM03 sensitive information disclosure. Mitigated by akmon redact for outputs and by careful provider choice.
+LLM06 excessive agency. Mitigated by the prod policy profile and by team-specific packs that lock the tool surface.
+LLM08 vector and embedding weaknesses. Where your agent uses retrieval, the events emit RetrievalCall records, so you can audit what was retrieved.
+A control map document lives in the docs. The mapping is concrete: each control points at a command or a configuration knob.
+If you have one afternoon:
+Make an inventory. List your agents, owners, and risk levels in a one page document.
+Stand up Akmon in your repo. Choose staging profile. Add one organization pack.
+Run a session, then run the trust pipeline. Confirm the three exit codes are 0.
+Map three controls each to ISO 42001 A.7, EU AI Act Article 12, and SOC 2 CC7. Use the AGEF event kinds as evidence.
+Set a retention policy. Pick a number, document it, automate the lifecycle.
+Schedule a weekly evidence review. One person, one hour, one summary.
+If you have a quarter:
+Cover all repos with the same Akmon binary and policy framework.
+Build a control map that ties each AGEF event kind and each command to a control across frameworks.
+Add slo trend to detect regressions across recent sessions.
+Add a customer-facing surface (a small page in your help center) that explains what your AI coding agent records.
+Walk your auditor through a sample session. The first one will tell you what is missing.
+What you get: an audit trail that survives a third-party review, a faster path through customer security questionnaires, and a much shorter incident loop.
+What you do not get: a guarantee that the model behaves. The model is the model. The job of governance is to make the consequences of misbehavior bounded, observable, and provable.
+If you want a place to start, install Akmon and run the trust pipeline on one session. The repo is at github.com/radotsvetkov/akmon. The format is at github.com/radotsvetkov/agef. The site is at radotsvetkov.github.io/akmon.
+The next article in this series goes deep on the redaction workflow, which is the part of the kit you reach for the day before an external review...."
+image: /img/blog/generated/navigating-ai-compliance-a-technical-guide-for-2026-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Navigating AI Compliance: A Technical Guide for 2026](/img/blog/generated/navigating-ai-compliance-a-technical-guide-for-2026-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### The Imperative of AI Compliance in a Regulated Landscape
+
+As we transition into 2026, the regulatory landscape governing artificial intelligence (AI) is more intricate than ever. Developers are tasked with navigating a myriad of compliance frameworks that include the ISO 42001 standard, the EU AI Act, and SOC 2. The stakes are high; non-compliance can lead to severe penalties and reputational harm. Therefore, establishing a structured approach to compliance is not just beneficial but essential for organizations deploying AI technologies. This article presents a detailed checklist for implementing AI compliance frameworks, emphasizing documentation, policy enforcement, and audit trails as core operational patterns.
+
+### Dissecting Key Regulatory Frameworks
+
+Understanding the nuances of regulatory frameworks is critical for developers. ISO 42001 serves as a management system standard specifically tailored for AI, focusing on governance over technical implementation. This standard mandates clear documentation, accountability, and operational controls. The EU AI Act, effective in 2026, introduces stringent obligations for high-risk AI applications, requiring developers to maintain comprehensive records of system operations and decision-making processes. Meanwhile, SOC 2 compliance emphasizes data security and operational integrity, necessitating demonstrable controls over systems. Familiarity with these frameworks enables developers to design compliant AI systems effectively.
+
+### Establishing a Comprehensive AI Inventory
+
+A foundational element of AI compliance is the establishment of an exhaustive inventory of AI systems. This inventory should detail system descriptions, risk classifications, and ownership information. For instance, consider documenting an AI-driven fraud detection system as follows:
+
+```markdown
+# AI System Inventory
+
+## Fraud Detection AI
+- **Description:** AI system for detecting fraudulent transactions
+- **Risk Classification:** Critical
+- **Owner:** Risk Management Team
+```
+
+This level of documentation not only aids in compliance but also enhances risk management by providing clarity on the potential impacts of various AI systems.
+
+### Policy Framework: Runtime Enforcement of Compliance
+
+Creating a robust policy framework is essential for ensuring compliance is enforced at runtime. Policies should be integrated at the tool boundary, meaning compliance checks occur during system operation rather than retrospectively. Developers can leverage Akmon commands, such as `akmon audit verify`, to log every tool call, ensuring adherence to established policies. This proactive strategy allows teams to identify and rectify compliance issues before they escalate into more significant concerns.
+
+### The Critical Role of Audit Trails
+
+Audit trails serve as a cornerstone of AI compliance, providing a verifiable record of agent activity that can be utilized for accountability and investigation. The EU AI Act mandates that developers automatically record events pertinent to high-risk AI systems' operations. This includes capturing inputs, outputs, decisions, and any anomalies during system operation. By employing Akmon, developers can generate detailed audit logs in a structured format, such as:
+
+```json
+{
+  "session_id": "67890",
+  "event": "model_call",
+  "input": "transaction_data",
+  "output": "fraud_alert",
+  "timestamp": "2026-02-01T14:30:00Z"
+}
+```
+
+This meticulous level of detail ensures that organizations can trace issues back to their origins, thereby enhancing accountability and transparency.
+
+### Retention Strategies for Audit Trails
+
+Once audit trails are established, organizations must implement effective retention strategies to manage these records. This involves determining the appropriate duration for retaining audit logs based on legal and operational requirements. For example, a company may opt to retain logs for a minimum of five years to comply with the EU AI Act while ensuring that sensitive information is appropriately redacted. Automating the lifecycle of these records using tools like Akmon can streamline the retention process, minimizing the risk of human error.
+
+### Mapping Compliance Controls to Akmon Commands
+
+To facilitate compliance, developers can map specific controls from regulatory frameworks to corresponding Akmon commands. For instance, ISO 42001 control A.5, which mandates maintaining an AI inventory with risk classification, can be implemented as follows:
+
+```markdown
+# Control Mapping
+
+## ISO 42001 A.5
+- **Control:** Maintain an AI inventory with risk classification
+- **Akmon Command:** Generate inventory report using `akmon inventory generate`
+```
+
+Additionally, for the EU AI Act's requirement to document decision-making processes, developers can use:
+
+```markdown
+## EU AI Act Requirement
+- **Control:** Document decision-making processes
+- **Akmon Command:** Log decisions using `akmon log decision`
+```
+
+This mapping clarifies developer responsibilities and provides a clear pathway for achieving compliance across various frameworks.
+
+### Continuous Monitoring: Ensuring Sustained Compliance
+
+Compliance is not a one-time endeavor but an ongoing process. Continuous monitoring is vital to ensure that AI systems remain compliant as regulations evolve and new risks emerge. The NIST AI Risk Management Framework (RMF) emphasizes the importance of measuring and managing risks associated with AI systems. Developers should employ monitoring tools that track performance metrics and flag deviations from established compliance standards. For instance, using Akmon's `akmon slo verify` command can help teams assess whether their systems are meeting service level objectives (SLOs) related to compliance.
+
+### A Real-World Compliance Case Study
+
+To illustrate the practical application of these compliance strategies, consider a mid-sized financial technology company that integrated AI into its fraud detection operations. Initially, the organization faced compliance challenges due to inadequate documentation and oversight. By adhering to the outlined steps, the company established a comprehensive AI inventory, implemented runtime policy enforcement, and created detailed audit trails. Over time, this proactive approach not only ensured compliance with the ISO 42001 and EU AI Act but also enhanced operational efficiency, enabling the company to respond swiftly to fraudulent activities while maintaining regulatory standards.
+
+### Common Pitfalls in AI Compliance
+
+While the journey to compliance may appear straightforward, organizations often encounter common pitfalls. One significant issue is the tendency to treat compliance as a mere checkbox exercise rather than an integral part of the development lifecycle. To mitigate this risk, organizations should cultivate a culture of compliance that emphasizes the importance of documentation, monitoring, and continuous improvement. Furthermore, teams must be well-versed in the specific compliance requirements relevant to their industry, ensuring alignment on expectations.
+
+### Future Directions in AI Compliance
+
+As regulatory frameworks continue to evolve, the significance of compliance in AI development will only intensify. Organizations must remain vigilant, adapting their practices to meet new requirements while ensuring that their AI systems operate effectively and ethically. By establishing a robust compliance strategy that incorporates documentation, policy enforcement, audit trails, and continuous monitoring, developers can navigate the complexities of AI compliance and contribute to a more responsible AI ecosystem.
+
+### Conclusion: Embracing a Culture of Compliance
+
+In conclusion, the pathway to AI compliance in 2026 necessitates a multifaceted approach that integrates regulatory requirements into the development lifecycle. By documenting AI systems, enforcing policies at runtime, maintaining audit trails, and continuously monitoring performance, organizations can construct a solid compliance framework that not only meets regulatory standards but also enhances operational efficiency. As the landscape of AI regulations continues to evolve, fostering a culture of compliance will be essential for organizations aiming to thrive in this dynamic environment.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/radotsvetkov/ai-coding-compliance-for-2026-a-working-checklist-for-iso-42001-the-eu-ai-act-soc-2-and-tool-2i3)
+
+---
+
+<SocialShare title="Navigating AI Compliance: A Technical Guide for 2026" slug="navigating-ai-compliance-a-technical-guide-for-2026" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
