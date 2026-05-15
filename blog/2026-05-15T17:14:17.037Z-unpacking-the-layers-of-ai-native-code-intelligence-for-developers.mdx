@@ -1,0 +1,202 @@
+---
+slug: unpacking-the-layers-of-ai-native-code-intelligence-for-developers
+title: "Unpacking the Layers of AI-Native Code Intelligence for Developers"
+authors: [francis]
+tags: [ai, codeintelligence, developers, llm]
+date: 2026-05-15T17:14:17.038Z
+description: "TL;DR If you are a developer just starting to take "codebase context" seriously, you are stepping into a stack that did not exist three years ago. It has four layers: the agent harness (Claude Code, Cursor, Aider, Copilot), retrieval (vector search, agentic grep), curated knowledge (Karpathy's LLM wiki, DeepWiki, Greptile), and a structured code graph (CoreStory, Sourcegraph). Each layer answers a different question. The wiki and vector layers work well for small repositories and descriptive questions. They break down on large, multi-language codebases, and on questions that need a graph traversal instead of a paragraph retrieval. This post maps the stack, shows where each piece earns its keep, and shows the use cases where wiki intelligence loses to a graph model of the code.
+Ask a coding agent a question about a repository larger than its context window, and the answer depends entirely on what it happens to retrieve. Even inside the window, the situation is worse than LLM providers advertise.
+The needle-in-a-haystack benchmark has become the default way to measure long-context reliability. Place a single out-of-place fact inside a long document, then test whether the model can answer a question about it at different positions and different context lengths. Public results are consistent. Models that advertise 128K tokens start to degrade well before they fill the window, and widely cited evaluations of GPT-4 show rising error rates on ultra-long documents and failure to retrieve needles placed near the start of a document as the context grows. Multi-needle variants, where several facts must be retrieved and combined, perform worse still.
+Enterprise codebases are not haystacks. They are warehouses full of haystacks. A real service might have a million lines of code, fifteen years of history, and a data model that crosses half a dozen languages. No context window reaches that, and "just retrieve the right pieces" is the core unsolved problem the whole AI-native stack is trying to solve.
+Four layers are settling in:
+
+Agent runtime. This is where the developer sits: Claude Code in the terminal, Cursor in the editor, Aider on the command line, Copilot inside the IDE. The runtime decides what questions to ask, what tools to call, and how to act on answers. It is rarely the source of grounding; it is the consumer of grounding.
+Retrieval. Before a model reasons, something has to hand it the right files. This is vector search (embeddings, BM25, hybrid rerankers), plus the newer "agentic retrieval" style where the agent itself runs grep, find, and file reads. Every mainstream agent now has an opinion here. Claude Code, Cursor, and Devin have moved away from pure vector databases toward agentic search over the filesystem, for reasons we describe below.
+Curated knowledge. This is where Karpathy's LLM wiki sits, along with DeepWiki, Greptile, and a growing family of similar tools. These layers pre-digest the codebase into human- and agent-readable artifacts (markdown pages, per-function summaries, auto-generated architecture docs) that are smaller, cleaner, and more navigable than raw source.
+Code graph / digital twin. This is the structured, program-analyzed model of the system: components, workflows, business rules, data entities, and the typed edges between them. CoreStory sits here. It is not a list of pages. It is a queryable representation of how the code actually behaves, derived from the source and maintained as the source changes.
+A grown-up workflow uses all four. A beginner workflow usually starts with the agent runtime and one retrieval strategy, then adds curated knowledge when the repo gets too big for the model to reason about directly. The graph layer shows up when curated knowledge starts lying.
+Karpathy's formulation of the LLM wiki, shared publicly as a gist, is one of the cleanest statements of what curated knowledge should look like. Three folders:
+raw/ holds the source material. For a codebase, this is the repo itself. Immutable.
+wiki/ is a folder of LLM-written markdown pages, one per module or concept, plus an index.md and a log.md.
+CLAUDE.md (or AGENTS.md) is the schema. It tells the agent how to ingest new material, name pages, cross-link them, and handle conflicts.
+A minimal schema looks like this:
+# CLAUDE.md
+## Wiki layout
+-`raw/` contains immutable source. Never edit.
+-`wiki/` contains one page per top-level module.
+-`wiki/index.md` lists every page with a one-line summary.
+-`wiki/log.md` records every ingest with a timestamp.
+## Ingest workflow
+1. Read any new files under`raw/`.
+2. For each changed module, update or create`wiki/<module>.md`.
+3. Cross-link related pages using relative markdown links.
+4. Append an entry to`log.md`.
+## Query workflow
+1. Read`wiki/index.md` first.
+2. Follow links into specific module pages.
+3. Never answer from memory when a page exists.
+
+Point Claude Code, Cursor, Codex, or Copilot at the folder and the agent reasons over its own distilled notes instead of re-loading the whole repo into context every session. For a personal knowledge base or a mid-sized repository, that is often enough.
+DeepWiki, from Cognition (the team behind Devin), automates this pattern for public GitHub repositories. Replace github.com with deepwiki.com in any URL and Cognition serves an auto-generated wiki with architecture diagrams, module explanations, and a conversational agent grounded in the actual source. Cognition has indexed tens of thousands of top public repositories and exposes the same data through an MCP endpoint (mcp.deepwiki.com) with three tools: ask_question, read_wiki_structure, and read_wiki_contents. It is a zero-setup version of the Karpathy pattern, for open-source code.
+Greptile (often the "G" in the short list of AI-native dev tools developers trade around) goes further. Greptile constructs a graph of files, functions, and dependencies, then uses that graph to ground AI code review, PR summaries, and codebase Q&A. Greptile's own engineering blog is unusually candid about why this is hard: semantic search on raw code is noisy, embeddings work better if you first translate code into natural language, and chunking at the per-function level beats per-file chunking. Greptile is a useful example of the curated-knowledge layer reaching for graph structure.
+These tools share a strength and a limit. They make a large repository legible to an agent. They are still, at heart, collections of summaries. When the question is "which downstream workflows break if I change this signature?", summaries are not a graph traversal.
+The retrieval layer used to be synonymous with vector search. Chunk the code, embed the chunks, compare the query embedding against the index, return the top k, stuff them into the prompt.
+# Classic vector-search retrieval over a code index
+query_vec = embed(user_question)
+hits = index.search(query_vec, top_k=8)
+context ="\n\n".join(chunk.textfor chunkin hits)
+answer = llm.generate(system_prompt, context, user_question)
+
+Two things happened on the way to 2026. First, practitioners learned the specific ways embeddings misbehave on code. They favor frequently accessed or well-documented modules and sideline edge cases. They are black-box: when a retrieval misses, it is hard to say why. They go stale, because codebases change daily and indexes have to be diffed, re-chunked, re-embedded, and re-permissioned. Chunk size matters enormously; per-file chunks are too noisy, and per-function chunks require real parsing to produce.
+Second, the frontier agents moved. Public write-ups from the Claude Code, Cursor, and Devin teams have converged on "agentic search": instead of a vector database, the agent itself runs grep, find, and file reads, using its own reasoning to narrow the search. For interactive coding in a repo that is already on disk, that is often faster, more transparent, and easier to debug than vector retrieval.
+Vector search has not disappeared. It still earns its keep for semantic discovery ("where do we talk about authentication?"), for first-pass shortlisting in very large repositories, and inside hybrid systems where BM25 plus embeddings plus a cross-encoder reranker beats any single method. It is just no longer the whole answer.
+The layer under everything is a structural model of the code. CoreStory builds this by running program analysis (AST, dataflow, control-flow, business rule extraction) across 40+ languages, including the older ones (COBOL, PL/I, mainframe dialects) where LLMs alone are weakest. The output is not a folder of markdown. It is a knowledge graph: components, workflows, business rules, data entities, and typed edges between them. Humans query it through a web dashboard. Agents query it through an MCP interface.
+A typical agent call looks like this:
+json{"tool":"corestory.impact_of_change",
+  "arguments": {
+    "entity":"PaymentService.refund",
+    "change":"signature",
+    "scope":"workflows,business_rules,data_entities"  
+  }
+}
+
+The response is not a paragraph. It is a list of workflows that reach that function, the business rules governing them, and the data entities they touch. The agent plans its refactor against that, not against a markdown summary.
+Four use cases show where this matters more than any wiki.
+Change impact analysis. "If I change the signature of PaymentService.refund, what else breaks?" A wiki page can describe the module. A graph query enumerates every workflow, test, and downstream service that reaches it, across languages, in milliseconds. Wikis gesture. Graphs answer.
+Business rule traceability. "Where is the rule that caps provider reimbursements at 90 days, and what code enforces it?" Curated summaries captures whatever the LLM happened to notice when it summarized the claims module. A code intelligence model extracts business rules as first-class objects with back-pointers to the exact branches that implement them. An auditor can follow the trace. A summary cannot.
+Cross-language call graphs. "Does this Java controller ultimately write to the COBOL ledger?" Summary pages live per module and per language. A code graph is native across both, because it is built from program analysis, not prose. For modernization work, this is the difference between a guess and a plan.
+Legacy understanding. LLMs are uneven on COBOL, PL/I, and mainframe dialects. Summarisation quality drops sharply on languages the base model rarely sees. A graph built from program analysis does not care; a COBOL paragraph is another node. This is where the summary pattern struggles most and where a structural model earns its cost.
+On internal benchmarks, shifting agents from prose-grounded to graph-grounded context produced a 44% improvement in agent task resolution, and Microsoft/GitHub's co-research on context grounding has reported a 51% improvement in engineer acceptance of agent-drafted code. The specific number matters less than the direction. Structured context beats summarized context on hard enterprise questions, consistently.
+Start with the agent runtime you like. Add retrieval to fit the repo size: grep-style agentic search for small projects, vector plus BM25 plus reranking for larger ones. Add a curated knowledge layer (Karpathy's pattern, DeepWiki for public repos, Greptile for graph-aware summaries) when the agent starts forgetting the same things twice. Reach for a code graph when the questions you are asking are about impact, traceability, or cross-system behavior rather than "what does this file do?".
+The stack is not a waterfall. You can plug a code graph into a vector-aware agent and feed both into a Karpathy-style wiki. The point is knowing which layer you are actually relying on, and noticing when your curated knowledge has quietly become a maintenance problem instead of a grounding source.
+If you are setting up context layers for the first time, the Karpathy pattern and DeepWiki are good places to start. If you already feel the friction (drift, stale pages, agents answering questions the wiki cannot actually support, business-rule questions that want a graph), that is the signal the stack needs a structural model underneath. Talk to an expert about running CoreStory against your own repository, or try it for yourself today.
+‍ ‍
+Is the Karpathy LLM wiki pattern still worth adopting?
+
+
+Yes, for small-to-mid repositories and personal knowledge bases. It is the cheapest durable grounding layer you can build. The pattern is open, the schema lives in your repo, and any modern coding agent knows what to do with it.
+How does DeepWiki differ from a wiki I build myself?
+
+
+DeepWiki is a hosted, zero-setup version maintained by Cognition, with an MCP endpoint and tens of thousands of public repositories already indexed. You do not own the schema, but you also do not maintain it. It is an excellent entry point for reading unfamiliar open-source projects.
+Is Greptile part of the same pattern?
+
+
+Greptile starts from the same problem but leans on a graph of files, functions, and dependencies rather than flat pages. It is a useful bridge between a summary-based wiki and a full code intelligence model.
+Why not just rely on vector search?
+
+
+Because vector retrieval on code is noisy, stale, and opaque, and because the strongest coding agents have mostly moved to agentic search on the filesystem. Vectors still help for semantic discovery and inside hybrid retrieval, but they are no longer enough on their own.
+When does a wiki stop being enough?
+
+
+When agents confidently answer questions the wiki cannot actually support. When curated knowledge becomes its own maintenance problem. When the questions are about change impact, cross-service behaviour, or business-rule traceability. That is the moment to add a code graph underneath.
+Does CoreStory replace any of these layers?
+
+
+No. CoreStory is the graph layer. It sits under whichever retrieval strategy and whichever agent runtime you already use, and exposes the same structural model to humans through a dashboard and to agents through an MCP endpoint.
+However, adopting CoreStory in advance of implementing these complementary layers will help ensure that agents draft and maintain those layers with richer codebase awareness. In other words, your curated knowledge will be more comprehensive, and your agent runtime will more successfully reconcile discrepancies between sources...."
+image: /img/blog/generated/unpacking-the-layers-of-ai-native-code-intelligence-for-developers-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Unpacking the Layers of AI-Native Code Intelligence for Developers](/img/blog/generated/unpacking-the-layers-of-ai-native-code-intelligence-for-developers-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### The Necessity of Understanding AI-Native Code Intelligence
+
+In the rapidly evolving landscape of software development, the emergence of AI-native code intelligence has transformed how developers interact with codebases. This stack, comprising four distinct layers—agent runtime, retrieval methods, curated knowledge, and code graph—offers a structured approach to managing complex systems. For developers, understanding these layers is not merely beneficial; it is essential for optimizing productivity and ensuring effective code management in an era where codebases can span millions of lines and multiple programming languages.
+
+### The Four Layers of AI-Native Code Intelligence
+
+The AI-native code intelligence stack is designed to address the multifaceted challenges developers face when navigating large repositories. 
+
+1. **Agent Runtime**: This layer serves as the primary interface between developers and the AI tools they utilize. Tools such as Claude Code, Cursor, Aider, and Copilot exemplify this layer, enabling developers to execute commands and receive context-aware assistance.
+
+2. **Retrieval Methods**: This layer encompasses traditional vector search and the newer agentic search. While vector search relies on embeddings and algorithms like BM25, agentic search allows AI agents to interact directly with the filesystem, offering a more dynamic and context-aware retrieval mechanism.
+
+3. **Curated Knowledge**: This layer transforms raw code into human-readable formats, utilizing tools like Karpathy's LLM wiki and DeepWiki. It distills complex codebases into manageable summaries, enhancing accessibility for developers.
+
+4. **Code Graph**: The final layer represents a structured model of the codebase, capturing components, workflows, and business rules. Tools like CoreStory facilitate this by providing a queryable representation of code behavior, which is crucial for impact analysis and understanding dependencies.
+
+### The Agent Runtime: A Developer's Interface
+
+The agent runtime is where developers interact with the AI-native stack. Tools like Claude Code and Copilot act as intelligent assistants, helping developers write code more efficiently. These agents are designed to integrate seamlessly with various development environments, ensuring that they provide contextual assistance without overwhelming users with excessive information. 
+
+For example, Claude Code can be invoked directly in a terminal, allowing developers to ask questions about their codebase or execute commands without switching contexts. This integration is vital, as it reduces cognitive load and enhances productivity.
+
+### Comparing Retrieval Methods: Agentic Search vs. Vector Search
+
+Retrieval methods are crucial for sourcing relevant information needed by AI agents. Traditional vector search has been widely used, leveraging embeddings to retrieve relevant code snippets. However, as codebases grow larger and more complex, the limitations of vector search become apparent. 
+
+Agentic search, on the other hand, enables AI agents to perform filesystem operations like grep and find, providing a more dynamic and context-aware retrieval mechanism. For instance, when a developer queries for a specific function, agentic search can directly access the filesystem to locate the function, whereas vector search may return outdated or irrelevant results. This shift reflects a growing recognition of the need for more effective retrieval methods in the context of large, multi-language codebases.
+
+### Curated Knowledge: Transforming Complexity into Usability
+
+The curated knowledge layer plays a critical role in making large repositories manageable. By distilling raw code into human-readable formats, tools like DeepWiki and Greptile help developers navigate complex systems more easily. For example, a well-structured wiki can summarize module functionalities, providing an overview that aids in locating critical information quickly.
+
+However, it is essential to recognize that while curated knowledge enhances accessibility, it can introduce maintenance overhead. If the underlying codebase evolves faster than the documentation, discrepancies can arise, leading to confusion. Developers must implement processes to ensure that curated knowledge remains up-to-date and relevant.
+
+### The Code Graph: A Structural Model for Impact Analysis
+
+The code graph layer represents a structured, analyzed model of the codebase, capturing components, workflows, and business rules. Tools like CoreStory facilitate this by applying program analysis across multiple languages. 
+
+The advantages of having a code graph are significant. For instance, when a developer needs to change a function signature, the code graph can quickly identify all workflows and business rules affected by this change. This capability allows for informed decision-making and reduces the risk of introducing bugs. In contrast, relying solely on curated knowledge might leave gaps in understanding the broader implications of such changes.
+
+### Real-World Use Cases: The Stack in Action
+
+The effectiveness of the AI-native code intelligence stack becomes evident through various real-world applications. Consider a scenario where a developer must refactor a service that interacts with multiple systems. Using a code graph, they can quickly identify all dependencies and workflows affected by the refactor, enabling them to plan and execute changes with confidence.
+
+Another example is in cross-language call graph analysis. A developer might need to determine whether a Java service writes to a COBOL ledger. A structured code graph can provide insights into these interactions, which would be cumbersome to ascertain through traditional methods.
+
+### Addressing Trade-offs and Limitations
+
+While the AI-native stack offers numerous advantages, it is essential to be mindful of its challenges. For instance, the reliance on curated knowledge can lead to discrepancies if the underlying codebase evolves faster than the documentation. Additionally, the effectiveness of retrieval methods can vary based on the repository's size and complexity. Developers must remain vigilant about these trade-offs, ensuring they choose the appropriate tools and layers for their specific context.
+
+### Best Practices for Implementing the AI-Native Stack
+
+Implementing the AI-native code intelligence stack effectively requires a strategic approach. Developers should start with a solid agent runtime that fits their workflow, then layer in retrieval methods appropriate for their project's scale. For smaller repositories, agentic search may suffice, while larger projects might necessitate a hybrid approach combining vector search with agentic methods.
+
+Curated knowledge should be introduced as the codebase grows, and a code graph should be considered when the complexity of queries increases. Regularly monitoring the performance of each layer and adjusting as needed will help mitigate risks associated with stale or incomplete information.
+
+### Conclusion: Embracing the Future of Code Intelligence
+
+The AI-native code intelligence stack represents a significant evolution in how developers interact with codebases. By understanding the four layers—agent runtime, retrieval methods, curated knowledge, and code graph—developers can harness the full potential of AI tools to improve productivity and code quality. As the landscape of software development continues to evolve, embracing these concepts will be crucial for staying ahead in an increasingly complex environment. By strategically implementing this stack and remaining aware of its limitations, developers can ensure they are well-equipped to tackle the challenges of modern code management.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/mozzello/the-ai-native-code-intelligence-stack-where-the-wiki-ends-and-the-graph-begins-2jok)
+
+---
+
+<SocialShare title="Unpacking the Layers of AI-Native Code Intelligence for Developers" slug="unpacking-the-layers-of-ai-native-code-intelligence-for-developers" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
