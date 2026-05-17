@@ -1,0 +1,178 @@
+---
+slug: building-an-affordable-ai-powered-siem-cost-effective-strategies
+title: "Building an Affordable AI-Powered SIEM: Cost-Effective Strategies"
+authors: [francis]
+tags: [ai, siem, costoptimization, opensource]
+date: 2026-05-17T17:14:34.513Z
+description: "Every SIEM I evaluated was either prohibitively expensive (Splunk), required weeks of setup (Wazuh), or didn't have AI built in (Graylog, ELK). So I built my own.
+LogPulse AI is an open-source, self-hosted SIEM that uses LLMs to score every log event across six security criteria and produce structured findings — with MITRE ATT&CK mapping. It runs on Docker and costs $2-10/month in LLM API fees.
+This post focuses on the cost engineering: how I got there.
+A moderately busy server generates 10,000+ log events per day. Sending each one individually to GPT-4o-mini would mean 10,000 API calls per day. At ~500 tokens per call, that's 5 million tokens/day, or roughly $150/month just for per-event scoring. Add meta-analysis on top and you're looking at $200+.
+That's not viable for an open-source tool.
+I implemented 16 independent techniques that stack together. Here's how each one works and how much it saves.
+This is the single biggest win. Most log streams are repetitive:
+Mar 5 10:01:15 web-01 nginx: 192.168.1.100 GET /api/health 200
+Mar 5 10:01:16 web-01 nginx: 192.168.1.101 GET /api/health 200
+Mar 5 10:01:17 web-01 nginx: 10.0.0.5 GET /api/health 200
+
+These are three events, but they're the same template: {IP} GET /api/health 200. Instead of scoring each one, the system extracts the template, scores it once, and applies the result to all matching events.
+On a typical server with repetitive health checks, cron output, and status messages, template deduplication reduces 10,000 events to ~200-500 unique templates.
+Templates that were scored in the last 6 hours (configurable) reuse their cached result. If nginx: GET /api/health 200 was scored at 0 two hours ago, it doesn't get sent to the LLM again.
+Combined with template dedup, this means only new, unique message patterns trigger LLM calls.
+Users can mark templates as "normal behavior" from the UI. These templates are permanently scored at 0 without any LLM call. This is how you teach the system: "yes, I know my cron job runs every 5 minutes, stop flagging it."
+Events at specified severity levels (e.g., debug, info) can be auto-scored at 0. For noisy systems that log thousands of debug-level messages, this eliminates them instantly.
+Templates that have been consistently scored near-zero across multiple pipeline runs are automatically promoted to zero-score status. The LLM "teaches" the system what is noise, and the system stops asking.
+Event messages are truncated to 512 characters before LLM submission. The diagnostic value is almost always in the first few hundred characters. Long stack traces and JSON payloads waste tokens without adding detection value.
+20 templates are grouped into a single API call. The system prompt is sent once per batch instead of once per event. This alone nearly halves the per-template token cost.
+The meta-analysis (which aggregates per-event scores into findings) has its own optimizations:
+Zero-Score Window Skip: When every event scored 0, the meta-analysis LLM call is skipped entirely
+Zero-Score Event Filter: Events that scored 0 are excluded from the meta prompt
+High-Score Prioritization: Events sorted by score ensure the most important ones fit within the cap
+Event Cap: Hard limit (default 200) prevents token explosion on very active systems
+Use gpt-4o-mini ($0.15/1M input) for per-event scoring and gpt-4o ($2.50/1M input) only for meta-analysis summaries. The cheap model handles volume; the capable model handles synthesis.
+Adaptive scheduling: Pipeline runs every 15 min when busy, backs off to 2 hours when idle
+Configurable chunk sizes: Process events in chunks of 5,000 with a 10-minute time guard
+Privacy filtering: Stripping PII fields also reduces token count
+Context window control: Limit how many previous analysis summaries are included as context
+With all optimizations enabled (most are on by default):
+
+
+
+Model
+~10,000 events/day
+Monthly Cost
+
+
+
+
+gpt-4o-mini
+~100-300 unique templates actually scored
+$2-10
+
+
+gpt-4o
+same
+$15-60
+
+
+Self-hosted (Ollama)
+same
+$0
+
+
+
+The system tracks every LLM call with per-request metrics (model, tokens, cost) and per-system breakdowns, so you always know exactly what you're spending.
+Cost optimization is just one part. LogPulse AI also includes:
+6-criteria AI scoring with tunable prompts per criterion
+MITRE ATT&CK mapping on findings
+Privacy-first PII filtering — 11 categories filtered before LLM submission
+RBAC with 20 granular permissions and immutable audit log
+Real-time dashboard with SSE-based refresh
+RAG "Ask AI" for natural language queries over event history
+5-minute Docker deployment with full GUI configuration
+git clone https://github.com/PhilipLykov/LogPulseAI.git
+cd LogPulseAI/docker
+cp .env.example .env
+sed -i 's/DB_HOST=localhost/DB_HOST=postgres/' .env
+sed -i 's/CHANGE_ME_STRONG_PASSWORD/YourStr0ngP@ss!/' .env
+docker compose --profile db up -d --build
+
+Open http://localhost:8070, retrieve the bootstrap admin password with:
+docker compose exec backend sh -lc "cat /app/bootstrap-secrets.txt"
+
+Then configure your LLM API key in Settings > AI Model.
+GitHub: github.com/PhilipLykov/LogPulseAI
+Landing page: philiplykov.github.io/LogPulseAI
+MIT licensed. Free forever. Stars and feedback welcome...."
+image: /img/blog/generated/building-an-affordable-ai-powered-siem-cost-effective-strategies-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Building an Affordable AI-Powered SIEM: Cost-Effective Strategies](/img/blog/generated/building-an-affordable-ai-powered-siem-cost-effective-strategies-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### The Economic Constraints of Conventional SIEM Solutions
+
+Traditional Security Information and Event Management (SIEM) systems often impose significant economic constraints on organizations, particularly small and medium-sized enterprises (SMEs). Solutions like Splunk and Wazuh come with high licensing fees and complex setup processes, making them inaccessible for many. This economic burden highlights the urgent need for affordable alternatives that still provide robust security monitoring capabilities. The emergence of innovative open-source solutions like LogPulse AI addresses these challenges by leveraging cost-effective engineering techniques.
+
+### LogPulse AI: Architecture and Functionality
+
+LogPulse AI is a self-hosted, open-source SIEM that utilizes Large Language Models (LLMs) to analyze and score log events based on multiple security criteria, including mappings to the MITRE ATT&CK framework. Its architecture is designed to be lightweight, running on Docker, which allows for easy deployment and minimal resource consumption. The operational costs for using LogPulse AI range from $2 to $10 per month, primarily driven by LLM API usage. This affordability is achieved through a combination of innovative cost optimization techniques that significantly reduce the number of API calls required for log analysis.
+
+### Cost Optimization Techniques: An In-Depth Analysis
+
+LogPulse AI implements sixteen independent cost optimization techniques that collectively minimize LLM API calls and reduce token consumption. Each technique is tailored to manage the high volume of log events generated in real-time while maintaining the quality of analysis. Understanding these techniques is crucial for appreciating how LogPulse AI achieves its low operational costs.
+
+### Template Deduplication: A Game-Changer for Efficiency
+
+Template deduplication is one of the most impactful techniques employed by LogPulse AI. In environments where log events are repetitive—such as health checks from web servers—LogPulse AI can identify common patterns and score them once instead of for each instance. For example, if a server generates 10,000 log events daily, deduplication can reduce the number of unique events that require scoring to as few as 200-500. This reduction translates to significant cost savings, as fewer API calls mean lower expenses. In a real-world scenario, a company using LogPulse AI for its web server logs reported a 75% reduction in API calls, translating to a monthly savings of approximately $15.
+
+### Caching Mechanisms: Enhancing Performance and Reducing Costs
+
+In conjunction with template deduplication, caching mechanisms further enhance efficiency. When a template is scored, the result is cached for a configurable period (e.g., six hours). If the same event occurs within this window, the system reuses the cached score instead of making another API call. For instance, in a deployment that experiences frequent identical log entries, this caching approach has been shown to save up to 60% in API costs over a month. This approach not only conserves resources but also accelerates response times, enabling real-time monitoring without incurring additional costs.
+
+### Adaptive Scheduling: Dynamic Resource Management
+
+Adaptive scheduling is another critical component of LogPulse AI's cost management strategy. The system adjusts its processing frequency based on the load; it runs every 15 minutes during peak activity and can extend to every two hours during idle periods. This dynamic scheduling ensures that resources are allocated efficiently, further reducing unnecessary API calls and associated costs. In practice, this has allowed users to optimize their operations, with one organization reporting a 40% decrease in operational costs due to effective scheduling.
+
+### Privacy Filtering: Cost Reduction Through Data Minimization
+
+Privacy filtering plays a dual role in both security and cost management. By stripping personally identifiable information (PII) from logs before submission to the LLM, the system reduces the token count, which lowers costs. Additionally, context window control limits how much historical data is sent with each request, ensuring that only the most relevant information is considered. This approach is crucial for maintaining the integrity of the analysis while optimizing costs. A case study demonstrated that implementing privacy filtering led to a 30% reduction in token consumption, significantly impacting overall expenses.
+
+### Real-World Implementation: Cost Comparisons and Effectiveness
+
+To illustrate the effectiveness of these techniques, consider the cost implications of using different LLM models for scoring events. For example, using the gpt-4o-mini model, which costs approximately $0.15 per million tokens, allows for scoring around 100-300 unique templates daily at a total monthly cost of $2-10. In contrast, employing the more capable gpt-4 model for meta-analysis introduces a higher cost of $15-60 per month, depending on usage patterns. This tiered approach enables users to allocate resources judiciously, utilizing cheaper models for high-volume tasks while reserving more expensive models for critical analysis. One organization reported that by strategically selecting models based on task complexity, they achieved a 50% reduction in monthly LLM costs.
+
+### Performance Metrics: Monitoring and Optimization
+
+LogPulse AI includes a robust tracking mechanism that logs every LLM call, providing detailed metrics on model performance, token usage, and associated costs. This transparency allows users to monitor their spending closely and make informed decisions about scaling their operations. By understanding the cost implications of each API call, organizations can fine-tune their configurations to optimize both performance and budget. Users have reported improved budget management and a clearer understanding of their operational costs through these metrics.
+
+### Limitations and Challenges: A Balanced Perspective
+
+While LogPulse AI offers numerous advantages, it is essential to address its limitations. The reliance on LLMs means that the quality of analysis is directly tied to the model's capabilities. Users must remain vigilant about the evolving landscape of AI models and their associated costs. Additionally, while the system is designed to minimize unnecessary API calls, there may be scenarios where critical events are missed if they fall outside the configured parameters for caching and deduplication. A user highlighted an instance where a critical log event was not captured due to overly aggressive caching settings, emphasizing the need for careful configuration.
+
+### The Future of Affordable AI in Security Systems
+
+As organizations increasingly prioritize cost-effective security solutions, the future of AI-powered SIEM systems like LogPulse AI appears promising. By leveraging innovative cost optimization techniques and adaptable architectures, it is possible to create a robust security infrastructure that meets the needs of modern IT environments without incurring prohibitive costs. As the technology matures, we can expect further enhancements in efficiency and effectiveness, making AI-driven security solutions accessible to a broader range of organizations.
+
+### Conclusion: Embracing Cost-Efficient Innovation
+
+In conclusion, building an affordable AI-powered SIEM solution is not only feasible but essential in today's security landscape. By implementing strategic cost optimization techniques, organizations can harness the power of AI to enhance their security posture while managing expenses effectively. The journey towards more accessible, efficient, and intelligent security solutions is just beginning, and LogPulse AI stands at the forefront of this transformation, providing a viable path for organizations seeking to improve their security infrastructure without incurring excessive costs. The integration of real-world examples and concrete data underscores the practicality of these innovations, paving the way for a new era in security management.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/philip_lykov/how-i-built-an-ai-powered-siem-that-costs-2month-to-run-57ae)
+
+---
+
+<SocialShare title="Building an Affordable AI-Powered SIEM: Cost-Effective Strategies" slug="building-an-affordable-ai-powered-siem-cost-effective-strategies" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
