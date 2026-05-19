@@ -1,0 +1,701 @@
+---
+slug: deploying-openais-gpt-oss-20b-architectural-insights-and-performance-optimization
+title: "Deploying OpenAI's gpt-oss-20b: Architectural Insights and Performance Optimization"
+authors: [francis]
+tags: [ai, gpt, cloud, infrastructure]
+date: 2026-05-19T08:57:13.515Z
+description: "Alexey Nizhegolenko
+
+DevOps Engineer, AgentOps Engineer, AI Infrastructure Engineer
+This is the second article in my series on self-hosting LLMs on GKE. In the first article I covered deploying Gemma4 26B with a 28,000 token context window. This time I'll show you something more impressive: openai/gpt-oss-20b running with a 128,000 token context on the same single L4 GPU.
+The setup has been running in production since November 2025, for about 6 months, with no major incidents. That's the kind of track record worth writing about.
+OpenAI released gpt-oss-20b in August 2025 as their first open-weight model since GPT-2. It's a 21B-parameter Mixture-of-Experts model (~3.6B active parameters per token) with mxfp4 quantization built-in, meaning the weights are already compressed using microscaling FP4 format, which is far more memory-efficient than standard quantization approaches like AWQ or GPTQ.
+Two things make it stand out:
+128k context window - this is the main reason to pick this model over alternatives. Most quantized models on a 24GB L4 GPU are limited to 20-64k tokens. gpt-oss-20b achieves 128k through the combination of mxfp4 weights (~13GB on disk).
+Built-in reasoning - the model uses chain-of-thought reasoning internally. In API responses, you'll see a reasoning_content field with the model's thought process before the final answer. This is useful for complex analytical tasks where you want to understand how the model concluded.
+OpenAI tool calling format - natively compatible with --tool-call-parser openai, which means it drops in as a replacement for OpenAI API clients without any prompt engineering changes.
+Same hardware as Part 1 - g2-standard-4 with one NVIDIA L4 GPU (24GB VRAM, 4 vCPU, 16GB RAM).
+
+
+
+Instance type
+On-demand price
+Spot price
+
+
+
+
+g2-standard-4 (1x L4)
+~$0.70/hr
+~$0.21/hr
+
+
+
+This article uses a standard on-demand node pool to keep the setup simple and predictable. The spot-based, cost-optimised variant and the zone-aware failover architecture that makes spot safe to run in production are the subject of Part 3.
+The real answer is simpler than you might expect - it fits entirely in GPU RAM. From the actual startup logs:
+Model weights (mxfp4):   13.72 GiB
+KV cache (fp8):           4.17 GiB  →  182,336 tokens available
+CUDA graphs:              0.60 GiB
+Total:                   ~18.5 GiB out of 24 GiB (0.85 utilisation)
+
+GPU KV cache size: 182,336 tokens
+Maximum concurrency for 128,000 tokens per request: 2.68x
+
+182k tokens of KV cache covers 128k context with room for more than two simultaneous requests. No CPU offloading needed.
+Why does --swap-space 6 exist in the config then? It's a safety net, if KV cache ever overflows under unusual load patterns, vLLM can spill to CPU RAM instead of dropping requests. In practice, it hasn't been used in 6 months of production. The fp8 KV cache combined with mxfp4 weights is efficient enough that everything fits comfortably on the GPU.
+The real reason this works at 128k where other models can't is mxfp4 quantization. It stores weights in microscaling FP4 format - roughly 2x more efficient than AWQ INT4. This frees up ~2GB of VRAM compared to an equivalent AWQ model, and that extra headroom goes directly into KV cache budget.
+GKE cluster (Standard mode) in example, it's us-central1
+
+
+kubectl configured
+Google Artifact Registry for Docker images
+A standard on-demand node pool, single zone, scale-to-zero, one L4 GPU at peak:
+gcloud container node-pools create l4-gptoss \
+  --cluster=YOUR_CLUSTER_NAME \
+  --zone=us-central1-a \
+  --machine-type=g2-standard-4 \
+  --accelerator=type=nvidia-l4,count=1,gpu-driver-version=latest \
+  --num-nodes=0 \
+  --enable-autoscaling \
+  --min-nodes=0 \
+  --max-nodes=1 \
+  --node-labels=service=gpt-oss-20b \
+  --node-taints=nvidia.com/gpu=present:NoSchedule \
+  --scopes=cloud-platform
+
+The --node-labels=service=gpt-oss-20b label is what the StatefulSet's nodeSelector targets, and the nvidia.com/gpu taint keeps non-GPU workloads off this pool.
+gpt-oss-20b requires vLLM v0.12.0 or later with mxfp4 support. Push it to your Artifact Registry:
+docker pull vllm/vllm-openai:v0.12.0
+
+docker tag vllm/vllm-openai:v0.12.0 \
+  us-central1-docker.pkg.dev/YOUR_PROJECT/tools/vllm-openai:v0.12.0
+
+docker push us-central1-docker.pkg.dev/YOUR_PROJECT/tools/vllm-openai:v0.12.0
+
+openai/gpt-oss-20b is a public model, no HuggingFace token required. You only need an API key to protect your vLLM endpoint:
+kubectl create namespace gptoss-multi
+
+# API key for protecting the vLLM endpoint
+kubectl create secret generic vllm-api-multi \
+  --from-literal=VLLM_API_KEY=your-api-key-here \
+  -n gptoss-multi
+
+Here's the complete StatefulSet manifest. Scheduling is intentionally minimal - a simple nodeSelector targeting the service: gpt-oss-20b label, plus a toleration for the GPU taint. No node affinity rules; the zone-aware scheduling logic comes in Part 3.
+apiVersion: v1
+kind: Service
+metadata:
+  name: gptoss-multi
+  namespace: gptoss-multi
+  labels:
+    app: gptoss-20b
+spec:
+  type: ClusterIP
+  selector:
+    app: gptoss-20b
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8000
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: gptoss-20b
+  namespace: gptoss-multi
+  labels:
+    app: gptoss-20b
+spec:
+  serviceName: gptoss
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gptoss-20b
+  updateStrategy:
+    type: RollingUpdate
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Delete
+    whenScaled: Retain
+  template:
+    metadata:
+      labels:
+        app: gptoss-20b
+    spec:
+      terminationGracePeriodSeconds: 30
+      nodeSelector:
+        service: gpt-oss-20b
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: vllm
+          image: us-central1-docker.pkg.dev/YOUR_PROJECT/tools/vllm-openai:v0.12.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - --model
+            - openai/gpt-oss-20b
+            - --api-key
+            - $(VLLM_API_KEY)
+            - --gpu-memory-utilization
+            - "0.85"
+            - --max-model-len
+            - "128000"
+            - --swap-space
+            - "6"
+            - --tensor-parallel-size
+            - "1"
+            - --max-num-seqs
+            - "3"
+            - --max-num-partial-prefills
+            - "1"
+            - --max-num-batched-tokens
+            - "8128"
+            - --kv-cache-dtype
+            - fp8
+            - --enable-auto-tool-choice
+            - --tool-call-parser
+            - openai
+            - --host
+            - 0.0.0.0
+            - --port
+            - "8000"
+          env:
+            - name: HF_HOME
+              value: /models
+            - name: XDG_CACHE_HOME
+              value: /models/.xdg-cache
+            - name: TRITON_CACHE_DIR
+              value: /models/.triton
+            - name: VLLM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: VLLM_API_KEY
+                  name: vllm-api-multi
+            - name: VLLM_LOGGING_LEVEL
+              value: INFO
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: all
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: compute,utility
+            - name: CUDA_VISIBLE_DEVICES
+              value: "0"
+            - name: LD_LIBRARY_PATH
+              value: /home/kubernetes/bin/nvidia/lib64:/usr/local/cuda/lib64:/usr/lib/x86_64-linux-gnu:/usr/lib:/lib
+            - name: TORCH_CUDA_ARCH_LIST
+              value: "8.9"
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+              scheme: HTTP
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 12
+          resources:
+            requests:
+              cpu: "1"
+              memory: 2Gi
+              nvidia.com/gpu: "1"
+            limits:
+              cpu: "3500m"
+              memory: 12Gi
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - name: model-cache
+              mountPath: /models
+            - name: dshm
+              mountPath: /dev/shm
+            - name: nvidia-lib64
+              mountPath: /home/kubernetes/bin/nvidia/lib64
+              readOnly: true
+            - name: nvidia-bin
+              mountPath: /home/kubernetes/bin/nvidia/bin
+              readOnly: true
+      volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 6Gi
+        - name: nvidia-lib64
+          hostPath:
+            path: /home/kubernetes/bin/nvidia/lib64
+            type: Directory
+        - name: nvidia-bin
+          hostPath:
+            path: /home/kubernetes/bin/nvidia/bin
+            type: Directory
+  volumeClaimTemplates:
+    - apiVersion: v1
+      kind: PersistentVolumeClaim
+      metadata:
+        name: model-cache
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        storageClassName: standard-rwo
+        resources:
+          requests:
+            storage: 60Gi
+
+Apply it:
+kubectl apply -f gptoss-20b.yaml
+kubectl logs -f statefulset/gptoss-20b -n gptoss-multi
+
+Here's what a healthy startup looks like:
+# Architecture confirmed - custom GptOss model class
+INFO [model.py] Resolved architecture: GptOssForCausalLM
+INFO [model.py] Using max model len 128000
+
+# mxfp4 quantization confirmed, Marlin kernel selected
+INFO [mxfp4.py] Using Marlin backend
+WARNING: Your GPU does not have native support for FP4 computation.
+         Weight-only FP4 compression will be used via Marlin kernel.
+
+# Weights loaded - note 13.72 GiB vs 15.55 GiB for Gemma4
+INFO [default_loader.py] Loading weights took 73.54 seconds
+INFO [gpu_model_runner.py] Model loading took 13.7193 GiB memory and 104.729963 seconds
+
+# torch.compile from cache - 13 seconds instead of ~90
+INFO [monitor.py] torch.compile takes 13.67 s in total
+
+# KV cache - this is the key number
+INFO [gpu_worker.py] Available KV cache memory: 4.17 GiB
+INFO [kv_cache_utils.py] GPU KV cache size: 182,336 tokens
+INFO [kv_cache_utils.py] Maximum concurrency for 128,000 tokens per request: 2.68x
+
+# Server ready
+INFO: Application startup complete.
+
+The WARNING about FP4 support is expected and not a problem. L4 is sm_8.9 architecture. Native FP4 requires Blackwell (sm_9.0+). The Marlin kernel handles this transparently with no quality impact.
+Why --gpu-memory-utilization 0.85 instead of 0.96-0.97?
+We need to leave headroom for the CPU swap mechanism. When the KV cache overflows from GPU to CPU RAM, vLLM needs free GPU memory for the swap buffers. Using 0.97 here will cause OOM under load with long contexts. 0.85 is the stable value we've validated over 6 months.
+Why --max-num-seqs 3?
+With 128k context, each sequence can occupy a huge amount of KV cache. Allowing too many parallel sequences risks exhausting both GPU and CPU swap memory simultaneously. Three concurrent sequences is the conservative limit that keeps the deployment stable under real-world load.
+Why --max-num-batched-tokens 8128?
+This limits how many tokens get processed per engine step. With long-context requests, an uncapped value here can cause prefill spikes that OOM the GPU. 8128 gives a good balance between throughput and stability.
+Why --max-num-partial-prefills 1?
+For very long prompts, vLLM splits prefill across multiple steps (chunked prefill). Setting this to 1 means only one chunk is processed at a time, which keeps memory usage predictable during long-context ingestion.
+Why 60Gi PVC instead of 30Gi?
+The model weights are ~13GB but the torch.compile cache, XDG cache, and Triton cache for a 128k context model are significantly larger than for a 28k model. 60Gi gives comfortable headroom.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: gptoss-ingress
+  namespace: gptoss-multi
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    nginx.ingress.kubernetes.io/backend-protocol: "HTTP"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: gptoss.yourdomain.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: gptoss-multi
+                port:
+                  number: 80
+
+Note the proxy-read-timeout: 600 — with 128k context requests can take a long time for prefill. The default nginx timeout of 60 seconds will kill long-context requests mid-generation.
+Test it:
+curl -s http://gptoss.yourdomain.com/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer your-api-key" \
+  -d '{
+    "model": "openai/gpt-oss-20b",
+    "messages": [{"role": "user", "content": "Explain how Kubernetes scheduling works."}],
+    "max_tokens": 500
+  }'
+
+All numbers are measured from our production instance.
+Test 1 - Short context (94 prompt tokens, 500 output):
+time curl -s http://gptoss.yourdomain.com/v1/chat/completions \
+  -H "Authorization: Bearer your-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "openai/gpt-oss-20b",
+    "messages": [{"role": "user", "content": "Write a detailed technical explanation of how Kubernetes scheduling works..."}],
+    "max_tokens": 500
+  }'
+
+# real 0m9.505s  →  500 tokens / 9.5s = ~52 tokens/sec
+
+Test 2 - Long context (8,076 prompt tokens, 200 output):
+# ~8k tokens of context
+python3 -c "print('word ' * 8000)" | xargs -I{} curl -s \
+  http://gptoss.yourdomain.com/v1/chat/completions \
+  -H "Authorization: Bearer your-api-key" \
+  -H "Content-Type: application/json" \
+  -d "{\"model\": \"openai/gpt-oss-20b\", \"messages\": [{\"role\": \"user\", \"content\": \"{} Summarize the above.\"}], \"max_tokens\": 200}"
+
+# real 0m6.113s  →  ~53 tokens/sec generation, TTFT ~1.47 sec
+
+Test 3 - 3 parallel requests:
+for i in {1..3}; do
+  curl -s http://gptoss.yourdomain.com/v1/chat/completions \
+    -H "Authorization: Bearer your-api-key" \
+    -H "Content-Type: application/json" \
+    -d '{"model": "openai/gpt-oss-20b", "messages": [{"role": "user", "content": "Explain distributed systems consistency models in detail."}], "max_tokens": 500}' &
+done
+wait
+# real 0m16.1s
+
+Results summary:
+
+
+
+Metric
+Short context (94 tok)
+Long context (8k tok)
+3 parallel
+
+
+
+
+Throughput
+~52 tok/s
+~53 tok/s
+~32 tok/s
+
+
+TTFT
+237ms
+~1.47 sec
+~410ms
+
+
+Prompt tokens
+94
+8,076
+77
+
+
+KV cache usage
+<1%
+<1%
+<1%
+
+
+
+The most important finding here: throughput stays flat regardless of prompt length. 52 tok/s with 94 tokens vs 53 tok/s with 8,076 tokens. The mxfp4 quantization handles long contexts extremely efficiently. The only cost of longer context is TTFT - prefilling 8k tokens takes ~1.47 seconds vs 237ms for a short prompt, which is expected and linear.
+One thing worth calling out the model exposes its internal reasoning process. Every response includes a reasoning_content field:
+{
+  "reasoning_content": "We need to explain distributed systems consistency models in detail. 
+  Likely include eventual consistency, strong consistency, linearizability, sequential 
+  consistency, causal consistency... We'll structure: 1. Intro. 2. CAP theorem. 
+  3. ACID vs BASE...",
+  "content": null
+}
+
+This is the model's chain-of-thought before generating the final answer. For analytical tasks, debugging agent failures, or building explainable AI pipelines, this is genuinely useful - you can see exactly how the model reasoned through a problem.
+Note that content is null in the response above - the reasoning model separates thinking from output. Your client needs to handle both fields.
+
+
+
+Resource
+Cost/month
+
+
+
+
+g2-standard-4 on-demand
+~$500
+
+
+PVC 60GB standard-rwo
+~$6
+
+
+Total
+~$506/month
+
+
+
+At 52 tok/s running 24/7:
+52 tokens/sec × 3600 × 24 × 30 = ~134 billion tokens/month theoretical
+
+At 20% average utilization: ~27 billion tokens/month for $506.
+(Part 3 cuts this roughly 3x by moving to a spot with a failover architecture that makes the spot safe to run.)
+If you read Part 1, here's how the two models compare side by side:
+
+
+
+
+gpt-oss-20b
+Gemma 4 26B AWQ
+
+
+
+
+Context window
+128,000 tokens
+28,000 tokens
+
+
+Throughput
+~52 tok/s
+~51 tok/s
+
+
+TTFT (short)
+237ms
+84ms
+
+
+Weights size
+~13GB (mxfp4)
+~16GB (AWQ int4)
+
+
+VRAM for weights
+13.72 GiB
+15.55 GiB
+
+
+KV cache pool (GPU)
+4.17 GiB
+3.12 GiB
+
+
+KV cost per token
+
+~24.5 KB (GQA, fp8)
+
+~112.7 KB (global head_dim=512)
+
+
+Max tokens in KV
+182,336
+29,709
+
+
+GPU util setting
+0.85
+0.97
+
+
+Reasoning
+✅ built-in
+✅ built-in
+
+
+Tool calling
+openai format
+gemma4 format
+
+
+License
+Apache 2.0
+Apache 2.0
+
+
+HuggingFace access
+gated
+public
+
+
+
+Why such a huge difference in context despite similar KV cache size?
+This is the most interesting technical finding. The answer lies in how each model's attention is shaped.
+From the vLLM startup logs:
+gpt-oss-20b: 4.17 GiB for 182,336 tokens → ~24.5 KB per token
+
+Gemma4 26B: 3.12 GiB for 29,709 tokens → ~112.7 KB per token
+
+
+
+The standard formula for KV cache memory per token is:
+Bytes per token = 2 × layers × KV_heads × head_dim × bytes_per_element
+
+gpt-oss-20b is a 24-layer model with 8 KV heads (GQA — 64 query heads grouped onto just 8 KV heads) and a head_dim of 64. With fp8 KV cache (1 byte per element):
+2 × 24 × 8 × 64 × 1 = 24,576 bytes ≈ ~24 KB per token
+
+That already matches the ~24.5 KB/token we see in the logs almost exactly - and 4.17 GiB ÷ 24,576 bytes ≈ 182,336, which is precisely the headline KV pool size vLLM reports. So there is no mystery in the per-token number and no hidden reduction happening: aggressive GQA (8 KV heads instead of 64), a small head_dim of 64, and fp8 KV cache are what make each token cheap. vLLM computes the headline token capacity using exactly this uniform per-token cost.
+So, where does Sliding Window Attention (SWA) actually help? Not in the per-token headline - in concurrency. gpt-oss-20b alternates layer types: roughly half of its 24 layers use full global attention, the other half use a tight 128-token sliding window. For long-context requests, the sliding-window layers do not grow with prompt length - they stay bounded at 128 tokens whether the prompt is 4k or 128k. So a real 128k request only pays the full per-token price on about half its layers; the sliding-window half is effectively free at length.
+This is exactly what the log line reports:
+INFO [kv_cache_utils.py] Maximum concurrency for 128,000 tokens per request: 2.68x
+
+A naive reading would expect 182,336 ÷ 128,000 ≈ 1.42x concurrency for 128k requests. vLLM reports 2.68x - nearly double — because its memory manager understands the hybrid SWA structure and knows a 128k sequence costs roughly half the uniform estimate (only the ~12 full-attention layers accumulate full-length KV; the ~12 sliding-window layers plateau at 128 tokens). That ~1.9x uplift over the naive ratio is the SWA payoff - it buys concurrency headroom, not a cheaper headline per-token figure.
+In contrast, Gemma4 26B uses a heavy heterogeneous attention architecture: most layers are local sliding-window layers at head_dim=256, but a few global attention layers use a much larger head_dim=512 (8 query heads grouped onto 4 KV heads via GQA). It's those wide head_dim=512 global layers that dominate the KV budget. The startup logs flag the split explicitly:
+INFO [config.py] Gemma4 model has heterogeneous head dimensions
+     (head_dim=256, global_head_dim=512).
+     Forcing TRITON_ATTN backend to prevent mixed-backend numerical divergence.
+
+Gemma4's global attention layers with a massive head_dim=512 cost dramatically more per token, pushing its combined average overhead to ~112.7 KB per token - roughly 4.6x heavier than gpt-oss-20b's ~24.5 KB.
+This explains the gap:
+gpt-oss-20b: 4.17 GiB ÷ ~24.5 KB/token ≈ 182k tokens of headline KV pool cheap per token thanks to aggressive GQA + small head_dim + fp8, plus ~2.68x effective concurrency at 128k because the Sliding Window layers don't grow with context
+Gemma4: 3.12 GiB ÷ ~112.7 KB/token ≈ 29k tokens - heavy global attention dimensions for maximum recall accuracy at the cost of density
+Choose gpt-oss-20b when you need long context on budget hardware or an OpenAI-compatible tool-calling drop-in. Choose Gemma 4 when you need lower TTFT or native vision input.
+Same caveat as in Part 1 - this is a quantized model, not the full cloud API. The mxfp4 quantization is more aggressive than AWQ int4, which can affect quality on tasks requiring precise numerical reasoning or very long coherent outputs.
+In practice we haven't noticed quality issues for the use cases we run: document analysis, structured data extraction, automation agents, and code review. For these tasks, the model performs well and the 128k context is genuinely useful - you can feed entire codebases or long documents without chunking.
+Data privacy remains the core advantage. Everything runs inside your VPC.
+The setup has been running since November 2025. A few things we learned over time:
+Pod restarts are fast and self-healing - when the node is recycled (GKE node auto-upgrade, maintenance, or a manual node pool operation), the StatefulSet pod is rescheduled, picks up the PVC with cached weights and torch.compile artifacts, and is back up in ~3 minutes. No data loss, no manual intervention. (Surviving spot preemption - and eliminating even that ~3-minute gap with a multi-zone replica architecture - is exactly what Part 3 covers.)
+Memory is stable - no OOM events in 6 months with the --max-num-seqs 3 limit. The CPU swap mechanism handles occasional long-context requests without instability.
+The model is consistent - response quality and latency have been stable. No drift or degradation observed.
+Running a model with 128k context on a $0.70/hr instance felt ambitious when we started. Six months later, it's just infrastructure that runs. The key insight is that mxfp4 quantization combined with aggressive GQA and Sliding Window Attention is what makes 128k context genuinely feasible on 24GB VRAM - not a hack, but an architectural decision that vLLM understands and optimizes for natively.
+This deployment is deliberately simple - a single replica on a standard on-demand node, with minimal scheduling. The next article in this series builds directly on it: a zone-aware multi-node spot setup with a K8S controller and automatic failover that guarantees at least one replica is always serving - the architecture that makes this both cheap (~3x cost reduction) and truly resilient in production.
+If you have questions or feedback, feel free to reach out...."
+image: /img/blog/generated/deploying-openais-gpt-oss-20b-architectural-insights-and-performance-optimization-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Deploying OpenAI's gpt-oss-20b: Architectural Insights and Performance Optimization](/img/blog/generated/deploying-openais-gpt-oss-20b-architectural-insights-and-performance-optimization-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### The Emergence of gpt-oss-20b in AI Infrastructure
+
+OpenAI's gpt-oss-20b represents a pivotal evolution in the deployment of large language models (LLMs). With its 21 billion parameters and the novel mxfp4 quantization technique, this model allows organizations to harness significant computational power on a single NVIDIA L4 GPU. The capability to handle a 128,000 token context window not only enhances the model's utility in complex applications but also challenges conventional deployment paradigms that typically restrict context lengths. This article delves into the technical intricacies of deploying gpt-oss-20b, focusing on its architectural choices, performance metrics, and best practices for implementation.
+
+### The Mechanics of mxfp4 Quantization
+
+mxfp4 quantization is a groundbreaking approach that optimizes model weight representation. Unlike traditional methods such as AWQ or GPTQ, which often suffer from inefficiencies, mxfp4 employs a microscaling FP4 format. This results in a compression ratio that effectively doubles memory efficiency compared to INT4 quantization. The significant reduction in memory footprint directly translates to enhanced model performance, allowing for larger context windows and improved throughput. For instance, gpt-oss-20b's weight size is approximately 13.72 GiB, which comfortably fits within the 24 GiB VRAM of the L4 GPU, thereby facilitating the execution of extensive tasks without the risk of out-of-memory (OOM) errors.
+
+### Configuring GKE Clusters for Optimal Performance
+
+The setup of a Google Kubernetes Engine (GKE) cluster is a critical step in deploying gpt-oss-20b effectively. A well-structured configuration can significantly impact the model's performance and cost-efficiency. It is advisable to create a dedicated node pool optimized for the model, utilizing the `g2-standard-4` machine type with a single L4 GPU. This configuration not only allows for autoscaling but also ensures that the GPU resources are exclusively allocated to the model's workload, thereby maximizing performance.
+
+```bash
+gcloud container node-pools create l4-gptoss \
+  --cluster=YOUR_CLUSTER_NAME \
+  --zone=us-central1-a \
+  --machine-type=g2-standard-4 \
+  --accelerator=type=nvidia-l4,count=1,gpu-driver-version=latest \
+  --num-nodes=0 \
+  --enable-autoscaling \
+  --min-nodes=0 \
+  --max-nodes=1 \
+  --node-labels=service=gpt-oss-20b \
+  --node-taints=nvidia.com/gpu=present:NoSchedule \
+  --scopes=cloud-platform
+```
+
+This command sets up a node pool that is critical for isolating GPU workloads, ensuring that the deployment remains efficient and responsive.
+
+### Step-by-Step Deployment with Kubernetes
+
+Deploying gpt-oss-20b requires a precise StatefulSet configuration within Kubernetes. The following manifest outlines a minimalistic setup that targets the appropriate node labels and tolerances for GPU resources. This configuration is designed to facilitate the model's operation while ensuring stability and performance.
+
+```yaml
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: gptoss-20b
+  namespace: gptoss-multi
+spec:
+  serviceName: gptoss
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gptoss-20b
+  template:
+    metadata:
+      labels:
+        app: gptoss-20b
+    spec:
+      terminationGracePeriodSeconds: 30
+      nodeSelector:
+        service: gpt-oss-20b
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: vllm
+          image: us-central1-docker.pkg.dev/YOUR_PROJECT/tools/vllm-openai:v0.12.0
+          args:
+            - --model
+            - openai/gpt-oss-20b
+            - --api-key
+            - $(VLLM_API_KEY)
+            - --max-model-len
+            - "128000"
+            - --gpu-memory-utilization
+            - "0.85"
+```
+
+This configuration ensures that the model is deployed with optimal resource allocation, allowing it to function effectively under various workloads.
+
+### Performance Metrics: Evaluating Throughput and Latency
+
+Performance testing of gpt-oss-20b with a 128k context window has yielded impressive results. The model achieves a throughput of approximately 52 tokens per second for short prompts, maintaining similar performance levels for longer contexts. For example, a test with an 8,076 token input demonstrated a time-to-first-token (TTFT) of roughly 1.47 seconds, showcasing the model's capability to manage extensive contexts efficiently.
+
+| Metric                   | Short Context (94 tokens) | Long Context (8,076 tokens) |
+|--------------------------|---------------------------|------------------------------|
+| Throughput               | ~52 tokens/sec            | ~53 tokens/sec               |
+| Time-to-First-Token     | 237 ms                    | ~1.47 sec                    |
+
+This consistency in throughput across varying prompt lengths highlights the efficiency of mxfp4 quantization in handling memory and processing demands.
+
+### Strategies for Managing GPU Resources
+
+To mitigate the risk of OOM errors during deployment, careful management of GPU resources is essential. Setting the `--gpu-memory-utilization` parameter to a conservative value of 0.85 provides necessary headroom for unexpected spikes in memory usage. Additionally, limiting the maximum number of concurrent sequences to three ensures stable operation while maximizing throughput. These strategies are crucial for maintaining a reliable deployment, particularly under high-load scenarios.
+
+### Addressing Potential Pitfalls in Deployment
+
+Despite the advantages of deploying gpt-oss-20b, several pitfalls can undermine performance and reliability. One common issue is the misconfiguration of resource limits, which can lead to OOM errors during peak usage. To avoid this, it is vital to monitor GPU memory utilization closely and adjust parameters accordingly. Another potential pitfall is neglecting to implement proper health checks and readiness probes in the Kubernetes deployment, which can result in service disruptions. Ensuring that these checks are in place will help maintain operational stability and facilitate quick recovery from failures.
+
+### Future Considerations: Scaling to Multi-Node Deployments
+
+As organizations expand their AI infrastructure, transitioning to multi-node deployments becomes imperative. Future implementations could leverage spot instances in conjunction with a failover architecture to enhance cost efficiency while ensuring high availability. By adopting a zone-aware multi-node setup, organizations can achieve resilience against node failures and optimize resource utilization, paving the way for scalable AI solutions.
+
+### Conclusion: The Transformative Impact of Advanced Quantization Techniques
+
+The deployment of OpenAI's gpt-oss-20b with mxfp4 quantization on a single L4 GPU exemplifies the potential of advanced quantization techniques in modern AI infrastructure. By effectively utilizing GPU memory and optimizing model architecture, organizations can achieve high performance and scalability in their AI applications. The implications for production workloads are significant, offering a pathway to leverage LLMs in a cost-effective and efficient manner, ultimately enhancing the capabilities of AI systems across various domains. 
+
+### Real-World Case Study: Production Insights and Lessons Learned
+
+The ongoing production experience with gpt-oss-20b offers valuable insights into the practical aspects of deploying LLMs. Over six months of operation, the model has demonstrated stability and reliability, with no OOM events reported. This consistency underscores the efficacy of the chosen configuration and the importance of adhering to best practices in resource management. Moreover, the ability to run a sophisticated model with a 128k context on a modest infrastructure budget highlights the transformative potential of mxfp4 quantization and optimized architectural choices in the evolving landscape of AI and cloud systems.
+
+In summary, the deployment of gpt-oss-20b presents a compelling case for leveraging advanced quantization techniques and efficient resource management to unlock the full potential of LLMs in production environments.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/ratibor78/running-openais-gpt-oss-20b-with-128k-context-on-a-single-l4-gpu-27ac)
+
+---
+
+<SocialShare title="Deploying OpenAI's gpt-oss-20b: Architectural Insights and Performance Optimization" slug="deploying-openais-gpt-oss-20b-architectural-insights-and-performance-optimization" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
