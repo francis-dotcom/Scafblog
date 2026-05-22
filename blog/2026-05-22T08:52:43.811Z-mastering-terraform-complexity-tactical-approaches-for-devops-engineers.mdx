@@ -1,0 +1,653 @@
+---
+slug: mastering-terraform-complexity-tactical-approaches-for-devops-engineers
+title: "Mastering Terraform Complexity: Tactical Approaches for DevOps Engineers"
+authors: [francis]
+tags: [terraform, devops, infrastructure, cloud]
+date: 2026-05-22T08:52:43.812Z
+description: "The Slack Message That Ruined My Monday
+
+
+
+"Hey, the previous platform team left. Here's the repo. Good luck 🫡"
+I stared at the Git repository. 47,000 lines of Terraform. One state file. Zero modules. Variables named x, temp2, and my personal favorite — DO_NOT_TOUCH_ask_raj. Raj had left the company two years ago.
+If you've been a Senior DevOps Engineer for more than a year, you've inherited something like this. Maybe not 47K lines, but you've opened a main.tf that made you question your career choices.
+This isn't a "Terraform best practices" article. Those are written by people who've never had to run terraform plan on a 3,000-resource state file at 2 AM while the VP of Engineering watches.
+This is a survival guide.
+# main.tf — 8,400 lines
+# "Managed" networking, compute, databases, DNS, IAM, monitoring,
+# and somehow... a CloudFront distribution for a marketing site
+# that was decommissioned in 2023.
+
+resource "aws_vpc" "main" { ... }
+resource "aws_instance" "api_server_1" { ... }
+resource "aws_instance" "api_server_2" { ... }
+# ... 200 more instances ...
+resource "aws_rds_instance" "prod_db" { ... }
+resource "aws_iam_role" "god_mode" { ... }  # yes, really
+
+A single terraform apply touched everything. Networking, databases, compute, DNS — all entangled like Christmas lights in January. One typo in a security group rule? Congratulations, your plan just showed 847 resources to evaluate, and Terraform decided your RDS instance needs replacing.
+This isn't just messy — it's operationally catastrophic. Here's what happens:
+terraform plan takes 14 minutes. Developers stop running it.
+State file locking means only one person can work at a time.
+Blast radius of any mistake = the entire infrastructure.
+New team members are terrified to touch anything (rightfully so).
+Step 1: State Surgery with terraform state mv
+# First, I mapped resource dependencies visually
+terraform graph | dot -Tsvg > infra-dependency-map.svg
+
+# Then, split by domain boundaries
+terraform state mv 'aws_vpc.main' -state-out=networking/terraform.tfstate
+terraform state mv 'aws_subnet.public[0]' -state-out=networking/terraform.tfstate
+terraform state mv 'aws_subnet.public[1]' -state-out=networking/terraform.tfstate
+
+Step 2: Introduce State Boundaries by Blast Radius
+I split into five state files based on change frequency and blast radius:
+
+
+
+Layer
+Contents
+Change Frequency
+Blast Radius
+
+
+
+
+foundation
+VPC, Subnets, Route Tables
+Monthly
+Critical
+
+
+security
+IAM, KMS, Security Groups
+Weekly
+Critical
+
+
+data
+RDS, ElastiCache, S3
+Rare
+Catastrophic
+
+
+compute
+ECS/EKS, ASGs, ALBs
+Daily
+High
+
+
+edge
+CloudFront, Route53, WAF
+Weekly
+Medium
+
+
+
+Step 3: Wire Them Together with Remote State Data Sources
+# In compute/main.tf
+data "terraform_remote_state" "networking" {
+  backend = "s3"
+  config = {
+    bucket = "company-terraform-state"
+    key    = "foundation/terraform.tfstate"
+    region = "us-east-1"
+  }
+}
+
+resource "aws_ecs_service" "api" {
+  # Reference networking outputs safely
+  network_configuration {
+    subnets = data.terraform_remote_state.networking.outputs.private_subnet_ids
+  }
+}
+
+Result: terraform plan went from 14 minutes to 45 seconds. Team velocity tripled. I stopped getting 2 AM pages about state locks.
+environments/
+├── dev/
+│   └── main.tf      # 1,200 lines
+├── staging/
+│   └── main.tf      # 1,200 lines (95% identical to dev)
+├── prod/
+│   └── main.tf      # 1,200 lines (90% identical... with 47 "hotfixes")
+└── dr/
+    └── main.tf      # 1,200 lines (copied from prod 8 months ago, never updated)
+
+Four copies of the same infrastructure with subtle drift. Staging had a security group rule that prod didn't. DR was missing three services entirely. Nobody knew which differences were intentional.
+You can't diff your way out of this. The files have diverged in ways that are both intentional (prod has larger instances) and accidental (someone fixed a bug in dev but forgot to propagate it). You have no source of truth.
+Don't try to unify everything at once. I learned this the hard way after a failed "big bang" refactor that took 3 sprints and broke staging for a week.
+Instead, use the Strangler Fig pattern:
+# modules/api-platform/main.tf
+variable "environment" {
+  type = string
+  validation {
+    condition     = contains(["dev", "staging", "prod", "dr"], var.environment)
+    error_message = "Environment must be dev, staging, prod, or dr."
+  }
+}
+
+variable "config" {
+  type = object({
+    instance_type    = string
+    min_capacity     = number
+    max_capacity     = number
+    enable_waf       = bool
+    multi_az         = bool
+    backup_retention = number
+  })
+}
+
+locals {
+  # Environment-specific defaults that document WHY they differ
+  env_config = {
+    dev = {
+      instance_type    = "t3.medium"
+      min_capacity     = 1
+      max_capacity     = 2
+      enable_waf       = false
+      multi_az         = false
+      backup_retention = 1
+    }
+    prod = {
+      instance_type    = "m5.xlarge"
+      min_capacity     = 3
+      max_capacity     = 20
+      enable_waf       = true
+      multi_az         = true
+      backup_retention = 35
+    }
+  }
+}
+
+The key insight: Every environment difference should be documented in code as a conscious decision, not hidden in a 1,200-line file as an accidental divergence.
+terraform apply -auto-approve YOLO Pipeline
+
+
+  
+  
+  What I Found in .gitlab-ci.yml
+
+
+
+
+deploy_prod:
+  stage: deploy
+  script:
+    - terraform init
+    - terraform apply -auto-approve  # 🚨 WHAT
+  only:
+    - main
+
+No plan artifact. No approval gate. No diff review. Push to main → infrastructure changes in production. The commit history told the horror story:
+fix: revert the revert of the fix
+fix: actually fix prod this time
+fix: ok THIS one fixes it
+revert: revert everything from today
+
+# .github/workflows/terraform.yml
+name: "Terraform"
+
+on:
+  pull_request:
+    paths: ['infrastructure/**']
+  push:
+    branches: [main]
+    paths: ['infrastructure/**']
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Terraform Plan
+        id: plan
+        run: |
+          terraform init
+          terraform plan -no-color -out=tfplan \
+            -detailed-exitcode 2>&1 | tee plan_output.txt
+        continue-on-error: true
+
+      - name: Comment Plan on PR
+        uses: actions/github-script@v7
+        if: github.event_name == 'pull_request'
+        with:
+          script: |
+            const fs = require('fs');
+            const plan = fs.readFileSync('plan_output.txt', 'utf8');
+            const truncated = plan.length > 60000 
+              ? plan.substring(0, 60000) + '\n\n... truncated ...' 
+              : plan;
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## Terraform Plan Output\n\`\`\`\n${truncated}\n\`\`\``
+            });
+
+      - name: Upload Plan Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan
+          path: tfplan
+
+  apply:
+    needs: plan
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: production  # Requires manual approval
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Plan
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan
+
+      - name: Terraform Apply
+        run: terraform apply tfplan  # Apply ONLY the reviewed plan
+
+The non-negotiable rules:
+Plans are generated on PR and attached as artifacts.
+Humans review the diff before any production apply.
+Apply uses the exact plan that was reviewed (not a new plan).
+The production environment requires manual approval from a senior engineer.
+resource "aws_db_instance" "prod" {
+  engine               = "postgres"
+  instance_class       = "db.r5.2xlarge"
+  username             = "admin"
+  password             = "Pr0d_P@ssw0rd_2022!"  # I wish I was joking
+  publicly_accessible  = true                    # I really wish I was joking
+}
+
+The password was in the .tf file, the state file, the plan output, and the Git history. Four places to leak from. And publicly_accessible = true was the cherry on this dumpster fire sundae.
+# Use a data source to pull secrets at plan/apply time
+data "aws_secretsmanager_secret_version" "db_password" {
+  secret_id = "prod/rds/master-password"
+}
+
+resource "aws_db_instance" "prod" {
+  engine              = "postgres"
+  instance_class      = "db.r5.2xlarge"
+  username            = "admin"
+  password            = data.aws_secretsmanager_secret_version.db_password.secret_string
+  publicly_accessible = false
+
+  # Prevent Terraform from detecting password "drift"
+  lifecycle {
+    ignore_changes = [password]
+  }
+}
+
+But that's not enough. The state file still contains sensitive values. The complete solution:
+# backend.tf
+terraform {
+  backend "s3" {
+    bucket         = "company-terraform-state"
+    key            = "prod/data/terraform.tfstate"
+    region         = "us-east-1"
+    encrypt        = true                          # SSE-KMS encryption
+    kms_key_id     = "arn:aws:kms:us-east-1:xxx:key/yyy"
+    dynamodb_table = "terraform-state-lock"
+  }
+}
+
+Plus strict S3 bucket policies, access logging, and never giving developers direct state file access. Use terraform output instead.
+resource "aws_ecs_task_definition" "api" {
+  family                   = "api"
+  network_mode             = "awsvpc"
+  requires_compatibilities = ["FARGATE"]
+  cpu                      = 1024
+  memory                   = 2048
+  execution_role_arn       = aws_iam_role.ecs_execution.arn
+  task_role_arn            = aws_iam_role.ecs_task.arn
+
+  container_definitions = jsonencode([
+    {
+      name  = "api"
+      image = "company/api:latest"  # 🚨 LATEST TAG IN PROD
+      portMappings = [{ containerPort = 8080 }]
+      environment = [
+        { name = "DB_HOST", value = "prod-db.cluster-xxx.us-east-1.rds.amazonaws.com" },
+        { name = "DB_NAME", value = "production" },
+        { name = "REDIS_URL", value = "prod-redis.xxx.cache.amazonaws.com:6379" },
+        # ... 45 more environment variables hardcoded here ...
+      ]
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          "awslogs-group"         = "/ecs/api"
+          "awslogs-region"        = "us-east-1"
+          "awslogs-stream-prefix" = "api"
+        }
+      }
+      # ... 80 more lines of health checks, mount points, ulimits ...
+    }
+  ])
+}
+
+The problems compound:
+Environment variables are hardcoded (not sourced from SSM/Secrets Manager).
+latest tag means deployments are non-reproducible.
+The jsonencode blob is untestable and un-diffable in PR reviews.
+One change to any env var triggers a full task definition replacement.
+# Use templatefile for complex JSON — it's testable and readable
+resource "aws_ecs_task_definition" "api" {
+  family                   = "api-${var.environment}"
+  network_mode             = "awsvpc"
+  requires_compatibilities = ["FARGATE"]
+  cpu                      = var.task_cpu
+  memory                   = var.task_memory
+  execution_role_arn       = aws_iam_role.ecs_execution.arn
+  task_role_arn            = aws_iam_role.ecs_task.arn
+
+  container_definitions = templatefile("${path.module}/templates/api-container.json.tpl", {
+    image_tag     = var.image_tag  # Pinned, passed from CI/CD
+    environment   = var.environment
+    db_host       = data.aws_ssm_parameter.db_host.value
+    redis_url     = data.aws_ssm_parameter.redis_url.value
+    log_group     = aws_cloudwatch_log_group.api.name
+    aws_region    = data.aws_region.current.name
+  })
+}
+
+After untangling this mess across three months, here's the sequence that works:
+# 1. Enable state file encryption and locking NOW
+# 2. Add branch protection — no direct pushes to main
+# 3. Run terraform plan and SAVE the output as your baseline
+terraform plan -no-color > baseline_plan_$(date +%Y%m%d).txt
+
+# 4. Enable detailed audit logging on your state bucket
+
+# Use terraform state list to inventory everything
+terraform state list > all_resources.txt
+wc -l all_resources.txt  # Mine had 2,847 resources
+
+# Group by service domain
+grep "aws_vpc\|aws_subnet\|aws_route" all_resources.txt > networking.txt
+grep "aws_iam\|aws_kms" all_resources.txt > security.txt
+grep "aws_rds\|aws_elasticache\|aws_s3" all_resources.txt > data.txt
+grep "aws_ecs\|aws_alb\|aws_autoscaling" all_resources.txt > compute.txt
+
+Move one service at a time into a module. After each move:
+Run terraform plan — it should show zero changes.
+If plan shows changes, you have a bug. Fix it before moving on.
+Get a PR review from another senior engineer.
+Apply and monitor for 24 hours.
+Add terraform validate and tflint to CI.
+Add checkov or tfsec for security scanning.
+Implement drift detection (scheduled plan that alerts on differences).
+Add cost estimation with infracost.
+This is the thing nobody talks about. Even after a perfect refactor, drift happens. Someone clicks in the console. An auto-remediation tool makes changes. A Lambda modifies a security group.
+# .github/workflows/drift-detection.yml
+name: "Drift Detection"
+
+on:
+  schedule:
+    - cron: '0 6 * * 1-5'  # Every weekday at 6 AM
+
+jobs:
+  detect-drift:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        layer: [foundation, security, data, compute, edge]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Terraform Plan (Drift Check)
+        id: plan
+        working-directory: infrastructure/${{ matrix.layer }}
+        run: |
+          terraform init
+          terraform plan -detailed-exitcode -no-color > plan.txt 2>&1
+          echo "exitcode=$?" >> $GITHUB_OUTPUT
+        continue-on-error: true
+
+      - name: Alert on Drift
+        if: steps.plan.outputs.exitcode == '2'
+        run: |
+          # Exit code 2 = changes detected (drift!)
+          curl -X POST "${{ secrets.SLACK_WEBHOOK }}" \
+            -H 'Content-type: application/json' \
+            -d "{\"text\":\"🚨 Drift detected in *${{ matrix.layer }}* layer. Check the plan output.\"}"
+
+We caught 3 unauthorized console changes in the first week alone.
+Don't refactor everything at once. You'll break things and lose credibility.
+
+
+Document what you find before you fix it. Screenshot the horrors. You'll need them for the post-mortem and for your performance review.
+
+
+Get buy-in from leadership BEFORE you start. "I need 3 sprints for tech debt" is a hard sell. "Our current setup means any infrastructure change has a 40% chance of causing an incident" gets budget approved.
+
+
+Every terraform state mv should be a separate, reviewed PR. Not because it's technically necessary, but because when something breaks at step 37 of 50, you want a clean git history to bisect.
+
+
+The goal isn't perfect Terraform. The goal is Terraform that your team can safely operate at 2 AM. If a junior engineer can't run terraform plan without fear, your refactor isn't done.
+
+
+
+
+
+  
+  
+  TL;DR for the Scrollers
+
+
+
+Anti-Pattern
+Fix
+Priority
+
+
+
+
+Monolith state file
+Split by blast radius and change frequency
+P0
+
+
+Copy-paste environments
+Modules + environment configs
+P1
+
+
+
+-auto-approve in CI
+Plan artifacts + manual approval gates
+P0
+
+
+Secrets in state/code
+Secrets Manager + encrypted state + ignore_changes
+
+P0
+
+
+God resources with inline JSON
+
+templatefile + SSM parameters
+P2
+
+
+No drift detection
+Scheduled plan with alerting
+P1
+
+
+
+If you've ever stared at a Terraform codebase and whispered "who did this?!" into the void — you're not alone. We've all been there. The good news? It's fixable. One state move at a time.
+Found this useful? Follow me for more battle-tested DevOps content. I write about the stuff that actually happens in production — not the happy path from the docs.
+S, SanjayFollow
+
+    
+Senior DevOps Engineer | Azure • Kubernetes • Terraform | 5+ yrs | Aeronautics grad who makes apps fly in the cloud ☁️✈️ | Microsoft Certified..."
+image: /img/blog/generated/mastering-terraform-complexity-tactical-approaches-for-devops-engineers-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Mastering Terraform Complexity: Tactical Approaches for DevOps Engineers](/img/blog/generated/mastering-terraform-complexity-tactical-approaches-for-devops-engineers-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### The Perils of Inheriting Terraform Codebases
+
+In the realm of DevOps, inheriting a convoluted Terraform codebase can feel akin to navigating a minefield. The operational implications of a poorly structured codebase are severe—prolonged `terraform plan` execution times, increased risk of state file locks, and an elevated likelihood of unintended changes cascading through the infrastructure. This scenario is not just a theoretical exercise; it is a lived experience for many engineers who find themselves grappling with a legacy of technical debt. The stakes are high, as a single misconfiguration can lead to production outages, making the need for a structured approach to refactoring paramount.
+
+### Mapping Dependencies: The First Step to Clarity
+
+Before diving into refactoring, it is crucial to assess the current state of the codebase. A visual representation of resource dependencies can illuminate the tangled web of interconnections within the Terraform configuration. Utilizing the `terraform graph` command allows engineers to generate a dependency graph, which can be exported and analyzed. This initial mapping serves not only as a diagnostic tool but also as a roadmap for subsequent refactoring efforts. By understanding how resources interact, teams can make informed decisions on how to segment the codebase effectively.
+
+```bash
+terraform graph | dot -Tsvg > infra-dependency-map.svg
+```
+
+This command produces a visual dependency map that can guide discussions and planning sessions, ensuring that all team members have a clear understanding of the existing infrastructure.
+
+### Decoupling Monolithic State Files
+
+One of the most pressing challenges in a complex Terraform setup is the monolithic state file. A single state file can lead to long plan times and a high blast radius for any changes. To mitigate this risk, it is advisable to split the state file into multiple, domain-specific state files. This can be achieved using the `terraform state mv` command, which allows resources to be moved into new state files without losing their existing configurations.
+
+```bash
+terraform state mv 'aws_vpc.main' -state-out=networking/terraform.tfstate
+```
+
+By categorizing resources based on their change frequency and impact, teams can create a more manageable structure. For instance, separating resources into layers such as `foundation`, `security`, `data`, `compute`, and `edge` can significantly reduce the complexity of operations and improve overall efficiency.
+
+### Leveraging Remote State Data Sources
+
+Once the state files are segmented, the next step is to establish remote state data sources. This approach allows different modules to reference outputs from one another without tightly coupling them. By using the `terraform_remote_state` data source, teams can ensure that changes in one module are reflected in others without the need for direct dependencies.
+
+```hcl
+data "terraform_remote_state" "networking" {
+  backend = "s3"
+  config = {
+    bucket = "company-terraform-state"
+    key    = "foundation/terraform.tfstate"
+    region = "us-east-1"
+  }
+}
+```
+
+This method not only promotes modularity but also enhances the clarity of the codebase, making it easier to understand and maintain over time.
+
+### CI/CD Integration: A Safety Net for Deployments
+
+The deployment process is often where the most significant risks lie. Implementing Continuous Integration and Continuous Deployment (CI/CD) practices can safeguard against unintended changes in production. A robust CI/CD pipeline should include stages for planning, reviewing, and applying Terraform changes, ensuring that all modifications are scrutinized before reaching the production environment.
+
+An example GitHub Actions workflow can be set up to automate this process, attaching plan outputs as artifacts for review:
+
+```yaml
+name: "Terraform"
+
+on:
+  pull_request:
+    paths: ['infrastructure/**']
+  push:
+    branches: [main]
+    paths: ['infrastructure/**']
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Terraform Plan
+        run: |
+          terraform init
+          terraform plan -no-color -out=tfplan
+```
+
+This structure ensures that no changes are applied without prior review, significantly reducing the risk of introducing errors into the production environment.
+
+### Securing Sensitive Information: Best Practices
+
+Managing sensitive information is critical in any infrastructure setup, and Terraform is no exception. Hardcoding secrets within Terraform files or state files exposes them to potential leaks. Instead, leveraging AWS Secrets Manager or similar services can provide a more secure way to handle sensitive data. By using data sources to pull secrets at plan and apply time, teams can minimize the risk of accidental exposure.
+
+```hcl
+data "aws_secretsmanager_secret_version" "db_password" {
+  secret_id = "prod/rds/master-password"
+}
+
+resource "aws_db_instance" "prod" {
+  engine              = "postgres"
+  username            = "admin"
+  password            = data.aws_secretsmanager_secret_version.db_password.secret_string
+}
+```
+
+This approach not only enhances security but also aligns with best practices by ensuring that sensitive data is never stored in plaintext within the codebase.
+
+### Implementing Drift Detection and Monitoring
+
+Even after a successful refactor, the risk of configuration drift remains. To combat this, teams should implement drift detection mechanisms that regularly check for discrepancies between the Terraform state and the actual infrastructure. This can be achieved through scheduled plans that alert the team when drift is detected.
+
+```yaml
+name: "Drift Detection"
+
+on:
+  schedule:
+    - cron: '0 6 * * 1-5'  # Every weekday at 6 AM
+
+jobs:
+  detect-drift:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Terraform Plan (Drift Check)
+        run: |
+          terraform init
+          terraform plan -detailed-exitcode -no-color > plan.txt
+```
+
+By integrating drift detection into the CI/CD pipeline, teams can proactively address configuration changes that may occur outside of Terraform, maintaining the integrity of their infrastructure.
+
+### The Importance of Documentation in Refactoring
+
+As teams embark on the journey of refactoring a complex Terraform codebase, the importance of documentation cannot be overstated. Each change made should be accompanied by clear documentation that explains the rationale behind it. This practice not only facilitates knowledge transfer among team members but also ensures that future engineers can understand the decisions made during the refactoring process.
+
+### Gradual Refactoring: A Sustainable Approach
+
+Attempting to refactor an entire Terraform codebase in one go can lead to chaos and increased risk. Instead, adopting a gradual refactoring approach allows teams to implement changes incrementally. Each state move or module creation should be treated as a separate task, ideally accompanied by a pull request that undergoes thorough review. This strategy minimizes disruption and allows for easier troubleshooting if issues arise.
+
+### Conclusion: Building a Sustainable Terraform Strategy
+
+Inheriting a messy Terraform codebase is undoubtedly a daunting task, but it is not insurmountable. By employing systematic refactoring strategies, leveraging CI/CD practices, securing sensitive information, and implementing drift detection, DevOps engineers can regain control over their infrastructure. Ultimately, the goal is not to achieve perfection but to create a Terraform environment that is maintainable, secure, and efficient. With careful planning and execution, teams can transform their Terraform codebases into well-organized, functional systems that support their operational needs.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/sanjaysundarmurthy/i-inherited-47000-lines-of-terraform-spaghetti-heres-how-i-untangled-it-without-burning-1oh5)
+
+---
+
+<SocialShare title="Mastering Terraform Complexity: Tactical Approaches for DevOps Engineers" slug="mastering-terraform-complexity-tactical-approaches-for-devops-engineers" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
