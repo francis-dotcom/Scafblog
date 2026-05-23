@@ -1,0 +1,417 @@
+---
+slug: implementing-eval-driven-ci-for-ai-prompt-changes
+title: "Implementing Eval-Driven CI for AI Prompt Changes"
+authors: [francis]
+tags: [ai, ci, github, prompts]
+date: 2026-05-23T17:14:41.239Z
+description: "Book: LLM Observability Pocket Guide: Picking the Right Tracing & Evals Tools for Your Team
+
+
+Also by me: Thinking in Go (2-book series) — Complete Guide to Go Programming + Hexagonal Architecture in Go
+
+
+My project: Hermes IDE | GitHub — an IDE for developers who ship with Claude Code and other AI coding tools
+Me: xgabriel.com | GitHub
+
+
+
+
+
+
+A prompt deploy without an eval gate is an untested database migration. You wouldn't ship one of those. Stop shipping the other.
+There's a file in your repo. It's called prompts/summarize_ticket.md or agents/triage/system.txt or something close. It controls a real production behaviour: which support tickets get auto-closed, which invoices get flagged, which user messages route to a human. A senior engineer can edit it, push to main, and ship in 90 seconds.
+Now do the same thought experiment with a migration. You wouldn't accept "Bob changed a column type and pushed to main." There's a CI step. There's a review gate. There's at least one automated check that the migration runs against a snapshot of prod data without exploding. Prompts get none of that.
+A team I talked to last month shipped a single-word change. Replaced "concise" with "brief" in a customer-facing summarizer. Quality on the long-tail slice, tickets longer than 1,200 tokens, dropped by 12% on their golden set. They found out because a customer complained, not because anything blocked the PR. The diff was three characters and there was no failing check anywhere.
+That's the problem. The fix is boring infrastructure: an eval gate that runs on the PR diff, the same way your linter does.
+An eval gate has three jobs. Just three.
+First, it runs the new prompt against a curated golden set: questions, prompts, or inputs with known-good outputs or scored properties. Second, it runs the old prompt against the same set in the same run, on the same model, with the same temperature. Third, it compares the two distributions and fails the build if the new one is materially worse.
+That's it. The gate does not prove the new prompt is good. It only proves it isn't visibly worse than what's already in main against the cases you cared enough to write down. Two important things follow.
+You need a golden set that reflects the failure modes you've already hit in production. Not synthetic test cases someone wrote in 20 minutes. Pull the real complaints, the real edge cases, the messages where the old prompt did something wrong and you patched it. That's your regression suite.
+And the comparison has to be done in the same run. Not "we evaluated the old one last week and stored the number." Models drift. APIs change. A run from last week is not the same run as today against the same string. Always re-run both sides.
+Drop this in .github/workflows/prompt-eval.yml. It triggers when a PR touches anything under prompts/, skips when the skip-eval label is set, runs the eval twice, posts a comment, and fails the job on regression.
+name: prompt-eval
+
+on:
+  pull_request:
+    paths:
+      - 'prompts/**'
+      - 'evals/golden_set.jsonl'
+      - 'evals/runner.py'
+
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'skip-eval') }}
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - run: pip install -r evals/requirements.txt
+
+      - name: Identify changed prompt files
+        id: diff
+        run: |
+          git diff --name-only origin/${{ github.base_ref }}...HEAD \
+            -- 'prompts/**' > changed.txt
+          if [ ! -s changed.txt ]; then
+            echo "no prompts changed, skipping"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run eval on new prompt
+        if: steps.diff.outputs.skip != 'true'
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          python evals/runner.py \
+            --prompts-dir prompts \
+            --golden evals/golden_set.jsonl \
+            --out new.json
+
+      - name: Checkout base prompts
+        if: steps.diff.outputs.skip != 'true'
+        run: |
+          git checkout origin/${{ github.base_ref }} -- prompts/
+
+      - name: Run eval on base prompt
+        if: steps.diff.outputs.skip != 'true'
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          python evals/runner.py \
+            --prompts-dir prompts \
+            --golden evals/golden_set.jsonl \
+            --out base.json
+
+      - name: Compare and gate
+        if: steps.diff.outputs.skip != 'true'
+        id: compare
+        run: |
+          python evals/compare.py base.json new.json \
+            > compare.md
+          cat compare.md
+
+      - name: Post PR comment
+        if: steps.diff.outputs.skip != 'true'
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          path: compare.md
+
+A few things worth pointing out before you copy it.
+The fetch-depth: 0 matters. Without it, git diff origin/main...HEAD won't have the base ref locally and the diff step quietly returns nothing. You'll think the gate is running and it'll be passing every PR because no prompts "changed."
+The base-prompt run uses git checkout origin/main -- prompts/ to swap the prompt files in place, then re-runs the eval. The trade-off is the working tree is dirty afterwards, so don't put anything stateful after this step.
+The sticky-comment action keeps a single comment per PR instead of stacking a new one on every push. Reviewers see the latest verdict, not 14 outdated ones.
+Forty lines of Python. Reads a JSONL of cases, calls the model with each case + the prompt under test, scores with either a rule or a judge, writes a single JSON file the comparison step can read.
+# evals/runner.py
+import argparse, json, os, pathlib, statistics
+from openai import OpenAI
+
+client = OpenAI()
+
+def score(case, output):
+    # rule-based score for exact-match cases
+    if case.get("expected"):
+        return 1.0 if case["expected"] in output else 0.0
+    # judge-based score for open-ended cases
+    rubric = case["rubric"]
+    judge = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content":
+            f"Rubric: {rubric}\n\nOutput: {output}\n\n"
+            "Score 0.0 to 1.0. Reply with the number only."}],
+        temperature=0,
+    )
+    try:
+        return float(judge.choices[0].message.content.strip())
+    except ValueError:
+        return 0.0
+
+def run(prompts_dir, golden_path, out_path):
+    system = (pathlib.Path(prompts_dir) / "system.md").read_text()
+    results = []
+    with open(golden_path) as f:
+        for line in f:
+            case = json.loads(line)
+            resp = client.chat.completions.create(
+                model=case.get("model", "gpt-4o-mini"),
+                messages=[{"role": "system", "content": system},
+                          {"role": "user", "content": case["input"]}],
+                temperature=0,
+            )
+            out = resp.choices[0].message.content
+            results.append({"id": case["id"],
+                            "score": score(case, out),
+                            "output": out})
+    summary = {"mean": statistics.mean(r["score"] for r in results),
+               "n": len(results), "results": results}
+    pathlib.Path(out_path).write_text(json.dumps(summary, indent=2))
+
+if __name__ == "__main__":
+    p = argparse.ArgumentParser()
+    p.add_argument("--prompts-dir", required=True)
+    p.add_argument("--golden", required=True)
+    p.add_argument("--out", required=True)
+    run(p.parse_args().prompts_dir, p.parse_args().golden, p.parse_args().out)
+
+Two design choices that get questioned in code review.
+One: the judge model is cheap on purpose. gpt-4o-mini is plenty for "did this output match the rubric." If you're paying GPT-5 prices to grade homework you're doing it wrong. The places where judge quality matters, like open-ended creative tasks and nuanced reasoning, are exactly the places a CI gate is the wrong tool anyway. Save the expensive judge for offline eval runs.
+Two: temperature=0 on the prompt under test. Yes, in production you might run at 0.7. The eval is not trying to mirror production, it's trying to compare two prompts on the same inputs. Keep the noise floor low. If your prompt only works at high temperature, that's a separate problem worth knowing about.
+Gotcha: don't read args.prompts_dir twice like the snippet above does for brevity. Parse args once, pass them. The version that calls p.parse_args() three times is fine for 100-case sets, slow and confusing at 10K.
+The naive threshold is "fail if new mean is less than old mean." Don't do that. Eval scores are noisy. A 0.83 vs 0.81 difference on a 200-case set could be the model having a slow afternoon, not a real regression. Gate on that and your PRs are red half the time for nothing.
+The threshold you want is "new is statistically worse than base by more than the noise floor." A six-line bootstrap gives you that.
+# evals/compare.py, bootstrap CI calculation
+import json, random, sys
+base = json.load(open(sys.argv[1]))["results"]
+new = json.load(open(sys.argv[2]))["results"]
+diffs = [n["score"] - b["score"] for b, n in zip(base, new)]
+samples = [sum(random.choices(diffs, k=len(diffs)))/len(diffs)
+           for _ in range(2000)]
+ci_low = sorted(samples)[int(0.025 * 2000)]
+print(f"95% CI lower bound on mean diff: {ci_low:.4f}")
+print("REGRESSION" if ci_low < -0.02 else "OK")
+sys.exit(1 if ci_low < -0.02 else 0)
+
+That's the entire calculation. You resample the per-case score differences 2000 times, take the lower bound of the 95% confidence interval on the mean difference, and fail only if that lower bound is worse than -0.02. If a reasonable resampling of your data couldn't put the new prompt within 2 points of base, that's a real regression. If it could, it's noise and you let it through.
+Two points isn't sacred. Tune it to your golden set's size. With 50 cases the CI is wide and you'll need a looser threshold like -0.05 or you'll never ship. With 1,000 cases you can tighten to -0.01. The discipline matters more than the number: pick a value, write down why, and only change it after you've measured a real false positive or false negative.
+The gate stops obvious regressions before merge. It does nothing for the regressions that show up only in production traffic distribution. For those, you want the second half of the canary loop: ship the new prompt, watch production SLOs for a window, auto-revert if anything breaches.
+The shape of this in GitHub Actions is a scheduled workflow that queries your observability backend, checks whether the post-deploy window for the most recent prompt change has breached a configured threshold, and opens a revert PR (or pushes a revert commit directly to main, if your branch protection allows) when it has.
+name: prompt-auto-rollback
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Query last 15min SLO
+        id: slo
+        env:
+          OBS_TOKEN: ${{ secrets.OBS_TOKEN }}
+        run: |
+          python ops/check_slo.py \
+            --window 15m \
+            --metric prompt_quality_score \
+            --threshold 0.78 \
+            > slo.json
+      - name: Revert last prompt change on breach
+        if: steps.slo.outputs.breach == 'true'
+        run: |
+          git revert --no-edit HEAD
+          git push origin main
+
+A few honest notes. Auto-revert pushing to main is brave. The safer pattern is opening a PR that a human merges, which trades a few minutes of broken behaviour for the ability to glance at what got reverted before it lands. The path between "auto-PR" and "auto-push" is one your team has to walk based on how much you trust the metric. Trust the metric only if you've seen it move during real incidents, not just synthetic load tests.
+The 15-minute window is short for prompt rollbacks. Quality drops often show up on long-tail traffic that takes hours to surface. Run a parallel longer-window check (24h, looser threshold) that opens a non-blocking ticket rather than auto-reverting. The fast window catches the catastrophic stuff; the slow window catches the slow bleeds.
+Not every PR needs to spend 6 minutes and $2 of API budget proving it didn't regress. The [skip-eval] label is the escape hatch.
+In the workflow above, the gate runs only when the label is absent. Use it for:
+Renaming a variable inside a prompt comment.
+Reformatting the markdown structure of a prompt file (headings, whitespace) when the actual instructions haven't moved.
+Updating prompt versioning metadata that the model never sees.
+Docs PRs that touch prompts/README.md rather than a real prompt.
+Don't use it for "this change is small." Small changes are exactly the ones that quietly tank quality. The three-character "concise" to "brief" story is the canonical small change. If a model output reads it, it goes through the gate.
+The label is a documented exception, not a habit. If you find yourself using it more than once a sprint, that's a signal your gate is too slow, too expensive, or too flaky, and the fix is the gate, not the label.
+The mechanics of CI gating for prompts, like golden sets, bootstrap thresholds, judge vs rule scoring, and post-deploy SLO loops, sit at the same intersection of traces, evals, and operational discipline that the LLM Observability Pocket Guide is built around. The chapters on golden-set construction and on stitching offline evals into a live observability stack pick up exactly where this post ends...."
+image: /img/blog/generated/implementing-eval-driven-ci-for-ai-prompt-changes-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Implementing Eval-Driven CI for AI Prompt Changes](/img/blog/generated/implementing-eval-driven-ci-for-ai-prompt-changes-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### The Imperative for Quality Assurance in AI Prompt Management
+
+In the rapidly evolving landscape of AI systems, particularly those utilizing large language models (LLMs), ensuring the quality of outputs has become a critical concern. Unlike traditional software components, AI prompts directly influence the behavior and performance of applications. A minor modification in a prompt can lead to unexpected regressions, affecting user experience and operational metrics. This reality necessitates the implementation of robust quality assurance mechanisms, similar to the rigorous testing protocols established in conventional software development. By adopting quality gates for AI prompts, teams can mitigate the risks associated with prompt changes, ensuring that only validated modifications are deployed.
+
+### Understanding the Eval Gate: A Key Component of CI
+
+At the core of an effective continuous integration (CI) strategy for AI prompt management is the eval gate. This mechanism serves to evaluate new prompt iterations against a predefined golden set—an established collection of inputs and expected outputs. The eval gate performs three essential functions: it runs the new prompt against the golden set, evaluates the old prompt under identical conditions, and compares the outputs to ascertain whether the new prompt exhibits any degradation in performance. This process is not designed to prove that the new prompt is superior; rather, it ensures that it does not result in a measurable decline in quality, thereby safeguarding user experience and operational integrity.
+
+### Prerequisites for Implementing an Eval Gate
+
+To effectively establish an eval gate, certain prerequisites must be met. The first is the creation of a comprehensive golden set, which should encompass real-world scenarios and inputs that the AI system is likely to encounter. This set should be derived from historical data, including user interactions and previously identified failure cases, rather than relying solely on synthetic examples. For instance, if the AI model is designed to generate customer support responses, the golden set should include a variety of actual user queries and the corresponding ideal responses. Additionally, the infrastructure must be capable of integrating the eval gate into an automated CI pipeline, typically utilizing version control systems like GitHub. This integration enables prompt changes to trigger automated evaluations, ensuring that every modification undergoes scrutiny before deployment.
+
+### Constructing an Effective Golden Set for Regression Testing
+
+The construction of a golden set is a meticulous process that requires careful consideration of the types of inputs the AI system will face. For instance, if the goal is to enhance a summarization prompt, the golden set should include a diverse range of summarization tasks that have been previously evaluated. Each entry in the golden set should include expected outputs or scoring criteria, allowing for a quantitative assessment of the new prompt's performance. A practical example could involve a JSONL file containing various user queries along with their expected summaries, which can be utilized to validate the performance of new prompt iterations. For example, a golden set entry might look like this:
+
+```json
+{"input": "Summarize the key points of the following article: [article content]", "expected_output": "The article discusses..."}
+```
+
+This approach ensures that the golden set effectively represents the operational landscape of the AI system.
+
+### Step-by-Step Implementation of the Eval Gate in GitHub Actions
+
+Integrating the eval gate into a CI workflow can be seamlessly achieved using GitHub Actions. Below is a refined sample workflow configuration that triggers evaluations whenever changes are made to prompt files:
+
+```yaml
+name: prompt-eval
+
+on:
+  pull_request:
+    paths:
+      - 'prompts/**'
+      - 'evals/golden_set.jsonl'
+      - 'evals/runner.py'
+
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'skip-eval') }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - run: pip install -r evals/requirements.txt
+
+      - name: Identify changed prompt files
+        id: diff
+        run: |
+          git diff --name-only origin/${{ github.base_ref }}...HEAD \
+            -- 'prompts/**' > changed.txt
+          if [ ! -s changed.txt ]; then
+            echo "no prompts changed, skipping"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run eval on new prompt
+        if: steps.diff.outputs.skip != 'true'
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          python evals/runner.py \
+            --prompts-dir prompts \
+            --golden evals/golden_set.jsonl \
+            --out new.json
+
+      - name: Checkout base prompts
+        if: steps.diff.outputs.skip != 'true'
+        run: |
+          git checkout origin/${{ github.base_ref }} -- prompts/
+
+      - name: Run eval on base prompt
+        if: steps.diff.outputs.skip != 'true'
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          python evals/runner.py \
+            --prompts-dir prompts \
+            --golden evals/golden_set.jsonl \
+            --out base.json
+
+      - name: Compare and gate
+        if: steps.diff.outputs.skip != 'true'
+        id: compare
+        run: |
+          python evals/compare.py base.json new.json \
+            > compare.md
+          cat compare.md
+
+      - name: Post PR comment
+        if: steps.diff.outputs.skip != 'true'
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          path: compare.md
+```
+
+This workflow is designed to automatically run evaluations when prompt files are modified, ensuring that changes are validated against the golden set prior to being merged into the main branch.
+
+### Monitoring Prompt Performance in Production Environments
+
+Once a new prompt is deployed, continuous monitoring of its performance in the production environment is essential. This involves tracking key performance indicators (KPIs) such as user satisfaction scores, response times, and the frequency of errors. Implementing observability tools can facilitate real-time visualization of these metrics, enabling teams to quickly identify any degradation in performance. For instance, scheduled workflows can be established to query observability backends and assess whether the new prompt meets predefined service-level objectives (SLOs). This proactive approach allows for swift intervention in the event of performance issues, such as adjusting the prompt or reverting to a previous version if user satisfaction drops below a certain threshold.
+
+### Strategies for Managing Regressions Post-Deployment
+
+Despite rigorous testing and validation, regressions may still occur after deployment. To mitigate the impact of such regressions, teams can implement auto-revert strategies. For example, a scheduled GitHub Actions workflow could monitor production performance metrics and automatically revert the last prompt change if a significant drop in quality is detected. This approach minimizes downtime and allows teams to investigate the root cause of the regression without prolonged exposure to degraded performance. Below is a sample configuration for an auto-rollback workflow:
+
+```yaml
+name: prompt-auto-rollback
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Query last 15min SLO
+        id: slo
+        env:
+          OBS_TOKEN: ${{ secrets.OBS_TOKEN }}
+        run: |
+          python ops/check_slo.py \
+            --window 15m \
+            --metric prompt_quality_score \
+            --threshold 0.78 \
+            > slo.json
+      - name: Revert last prompt change on breach
+        if: steps.slo.outputs.breach == 'true'
+        run: |
+          git revert --no-edit HEAD
+          git push origin main
+```
+
+This configuration ensures that if the quality score falls below the established threshold, the last prompt change is automatically reverted, maintaining the overall quality of the AI output.
+
+### The Future of AI Prompt Management: A Continuous Integration Paradigm
+
+The integration of eval-driven CI processes into AI prompt management represents a significant evolution in maintaining output quality. As AI systems become increasingly complex and integral to business operations, the ability to manage prompt changes with the same rigor as traditional software development is essential. By adopting these practices, organizations can significantly reduce the risk of regressions and ensure that their AI systems continue to deliver high-quality outputs that meet user expectations.
+
+### Conclusion: Pioneering a New Era of AI Development Practices
+
+In conclusion, the implementation of eval-driven CI for AI prompt changes marks a pivotal shift in how AI systems are developed and maintained. By establishing robust quality gates, constructing effective golden sets, and leveraging automated workflows, teams can enhance the reliability and performance of their AI applications. As the field of AI continues to evolve, embracing these practices will not only safeguard against regressions but also foster a culture of continuous improvement within AI development teams. The journey towards high-quality AI outputs is ongoing, and the adoption of eval-driven CI is a crucial step in that direction.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/gabrielanhaia/eval-driven-canary-shipping-prompt-changes-behind-a-quality-gate-2hok)
+
+---
+
+<SocialShare title="Implementing Eval-Driven CI for AI Prompt Changes" slug="implementing-eval-driven-ci-for-ai-prompt-changes" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
