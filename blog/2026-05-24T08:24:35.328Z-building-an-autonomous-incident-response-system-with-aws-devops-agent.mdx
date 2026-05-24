@@ -1,0 +1,796 @@
+---
+slug: building-an-autonomous-incident-response-system-with-aws-devops-agent
+title: "Building an Autonomous Incident Response System with AWS DevOps Agent"
+authors: [francis]
+tags: [devops, aws, python, incident-response]
+date: 2026-05-24T08:24:35.329Z
+description: ""At 2 AM, a CloudWatch alarm fired on my Lambda function. I did not get paged. The agent woke up instead, investigated the function, correlated logs and metrics, posted the root cause to Slack, and went back to sleep. I only found out the next morning when I checked Slack."
+That is the system I built this week. This post walks through every step — architecture, CDK code, webhook signing, Skill upload, and the honest parts that went wrong.
+ / 
+        agentic-sre
+      
+    
+Agentic SRE with AWS DevOps Agent
+An end-to-end autonomous incident response system built on AWS DevOps Agent
+When a CloudWatch alarm fires, the agent automatically investigates root cause
+correlates telemetry, generates a mitigation plan, and posts findings to Slack —
+without waking up an engineer.
+Built as a companion to: "I Built an Agentic SRE on AWS DevOps Agent — Here's What the Official Guide Left Out"
+Architecture
+CloudWatch Alarm (error rate / duration / throttling)
+        │
+        ▼
+    SNS Topic
+        │
+        ▼
+  Webhook Handler Lambda
+  (HMAC-signed payload)
+        │
+        ▼
+  AWS DevOps Agent Space
+  (CloudWatch + GitHub + Slack)
+        │
+        ├── Investigates using Lambda Runbook Skill
+        ├── Correlates metrics + logs + deployments
+        ├── Generates mitigation plan
+        └── Posts root cause to Slack
+                │
+                ▼
+        Agent-Ready Spec → Kiro (code fix)
+
+
+Single-account setup. Unlike the AWS reference architecture (3 accounts + Splunk)
+this repo is designed to run in one AWS…
+View on GitHub
+Every engineer who has been on-call knows the pattern. Alarm fires. You open the laptop half-asleep. CloudWatch. Logs. Recent deployments. Metrics. Cross-reference timestamps. Forty-five minutes later: someone deployed bad code two hours ago. The fix is a one-line rollback.
+That entire investigation loop is repeatable, mechanical, and does not require a human. AWS DevOps Agent can do it autonomously. The moment an alarm fires, the agent starts investigating — correlating telemetry, reading your runbooks, checking deployment history, and posting findings to Slack. You get involved only when there is a real decision to make.
+I wanted to build a working, single-account version of this without requiring Splunk or an enterprise AWS setup. Here is what I built and what I learned.
+I did my research before writing a single line of code.
+The AWS official blog covers an end-to-end agentic SRE using DevOps Agent. It is thorough. It also requires a 3-account setup with Splunk, which most developers do not have. There is also an official aws-samples/sample-aws-devops-agent-cdk repo — but it is TypeScript CDK only, with no webhook pipeline, no custom Skill, and no demo trigger scripts.
+Here is the exact gap this post fills:
+
+
+
+Topic
+AWS Official Blog
+aws-samples CDK repo
+This Build
+
+
+
+
+Language
+Node.js snippets
+TypeScript CDK
+Python CDK
+
+
+Accounts needed
+3 accounts
+1-2 accounts
+1 account
+
+
+Splunk required
+Yes
+No
+No
+
+
+Full webhook handler
+Partial snippet
+Not included
+Complete Python Lambda
+
+
+Custom Skill / Skill zip format
+Mentioned
+Not included
+Full runbook + frontmatter gotcha
+
+
+Demo trigger script
+Not included
+Basic invoke
+One-liner with 4 modes
+
+
+Real investigation screenshots
+No
+No
+Yes — including agent gaps
+
+
+
+If you are a Python CDK developer and you searched for a complete walkthrough — this is it.
+┌─────────────────────────────────────────────────┐
+│              AWS Account (Single)                │
+│                                                  │
+│  ┌──────────────┐    metrics + logs              │
+│  │ Demo Lambda  │──────────────────────────────┐ │
+│  │ (broken app) │                              ▼ │
+│  └──────────────┘                    ┌──────────────────┐
+│                                      │   CloudWatch      │
+│                                      │   Alarms (3)      │
+│                                      └────────┬─────────┘
+│                                               │ state change
+│                                               ▼
+│                                      ┌──────────────────┐
+│                                      │    SNS Topic      │
+│                                      └────────┬─────────┘
+│                                               │ triggers
+│                                               ▼
+│                                      ┌──────────────────┐
+│                                      │ Webhook Handler  │
+│                                      │ Lambda           │
+│                                      │ (HMAC signed)    │
+│                                      │ Secret from      │
+│                                      │ Secrets Manager  │
+│                                      └────────┬─────────┘
+│                                               │ HTTP POST
+│                                               ▼
+│                            ┌─────────────────────────────┐
+│                            │   AWS DevOps Agent Space    │
+│                            │   (agentic-sre-space)       │
+│                            │                             │
+│                            │  Reads CloudWatch           │
+│                            │  Reads GitHub deploys       │
+│                            │  Follows SKILL.md           │
+│                            │                             │
+│                            │  → Root cause analysis      │
+│                            │  → Mitigation plan          │
+│                            │  → Slack notification       │
+│                            │  → Agent-ready spec → Kiro  │
+│                            └─────────────────────────────┘
+└─────────────────────────────────────────────────────────┘
+
+Three CDK stacks deploy in sequence. Stack outputs are passed as cross-stack references — no manual copy-pasting of ARNs.
+Before deploying:
+AWS CLI configured (aws configure)
+Python 3.12+
+Node.js 18+ (required for CDK CLI)
+AWS CDK v2 installed: npm install -g aws-cdk
+
+AWS DevOps Agent available in your region — currently supported in us-east-1, us-west-2, ap-southeast-2, ap-northeast-1, eu-central-1, eu-west-1 only
+A GitHub account (for deployment correlation)
+A Slack workspace where you can add apps
+agentic-sre/
+├── app.py                          # CDK entry point — wires all 3 stacks
+├── cdk.json
+├── requirements.txt
+├── infra/
+│   └── stacks/
+│       ├── demo_app_stack.py       # Stack 1: the Lambda being monitored
+│       ├── alarm_stack.py          # Stack 2: CloudWatch alarms + SNS topic
+│       └── webhook_stack.py        # Stack 3: webhook handler + Secrets Manager
+├── demo_app/
+│   └── index.py                    # Lambda with 4 controllable failure modes
+├── webhook_handler/
+│   └── index.py                    # SNS → DevOps Agent forwarder (HMAC signed)
+├── skills/
+│   └── lambda-investigation-runbook.md
+└── scripts/
+    └── trigger.py                  # Demo: force alarms or burst invocations
+
+The CDK entry point wires all three stacks with cross-stack references:
+# app.py
+app = cdk.App()
+
+demo = DemoAppStack(app, "AgenticSreDemoApp", env=env)
+alarm = AlarmStack(app, "AgenticSreAlarms", lambda_fn=demo.lambda_fn, env=env)
+webhook = WebhookStack(app, "AgenticSreWebhook", alarm_topic=alarm.alarm_topic, env=env)
+
+AlarmStack receives the Lambda function object from DemoAppStack so it can create metric alarms on the exact function ARN. WebhookStack receives the SNS topic ARN from AlarmStack to subscribe the webhook Lambda. No magic strings anywhere.
+This Lambda simulates a production microservice with four controllable failure modes:
+# demo_app/index.py
+def handler(event, context):
+    simulate = event.get("simulate", "normal")
+
+    # Failure Mode 1: DB connection error — triggers error rate alarm
+    if simulate == "error":
+        logger.error("Simulated DB connection timeout")
+        raise Exception(
+            "DB connection timeout: could not reach postgres://demo-db:5432/app "
+            "after 3 retries. Connection pool exhausted."
+        )
+
+    # Failure Mode 2: Slow response — triggers duration alarm (P99 near 30s timeout)
+    if simulate == "slow":
+        delay = random.uniform(25, 28)
+        time.sleep(delay)
+        return {"statusCode": 200, "body": json.dumps({"latency_simulated": True})}
+
+    # Failure Mode 3: Hard timeout
+    if simulate == "timeout":
+        time.sleep(29)
+        return {}
+
+    # Normal operation
+    latency = random.uniform(10, 120)
+    return {"statusCode": 200, "body": json.dumps({"status": "ok", "latency_ms": round(latency)})}
+
+💡 Note: Why detailed error messages matter: The error message includes a fake DB connection string. When the agent reads CloudWatch logs, it sees this and correctly identifies a database connectivity issue — even though no real database exists. Your log quality directly affects investigation quality.
+Three alarms covering the most common Lambda failure categories:
+# infra/stacks/alarm_stack.py
+
+self.alarm_topic = sns.Topic(self, "AlarmTopic", topic_name="agentic-sre-alarm-topic")
+
+# Alarm 1: Error rate > 20% over 5 minutes
+# MathExpression gives you a RATE, not a raw count.
+# 5 errors from 5 invocations (100%) should alarm.
+# 5 errors from 10,000 invocations (0.05%) should NOT.
+error_rate_alarm = cw.Alarm(
+    self, "ErrorRateAlarm",
+    alarm_name="agentic-sre-high-error-rate",
+    metric=cw.MathExpression(
+        expression="errors / invocations * 100",
+        using_metrics={
+            "errors": lambda_fn.metric_errors(period=Duration.minutes(5), statistic="Sum"),
+            "invocations": lambda_fn.metric_invocations(period=Duration.minutes(5), statistic="Sum"),
+        },
+        period=Duration.minutes(5),
+    ),
+    threshold=20,
+    evaluation_periods=1,
+    treat_missing_data=cw.TreatMissingData.NOT_BREACHING,
+)
+error_rate_alarm.add_alarm_action(cw_actions.SnsAction(self.alarm_topic))
+error_rate_alarm.add_ok_action(cw_actions.SnsAction(self.alarm_topic))  # ← don't skip this
+
+# Alarm 2: P99 duration > 24s (80% of 30s timeout)
+# Alarming at 80% of timeout gives early warning before
+# requests actually start failing.
+duration_alarm = cw.Alarm(
+    self, "DurationAlarm",
+    alarm_name="agentic-sre-high-duration",
+    metric=lambda_fn.metric_duration(period=Duration.minutes(5), statistic="p99"),
+    threshold=24000,         # milliseconds
+    evaluation_periods=2,    # 2 consecutive periods avoids false positives
+    treat_missing_data=cw.TreatMissingData.NOT_BREACHING,
+)
+duration_alarm.add_alarm_action(cw_actions.SnsAction(self.alarm_topic))
+duration_alarm.add_ok_action(cw_actions.SnsAction(self.alarm_topic))
+
+# Alarm 3: Any throttling at all
+# Throttles = requests being dropped. Zero tolerance.
+throttle_alarm = cw.Alarm(
+    self, "ThrottleAlarm",
+    alarm_name="agentic-sre-throttling",
+    metric=lambda_fn.metric_throttles(period=Duration.minutes(5), statistic="Sum"),
+    threshold=1,
+    evaluation_periods=1,
+    treat_missing_data=cw.TreatMissingData.NOT_BREACHING,
+)
+throttle_alarm.add_alarm_action(cw_actions.SnsAction(self.alarm_topic))
+throttle_alarm.add_ok_action(cw_actions.SnsAction(self.alarm_topic))
+
+⚠️ Warning: Don't forget add_ok_action. Without it, the agent never receives the resolution signal and leaves the incident open in Slack forever.
+This Lambda bridges CloudWatch → DevOps Agent. Two production patterns worth highlighting:
+# webhook_handler/index.py
+
+# Module-level cache — persists across warm invocations.
+# One Secrets Manager fetch per cold start, zero on warm calls.
+_secret_cache = None
+
+def get_webhook_config():
+    global _secret_cache
+    if _secret_cache:
+        return _secret_cache
+    client = boto3.client("secretsmanager")
+    response = client.get_secret_value(SecretId=SECRET_NAME)
+    _secret_cache = json.loads(response["SecretString"])
+    return _secret_cache
+
+Never put the webhook URL or HMAC secret in Lambda env vars — they appear in plaintext in the console and CloudTrail.
+def sign_payload(payload_str: str, secret: str, timestamp: str) -> str:
+    """
+    DevOps Agent verifies this signature on every webhook call.
+    Format: HMAC-SHA256('{timestamp}:{payload}', secret) → base64
+    Timestamp prevents replay attacks.
+    """
+    message = f"{timestamp}:{payload_str}"
+    sig = hmac.new(secret.encode("utf-8"), message.encode("utf-8"), hashlib.sha256).digest()
+    return base64.b64encode(sig).decode("utf-8")
+
+def build_incident_payload(alarm_detail: dict, sns_message: dict) -> dict:
+    alarm_name = alarm_detail.get("alarmName", "unknown-alarm")
+    state = alarm_detail.get("state", {}).get("value", "ALARM")
+
+    return {
+        # Required — DevOps Agent rejects payloads missing these
+        "eventType": "incident",
+        "incidentId": f"cw-{alarm_name}-{int(datetime.now(timezone.utc).timestamp())}",
+        "action": map_alarm_state_to_action(state),  # created | resolved | updated
+        "priority": map_alarm_to_priority(alarm_name),  # HIGH / MEDIUM based on alarm name
+        "title": f"[{state}] {alarm_name}",
+        # Optional — improve investigation quality
+        "description": alarm_detail.get("state", {}).get("reason", ""),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "service": SERVICE_NAME,
+    }
+
+The CDK stack wires SNS → Lambda in one line:
+alarm_topic.add_subscription(subs.LambdaSubscription(self.webhook_fn))
+
+CDK automatically generates the correct Lambda resource policy for SNS to invoke it.
+Search "DevOps Agent" in the AWS Console. Switch to us-east-1 (N. Virginia). If the service isn't visible, your region isn't supported yet.
+Click "Create Agent Space +" and fill in:
+Name: agentic-sre-space
+
+
+Description: SRE agent for Lambda incident investigation
+
+IAM role → "Create a new AWS DevOps Agent role using a policy template" (auto-creates everything)
+Operator App role → "Auto-create a new role"
+
+
+
+Click Create Agent Space.
+From the Agent Space details page → "Operator Access" → bookmark the URL. This is your investigation dashboard.
+💡 Note: CLI docs skip this: GitHub requires OAuth via the console BEFORE any CLI association. You cannot skip this step.
+Features tab → CI/CD Pipeline → GitHub → "Create a new registration" → "Install and authenticate"
+On GitHub: select "Only select repositories" → choose agentic-sre → Install.
+Features tab → Notifications → Slack → Connect workspace
+Select #agent-sre-incidents, then in Slack: /invite @AWS DevOps Agent
+Integrations → Webhooks → Create webhook
+The wizard shows you the required payload schema. Our handler already matches it:
+{
+  "eventType": "incident",
+  "incidentId": "string",
+  "action": "created" | "updated" | "closed" | "resolved",
+  "priority": "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" | "MINIMAL",
+  "title": "string",
+  "description?": "string",
+  "timestamp?": "string",
+  "service?": "string"
+}
+
+On Step 3: click Generate, copy both the URL and secret immediately (secret shown only once), then:
+aws secretsmanager create-secret \
+  --name agentic-sre/devops-agent-webhook \
+  --secret-string '{"url":"YOUR_WEBHOOK_URL","secret":"YOUR_SECRET"}' \
+  --region us-east-1
+
+A Skill is a Markdown file containing your SRE runbook. The agent reads it at the start of every investigation and follows your documented sequence instead of reasoning from scratch.
+The console says: "Upload a zip file containing your skill. The zip must include a SKILL.md file with name and description in the frontmatter."
+What it doesn't show you is the exact format. After my first upload failed silently, I found it:
+---
+name: Lambda Incident Investigation Runbook
+description: Use this skill when investigating AWS Lambda function errors,
+  timeouts, high duration, or throttling incidents. Guides the agent through
+  a 5-step investigation sequence covering alarm confirmation, metric analysis,
+  log inspection, deployment correlation, and root cause identification.
+---
+
+# Lambda Incident Investigation Runbook
+
+## Investigation Sequence
+...
+
+The zip structure must be exactly:
+lambda-investigation-skill.zip
+└── SKILL.md    ← root level, frontmatter required
+
+In the Operator Console I saw:
+Read skill: /aidevops/skills/user/understanding-agent-space/SKILL.md
+
+💡 Note: Clarification: understanding-agent-space is a default skill AWS pre-loads into every Agent Space. It ran here because I triggered the alarm manually with no real incident context. When you trigger via burst mode with real Lambda errors, the agent selects your custom skill instead.
+Skill path structure:
+/aidevops/skills/user/
+  understanding-agent-space/    ← AWS default (pre-loaded)
+  lambda-incident-investigation-runbook/  ← your custom skill
+
+## Investigation Sequence
+
+### Step 1 — Confirm the Alarm
+- Which alarm triggered: error rate, duration, or throttling?
+- Check state history in CloudWatch for the last 30 minutes
+- Note exact time alarm entered ALARM state
+
+### Step 2 — Check Lambda Metrics (Last 30 Minutes)
+Pull for function `agentic-sre-demo-app`:
+- Errors, Invocations, Duration (p50/p95/p99), Throttles, ConcurrentExecutions
+
+### Step 3 — Check Recent Logs
+Query /aws/lambda/agentic-sre-demo-app:
+- ERROR or CRITICAL level lines
+- "Task timed out after" messages
+- Time window: alarm trigger ± 10 minutes
+
+### Step 4 — Correlate With Recent Deployments
+Check GitHub for deployments in last 2 hours:
+- Was a new version deployed before the incident?
+- Does deployment timestamp correlate with metric anomaly?
+
+### Step 5 — Identify Root Cause Category
+
+| Symptom | Likely Root Cause |
+|---|---|
+| High error rate + exception in logs | Code bug or bad deploy |
+| High duration + no errors | Slow downstream (DB, external API) |
+| High duration + timeout logs | Lambda timeout too low |
+| Throttling | Concurrency limit too low |
+
+git clone https://github.com/MohammedAnes/agentic-sre.git
+cd agentic-sre
+
+python -m venv .venv
+source .venv/bin/activate    # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+
+cdk bootstrap                # first time only
+cdk deploy --all             # deploys DemoApp → Alarms → Webhook
+
+Deploy takes 3-4 minutes. Expected outputs:
+AgenticSreDemoApp.LambdaFunctionName = agentic-sre-demo-app
+AgenticSreAlarms.AlarmTopicArn = arn:aws:sns:us-east-1:...
+AgenticSreWebhook.WebhookFunctionName = agentic-sre-webhook-handler
+
+# Force error rate alarm immediately
+python scripts/trigger.py error
+
+# Force duration alarm
+python scripts/trigger.py slow
+
+# Force throttle alarm
+python scripts/trigger.py throttle
+
+# Trigger NATURALLY — 15 real invocations, waits for CloudWatch
+# Produces much better investigation quality
+python scripts/trigger.py burst 15
+
+# Reset everything to OK
+python scripts/trigger.py ok
+
+⚠️ Warning: Critical lesson: trigger.py error calls set-alarm-state — forces the alarm but creates zero real logs or metrics. The agent reports "No information about what triggered this investigation." Use burst 15 instead. Takes 5 minutes to trip naturally but the investigation quality is dramatically better.
+The agent posted real-time investigation updates. The standout behavior: automatic alarm grouping. When two follow-up alarms fired 59 seconds and 2 minutes after the primary, the agent recognized them as related and linked them instead of opening duplicate investigations:
+"Investigation linked: [ALARM] unknown-alarm — Same alarm type, same priority (HIGH), triggered 59 seconds after the primary. This is a continuation of the same ongoing issue affecting the system."
+This deduplication is built-in — no configuration needed.
+The investigation timeline showed every step:
+Read the default understanding-agent-space skill (pre-loaded by AWS)
+Made one datetime call to establish time context
+Topology discovery across the account
+Metric and log correlation
+Root cause + mitigation plan generated
+The Topology tab mapped resource relationships — Lambda, API Gateway, CloudFormation, GitHub, X-Ray, Bedrock Foundation Models — before investigation started.
+The agent surfaced two gaps worth sharing:
+Gap 1:
+"Cannot directly query Bedrock AgentCore API to verify runtime operational status — GetAgentRuntime, ListAgentRuntimes, InvokeRuntime, GetGateway APIs are not available in the current toolset."
+AgentCore runtime APIs aren't in the DevOps Agent toolset yet. It infers from CloudWatch instead.
+Gap 2:
+"No information about what triggered this investigation — the investigation was created with N/A for both description and starting point."
+This was my fault — I used set-alarm-state. No real invocations, no logs, nothing to investigate. Use burst mode.
+✅ Tip: These gaps make the post more credible, not less. The agent being honest about its limits is a feature, not a bug.
+
+
+
+Service
+What runs
+Pricing basis
+Monthly cost
+
+
+
+
+Lambda — demo app
+~100 test invocations/month
+1M req free/month
+$0
+
+
+Lambda — webhook handler
+Fires only on alarms
+1M req free/month
+$0
+
+
+CloudWatch Alarms
+3 standard alarms
+$0.10/alarm/month
+$0.30
+
+
+CloudWatch Metrics
+AWS-vended Lambda metrics
+Always free
+$0
+
+
+CloudWatch Logs
+~5 MB/month
+$0.50/GB ingested
+< $0.01
+
+
+SNS
+< 1,000 notifications/month
+1M free
+$0
+
+
+Secrets Manager
+1 secret
+$0.40/secret/month
+$0.40
+
+
+CDK Bootstrap S3
+Staging bucket
+S3 standard
+~$0.01
+
+
+Infra subtotal
+
+
+~$0.71/month
+
+
+AWS DevOps Agent
+Autonomous investigations
+2-month free trial
+$0 (trial)
+
+
+
+After the trial: credits based on AWS Support plan offset the cost — up to 100% for Unified Operations, 75% for Enterprise On-Ramp, 30% for Business+.
+You can build and blog about this for under $1/month.
+1. Skills are your biggest leverage point — investigation quality scales directly with runbook quality. Write a good SKILL.md before running anything.
+2. Use rate-based alarms — MathExpression for error rate is significantly more signal than raw error count.
+3. Secrets Manager + module-level caching — one line over env vars, significant security improvement.
+4. Always add_ok_action — without it the agent never resolves incidents in Slack.
+5. set-alarm-state = empty investigation — use burst mode for realistic demos.
+6. Alarm grouping is built-in — duplicate investigations from repeated alarms are handled automatically.
+7. The official CDK sample is TypeScript only — if you're a Python CDK developer, that's the gap this repo fills.
+A human approval gate before any remediation executes — Step Functions pauses the agent, sends a Slack approve/reject message, and only continues after human confirmation. That's the MCP Governance pattern applied to DevOps Agent.
+Also exploring AgentCore Payments — the agent autonomously paying for premium monitoring data during investigations. Follow-up post coming.
+AWS DevOps Agent — product page
+Official Agentic SRE blog post (3-account + Splunk)
+AWS DevOps Agent CDK getting started guide
+DevOps Agent Skills documentation
+aws-samples/sample-aws-devops-agent-cdk (TypeScript — the repo this post complements)
+
+
+
+
+
+
+I am Mohammed Anes, an AWS Community Builder in the AI/ML category. Building on AWS DevOps Agent, AgentCore, or Bedrock? Let's connect...."
+image: /img/blog/generated/building-an-autonomous-incident-response-system-with-aws-devops-agent-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Building an Autonomous Incident Response System with AWS DevOps Agent](/img/blog/generated/building-an-autonomous-incident-response-system-with-aws-devops-agent-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### The Imperative for Autonomous Incident Response
+
+In today's fast-paced cloud environments, the ability to swiftly respond to incidents is not just a luxury but a necessity. The AWS DevOps Agent serves as a powerful tool for automating incident investigations, allowing teams to minimize downtime and enhance service reliability. By leveraging telemetry data from various AWS services, the agent can autonomously analyze incidents, correlate logs, metrics, and deployment histories, and provide actionable insights without human intervention. This capability is particularly valuable for DevOps engineers and Site Reliability Engineers (SREs), who often face the challenge of managing incidents in real-time.
+
+### Architectural Overview of the Incident Response System
+
+An autonomous incident response system built with the AWS DevOps Agent comprises several key components. At its core are CloudWatch alarms, an Amazon Simple Notification Service (SNS) topic, a webhook handler Lambda function, and the DevOps Agent itself. When a CloudWatch alarm is triggered, it sends a notification to the SNS topic, which subsequently invokes the webhook handler Lambda function. This function processes the alarm details and forwards them to the DevOps Agent for investigation. The agent then analyzes the situation, correlates telemetry, and posts findings to a designated communication channel, such as Slack, thereby streamlining the incident response workflow.
+
+### Setting Up the AWS Environment with CDK
+
+To initiate the development of the incident response system, the first step is to configure your AWS environment. This process involves setting up the AWS Command Line Interface (CLI) and ensuring that you have Python 3.12+, Node.js 18+, and the AWS Cloud Development Kit (CDK) installed. The project structure should include an entry point for the CDK application, multiple stacks for different components, and directories for Lambda functions and skills. The following Python code snippet illustrates how to set up the CDK application:
+
+```python
+# app.py
+from aws_cdk import core as cdk
+from stacks.demo_app_stack import DemoAppStack
+from stacks.alarm_stack import AlarmStack
+from stacks.webhook_stack import WebhookStack
+
+app = cdk.App()
+
+demo = DemoAppStack(app, "AgenticSreDemoApp", env=env)
+alarm = AlarmStack(app, "AgenticSreAlarms", lambda_fn=demo.lambda_fn, env=env)
+webhook = WebhookStack(app, "AgenticSreWebhook", alarm_topic=alarm.alarm_topic, env=env)
+
+app.synth()
+```
+
+### Developing the Lambda Function for Incident Simulation
+
+The Lambda function at the heart of the incident response system simulates various failure modes, which can trigger CloudWatch alarms based on the outcomes of its execution. For instance, if the function encounters a database connection error, it will trigger an error rate alarm. This setup enables comprehensive monitoring of the Lambda function's performance and facilitates real-time incident detection. Below is an example of the Lambda function code:
+
+```python
+# demo_app/index.py
+import json
+import logging
+import random
+import time
+
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+
+def handler(event, context):
+    simulate = event.get("simulate", "normal")
+
+    if simulate == "error":
+        logger.error("Simulated DB connection timeout")
+        raise Exception("DB connection timeout: could not reach database.")
+
+    if simulate == "slow":
+        delay = random.uniform(25, 28)
+        time.sleep(delay)
+        return {"statusCode": 200, "body": json.dumps({"latency_simulated": True})}
+
+    if simulate == "timeout":
+        time.sleep(29)
+        return {}
+
+    latency = random.uniform(10, 120)
+    return {"statusCode": 200, "body": json.dumps({"status": "ok", "latency_ms": round(latency)})}
+```
+
+### Implementing CloudWatch Alarms for Effective Monitoring
+
+To monitor the Lambda function effectively, CloudWatch alarms must be established to respond to various failure scenarios. For example, an error rate alarm can be configured to trigger when the error rate exceeds a specified threshold. This allows the incident response system to react promptly to issues and initiate the investigation process. The following code snippet demonstrates how to set up an error rate alarm:
+
+```python
+# infra/stacks/alarm_stack.py
+from aws_cdk import aws_cloudwatch as cw
+from aws_cdk import aws_sns as sns
+from aws_cdk import core as cdk
+
+class AlarmStack(cdk.Stack):
+    def __init__(self, scope: cdk.Construct, id: str, lambda_fn: cdk.IConstruct, **kwargs) -> None:
+        super().__init__(scope, id, **kwargs)
+
+        self.alarm_topic = sns.Topic(self, "AlarmTopic", topic_name="agentic-sre-alarm-topic")
+
+        error_rate_alarm = cw.Alarm(
+            self, "ErrorRateAlarm",
+            alarm_name="agentic-sre-high-error-rate",
+            metric=cw.MathExpression(
+                expression="errors / invocations * 100",
+                using_metrics={
+                    "errors": lambda_fn.metric_errors(period=cdk.Duration.minutes(5), statistic="Sum"),
+                    "invocations": lambda_fn.metric_invocations(period=cdk.Duration.minutes(5), statistic="Sum"),
+                },
+                period=cdk.Duration.minutes(5),
+            ),
+            threshold=20,
+            evaluation_periods=1,
+            treat_missing_data=cw.TreatMissingData.NOT_BREACHING,
+        )
+        
+        error_rate_alarm.add_alarm_action(cw_actions.SnsAction(self.alarm_topic))
+```
+
+### Creating the Webhook Handler for Incident Notifications
+
+The webhook handler is a crucial component that processes incoming notifications from the SNS topic. It is responsible for signing the payload to ensure authenticity and integrity. The webhook handler constructs a structured incident payload that the DevOps Agent can interpret, containing essential details such as the incident ID, alarm state, and service affected. This structured approach enhances the agent's ability to conduct thorough investigations. Here’s an example of the webhook handler implementation:
+
+```python
+# webhook_handler/index.py
+import json
+import hmac
+import hashlib
+import base64
+import boto3
+from datetime import datetime, timezone
+
+SECRET_NAME = "agentic-sre/devops-agent-webhook"
+
+def get_webhook_config():
+    client = boto3.client("secretsmanager")
+    response = client.get_secret_value(SecretId=SECRET_NAME)
+    return json.loads(response["SecretString"])
+
+def sign_payload(payload_str: str, secret: str, timestamp: str) -> str:
+    message = f"{timestamp}:{payload_str}"
+    sig = hmac.new(secret.encode("utf-8"), message.encode("utf-8"), hashlib.sha256).digest()
+    return base64.b64encode(sig).decode("utf-8")
+
+def build_incident_payload(alarm_detail: dict) -> dict:
+    return {
+        "eventType": "incident",
+        "incidentId": f"cw-{alarm_detail['alarmName']}-{int(datetime.now(timezone.utc).timestamp())}",
+        "action": map_alarm_state_to_action(alarm_detail['state']['value']),
+        "priority": map_alarm_to_priority(alarm_detail['alarmName']),
+        "title": f"[{alarm_detail['state']['value']}] {alarm_detail['alarmName']}",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "service": "DemoService",
+    }
+```
+
+### Crafting the Custom Skill for the AWS DevOps Agent
+
+The custom skill is a pivotal element that guides the AWS DevOps Agent through the investigation process. This skill is defined in a Markdown file and outlines the steps the agent should take when an incident occurs. It includes instructions for confirming the alarm, checking metrics, analyzing logs, and correlating recent deployments. A well-defined skill can significantly enhance the agent's ability to gather relevant data and make informed decisions. Below is a sample of how to structure the skill:
+
+```markdown
+---
+name: Lambda Incident Investigation Runbook
+description: Use this skill when investigating AWS Lambda function errors, timeouts, high duration, or throttling incidents.
+---
+
+## Investigation Sequence
+
+### Step 1 — Confirm the Alarm
+- Identify the triggered alarm and check state history in CloudWatch.
+
+### Step 2 — Check Lambda Metrics
+- Pull metrics for errors, invocations, and duration over the last 30 minutes.
+
+### Step 3 — Analyze Logs
+- Review logs for any error messages or unusual patterns.
+
+### Step 4 — Correlate with Deployments
+- Check for recent deployments that may have caused the issue.
+
+### Step 5 — Identify Root Cause
+- Determine the likely cause based on the gathered data.
+```
+
+### Testing the System with Various Failure Modes
+
+Once the system is set up, it is essential to test its functionality by simulating various failure modes. This involves invoking the Lambda function with different parameters to trigger the corresponding alarms. For instance, you can simulate a database connection error or a throttling scenario. Observing how the AWS DevOps Agent responds to these simulated incidents provides valuable insights into the system's robustness and effectiveness. Here’s how you can trigger different failure modes:
+
+```bash
+# Simulate error rate alarm
+python scripts/trigger.py error
+
+# Simulate duration alarm
+python scripts/trigger.py slow
+
+# Simulate throttle alarm
+python scripts/trigger.py throttle
+
+# Trigger naturally with a burst of invocations
+python scripts/trigger.py burst 15
+```
+
+### Conclusion: Best Practices for Sustaining the System
+
+Building an autonomous incident response system using the AWS DevOps Agent can significantly enhance operational efficiency and reduce response times during incidents. However, several best practices should be considered for maintaining such a system. 
+
+1. **High-Quality Runbooks**: Ensure that your custom skills are detailed and clear, as they guide the agent's investigation process.
+   
+2. **Rate-Based Alarms**: Utilize rate-based alarms to prevent alert fatigue and ensure that only significant incidents are flagged.
+
+3. **Sensitive Configuration Management**: Use AWS Secrets Manager for managing sensitive configurations securely.
+
+4. **Continuous Testing**: Regularly test the system to identify and address any gaps in the investigation process.
+
+By adhering to these guidelines, DevOps engineers and SREs can create a resilient incident response framework that minimizes downtime and enhances service reliability. The AWS DevOps Agent, when configured correctly, can become an invaluable asset in the modern cloud-native landscape.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/mohammed_anes_6652d05cab7/aws-devops-agent-cdk-python-building-a-real-agentic-sre-from-scratch-no-splunk-no-3-accounts-5efb)
+
+---
+
+<SocialShare title="Building an Autonomous Incident Response System with AWS DevOps Agent" slug="building-an-autonomous-incident-response-system-with-aws-devops-agent" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
