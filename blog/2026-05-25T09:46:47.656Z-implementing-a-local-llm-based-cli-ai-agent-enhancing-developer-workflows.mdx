@@ -1,0 +1,459 @@
+---
+slug: implementing-a-local-llm-based-cli-ai-agent-enhancing-developer-workflows
+title: "Implementing a Local LLM-Based CLI AI Agent: Enhancing Developer Workflows"
+authors: [francis]
+tags: [ai, llm, gpt, cli]
+date: 2026-05-25T09:46:47.657Z
+description: "터미널 AI 에이전트 구축 (v27)
+
+
+터미널에서 작동하는 AI 에이전트를 구축하는 것은 현대 개발자에게 매우 실용적인 도구입니다. 이 가이드에서는 실제 개발 workflow에 통합할 수 있는 로컬 LLM 기반 CLI 에이전트를 구축하는 방법을 설명합니다.
+현재 CLI AI 에이전트 시장에는 여러 선택지가 있습니다:
+Aider: Git 기반 코드 수정을 위한 간단한 에이전트
+pip install aider
+aider --help
+
+Continue.dev: VSCode 확장으로도 사용 가능하지만 CLI 버전도 존재
+npm install -g continue
+continue --help
+
+OpenCode: 오픈소스 CLI 에이전트로 커스터마이징이 용이
+git clone https://github.com/open-code/open-code
+
+커스텀 스크립트: 최대한의 유연성을 위해 직접 구현
+# simple-agent.py
+import openai
+import os
+
+def main():
+    client = openai.Client(api_key=os.getenv("OPENAI_API_KEY"))
+    response = client.chat.completions.create(
+        model="gpt-4-turbo",
+        messages=[{"role": "user", "content": "Hello"}]
+    )
+    print(response.choices[0].message.content)
+
+로컬 LLM을 사용하여 비용과 보안 문제를 해결할 수 있습니다. LM Studio 또는 Ollama를 사용하는 것을 추천합니다.
+Ollama 설치 및 실행:
+# Ubuntu/Debian
+curl -fsSL https://ollama.com/install.sh | sh
+
+# 시작
+ollama serve
+
+# 모델 다운로드
+ollama pull llama3.2:3b
+ollama pull codestral:22b
+
+로컬 API 서버 구성:
+# ollama-config.yaml
+model: llama3.2:3b
+host: 0.0.0.0
+port: 11434
+
+# API 서버 시작
+ollama serve -c ollama-config.yaml
+
+#!/usr/bin/env python3
+# ai-agent.py
+
+import openai
+import os
+import json
+import argparse
+from pathlib import Path
+
+class TerminalAgent:
+    def __init__(self):
+        # 로컬 Ollama 사용
+        self.client = openai.OpenAI(
+            base_url="http://localhost:11434/v1/",
+            api_key="ollama"
+        )
+        self.model = "llama3.2:3b"
+
+    def get_context(self):
+        """현재 디렉토리의 코드 컨텍스트를 수집"""
+        context = []
+
+        # 현재 디렉토리 파일 목록
+        current_dir = Path(".")
+        for file_path in current_dir.rglob("*"):
+            if file_path.is_file() and file_path.suffix in ['.py', '.js', '.ts', '.html', '.css']:
+                try:
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                        context.append(f"File: {file_path}\n{content[:500]}...")
+                except Exception as e:
+                    context.append(f"File: {file_path} - Error reading file")
+
+        return "\n\n".join(context)
+
+    def analyze_code(self, code_snippet, task):
+        """코드 분석 및 제안"""
+        prompt = f"""
+        Analyze the following code and provide suggestions:
+        Task: {task}
+        Code:
+        {code_snippet}
+
+        Please provide:
+        1. Code quality assessment
+        2. Performance improvements
+        3. Security considerations
+        4. Best practices
+        """
+
+        response = self.client.chat.completions.create(
+            model=self.model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3
+        )
+
+        return response.choices[0].message.content
+
+def main():
+    parser = argparse.ArgumentParser(description='Terminal AI Agent')
+    parser.add_argument('--analyze', help='Analyze specific code snippet')
+    parser.add_argument('--task', help='Task description for analysis')
+    parser.add_argument('--file', help='File to analyze')
+
+    args = parser.parse_args()
+
+    agent = TerminalAgent()
+
+    if args.file:
+        with open(args.file, 'r') as f:
+            code = f.read()
+        result = agent.analyze_code(code, args.task or "Code review")
+        print(result)
+    elif args.analyze:
+        result = agent.analyze_code(args.analyze, args.task or "Code review")
+        print(result)
+    else:
+        print("Usage: python ai-agent.py --file <filename> --task 'task description'")
+        print("OR: python ai-agent.py --analyze 'code snippet' --task 'task description'")
+
+if __name__ == "__main__":
+    main()
+
+tmux 세션에서 에이전트를 사용하면 작업 흐름을 더욱 효율적으로 관리할 수 있습니다.
+# tmux 세션 생성
+tmux new-session -s ai-agent -d
+
+# 세션 내에서 에이전트 실행
+tmux send-keys -t ai-agent "python ai-agent.py --file main.py --task 'Optimize database queries'" Enter
+
+# 세션에 연결
+tmux attach -t ai-agent
+
+tmux 스크립트 (tmux-agent.sh):
+#!/bin/bash
+# tmux-agent.sh
+
+SESSION="ai-agent"
+WINDOW="code-review"
+
+# 세션 존재 여부 확인
+if ! tmux has-session -t $SESSION 2>/dev/null; then
+    tmux new-session -d -s $SESSION -n $WINDOW
+fi
+
+# 현재 작업 디렉토리에서 실행
+tmux send-keys -t $SESSION:$WINDOW "cd $(pwd) && python ai-agent.py --file $1 --task '$2'" Enter
+
+다음은 몇 가지 유용한 커스텀 도구입니다:
+코드 검색 도구 (code-search.py):
+#!/usr/bin/env python3
+import os
+import re
+from pathlib import Path
+
+class CodeSearcher:
+    def __init__(self, root_dir="."):
+        self.root_dir = Path(root_dir)
+
+    def search_functions(self, pattern):
+        """함수 정의 검색"""
+        results = []
+        for py_file in self.root_dir.rglob("*.py"):
+            with open(py_file, 'r') as f:
+                content = f.read()
+                # 함수 정의 찾기
+                func_pattern = rf'def\s+({pattern})\s*\('
+                matches = re.finditer(func_pattern, content)
+                for match in matches:
+                    line_num = content[:match.start()].count('\n') + 1
+                    results.append({
+                        'file': str(py_file),
+                        'function': match.group(1),
+                        'line': line_num
+                    })
+        return results
+
+    def search_patterns(self, pattern):
+        """일반 패턴 검색"""
+        results = []
+        for file_path in self.root_dir.rglob("*"):
+            if file_path.is_file() and file_path.suffix in ['.py', '.js', '.ts']:
+                try:
+                    with open(file_path, 'r') as f:
+                        content = f.read()
+                        matches = re.finditer(pattern, content)
+                        for match in matches:
+                            line_num = content[:match.start()].count('\n') + 1
+                            results.append({
+                                'file': str(file_path),
+                                'match': match.group(),
+                                'line': line_num
+                            })
+                except Exception:
+                    continue
+        return results
+
+# 사용법
+searcher = CodeSearcher(".")
+functions = searcher.search_functions(r"test_.*")
+print(json.dumps(functions, indent=2))
+
+Git 통합 도구 (git-tools.py):
+import subprocess
+import json
+
+class GitTools:
+    @staticmethod
+    def get_changed_files():
+        """변경된 파일 목록 가져오기"""
+        try:
+            result = subprocess.run(
+                ['git', 'diff', '--name-only', 'HEAD~1', 'HEAD'],
+                capture_output=True, text=True
+            )
+            return result.stdout.strip().split('\n') if result.stdout.strip() else []
+        except Exception as e:
+            return []
+
+    @staticmethod
+    def get_git_history():
+        """Git 히스토리 가져오기"""
+        try:
+            result = subprocess.run(
+                ['git', 'log', '--oneline', '-10'],
+                capture_output=True, text=True
+            )
+            return result.stdout.strip().split('\n')
+        except Exception as e:
+            return []
+
+# 사용법
+git_tool = GitTools()
+changed_files = git_tool.get_changed_files()
+print("Changed files:", changed_files)
+
+대규모
+📥 Get the full guide on Gumroad: https://gumroad.com/l/auto ($5)..."
+image: /img/blog/generated/implementing-a-local-llm-based-cli-ai-agent-enhancing-developer-workflows-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Implementing a Local LLM-Based CLI AI Agent: Enhancing Developer Workflows](/img/blog/generated/implementing-a-local-llm-based-cli-ai-agent-enhancing-developer-workflows-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### The Practical Need for Local AI Agents in Development
+
+As software development becomes increasingly complex, the demand for tools that enhance productivity is paramount. Local AI agents, particularly those based on large language models (LLMs), are emerging as viable solutions to streamline workflows and automate repetitive tasks. These agents can assist developers in code suggestions, debugging, and even documentation generation. However, the reliance on cloud-based AI solutions often raises significant concerns regarding data privacy, security, and operational costs. By leveraging local LLMs, developers can maintain control over their data while benefiting from AI-driven assistance.
+
+### Assessing Local LLM Solutions for Development
+
+When it comes to implementing local LLMs, developers have several options to consider, each with unique strengths. Notable platforms include Ollama, LM Studio, and open-source alternatives like OpenCode. Ollama, for instance, is renowned for its user-friendly installation process and robust model support. By running models locally, developers can ensure that sensitive data remains on-premises, which mitigates the risks associated with data breaches and unauthorized access. Furthermore, local solutions can significantly reduce costs associated with cloud API calls, making them economically attractive.
+
+### Step-by-Step Installation of Ollama
+
+To set up a local LLM-based CLI AI agent, the first step is to install Ollama. The installation process is straightforward, especially for users on Linux distributions like Ubuntu or Debian. Below are the commands required to install Ollama and set up a local LLM:
+
+```bash
+# Install Ollama
+curl -fsSL https://ollama.com/install.sh | sh
+
+# Start the Ollama server
+ollama serve
+
+# Download necessary models
+ollama pull llama3.2:3b
+ollama pull codestral:22b
+```
+
+After installation, it is critical to configure the local API server. Developers should create a configuration file named `ollama-config.yaml` to specify the model and server settings. Here’s an example configuration:
+
+```yaml
+model: llama3.2:3b
+host: 0.0.0.0
+port: 11434
+```
+
+To start the API server with this configuration, execute the following command:
+
+```bash
+ollama serve -c ollama-config.yaml
+```
+
+This setup allows the local LLM to be accessed via a defined endpoint, facilitating seamless integration into development workflows.
+
+### Developing a Basic AI Agent Script
+
+With Ollama installed and configured, developers can create a basic AI agent script. Below is a Python code snippet that demonstrates how to interact with the local LLM using the OpenAI API:
+
+```python
+#!/usr/bin/env python3
+
+import openai
+import os
+
+def main():
+    client = openai.Client(api_key=os.getenv("OPENAI_API_KEY"))
+    response = client.chat.completions.create(
+        model="gpt-4-turbo",
+        messages=[{"role": "user", "content": "Hello"}]
+    )
+    print(response.choices[0].message.content)
+
+if __name__ == "__main__":
+    main()
+```
+
+This script initializes a connection to the local LLM and sends a simple message. Developers can expand this basic framework to create more sophisticated interactions tailored to their specific needs.
+
+### Integrating AI Agents into Development Workflows with tmux
+
+To maximize productivity, integrating the AI agent into a developer’s workflow is crucial. Using `tmux`, a terminal multiplexer, allows developers to manage multiple terminal sessions efficiently. Below is an example of how to set up a `tmux` session and run the AI agent:
+
+```bash
+# Create a new tmux session
+tmux new-session -s ai-agent -d
+
+# Run the agent within the session
+tmux send-keys -t ai-agent "python ai-agent.py --file main.py --task 'Optimize database queries'" Enter
+
+# Attach to the session
+tmux attach -t ai-agent
+```
+
+This setup allows developers to run the AI agent in the background while continuing to work on other tasks in the same terminal. The ability to detach and reattach to sessions provides flexibility, enabling developers to manage their workflow without interruptions.
+
+### Customizing the AI Agent for Code Analysis
+
+One of the most powerful features of a local LLM-based AI agent is its ability to analyze code. Developers can enhance the AI agent to provide code suggestions, performance improvements, and security assessments. Below is an example of how to implement a code analysis feature:
+
+```python
+class TerminalAgent:
+    def __init__(self):
+        self.client = openai.OpenAI(
+            base_url="http://localhost:11434/v1/",
+            api_key="ollama"
+        )
+        self.model = "llama3.2:3b"
+
+    def analyze_code(self, code_snippet, task):
+        prompt = f"""
+        Analyze the following code and provide suggestions:
+        Task: {task}
+        Code:
+        {code_snippet}
+
+        Please provide:
+        1. Code quality assessment
+        2. Performance improvements
+        3. Security considerations
+        4. Best practices
+        """
+
+        response = self.client.chat.completions.create(
+            model=self.model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3
+        )
+
+        return response.choices[0].message.content
+```
+
+This method takes a code snippet and a task description as inputs, prompting the LLM to analyze the code and return actionable insights. By customizing the agent in this way, developers can leverage AI to improve their code quality significantly.
+
+### Exploring Additional Tools for Enhanced Functionality
+
+Beyond the basic functionalities of the AI agent, developers can integrate additional tools to enhance its capabilities further. For instance, a code search tool can assist in locating function definitions across a codebase. Here’s a simple implementation:
+
+```python
+class CodeSearcher:
+    def __init__(self, root_dir="."):
+        self.root_dir = Path(root_dir)
+
+    def search_functions(self, pattern):
+        results = []
+        for py_file in self.root_dir.rglob("*.py"):
+            with open(py_file, 'r') as f:
+                content = f.read()
+                func_pattern = rf'def\s+({pattern})\s*\('
+                matches = re.finditer(func_pattern, content)
+                for match in matches:
+                    line_num = content[:match.start()].count('\n') + 1
+                    results.append({
+                        'file': str(py_file),
+                        'function': match.group(1),
+                        'line': line_num
+                    })
+        return results
+```
+
+This `CodeSearcher` class allows developers to search for specific function patterns within their codebase, providing a quick way to locate and reference functions as needed.
+
+### Understanding Security Implications of Local LLMs
+
+While local LLMs offer significant advantages, developers must remain vigilant regarding security implications. Running models locally means that sensitive data never leaves the developer's machine, significantly reducing the risk of exposure. However, developers should still implement best practices, such as regularly updating models, securing API keys, and ensuring that the local environment is protected against unauthorized access. 
+
+Moreover, developers should consider the implications of model updates and the potential for introducing vulnerabilities. Keeping track of dependencies and ensuring that the latest security patches are applied is crucial for maintaining a secure development environment.
+
+### Future Considerations for AI in Development
+
+As AI technology continues to advance, the potential for local LLM-based CLI agents in development workflows will only grow. Future developments may include more sophisticated models capable of understanding complex programming paradigms, improved natural language processing capabilities, and enhanced integration with existing development tools. As these technologies evolve, developers must stay informed and adapt their workflows to leverage the full potential of AI.
+
+### Conclusion: The Path Forward with Local AI Agents
+
+Building a local LLM-based CLI AI agent can significantly enhance developer productivity while addressing critical concerns related to security and cost. By following the outlined steps, developers can create a powerful tool that integrates seamlessly into their workflows, providing intelligent assistance and insights. As the landscape of AI continues to evolve, embracing these technologies will be essential for developers looking to stay ahead in an increasingly complex development environment.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/matias_yoon_738a24cb1190f/teomineol-ai-eijeonteu-gucug-v27-1oe5)
+
+---
+
+<SocialShare title="Implementing a Local LLM-Based CLI AI Agent: Enhancing Developer Workflows" slug="implementing-a-local-llm-based-cli-ai-agent-enhancing-developer-workflows" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
