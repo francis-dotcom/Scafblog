@@ -1,0 +1,170 @@
+---
+slug: the-authority-vacuum-in-ai-control-planes-a-call-for-governance
+title: "The Authority Vacuum in AI Control Planes: A Call for Governance"
+authors: [francis]
+tags: [ai, infrastructure, governance, cloud]
+date: 2026-05-28T17:13:48.757Z
+description: "Shadow IT used to mean a SaaS subscription purchased outside the approval process. The fix was a procurement policy and a software catalog. It was an application-layer problem with a governance-layer solution. What is happening now with AI tools is not that problem. It is not a procurement problem at all. The AI control plane is sprawling across organizations because nobody classified it as infrastructure — and no approval workflow stops infrastructure that nobody recognizes as infrastructure.
+Most organizations have already deployed AI control planes. They just never classified them as infrastructure.
+This is not a model governance problem. It is an infrastructure authority problem. Model governance asks whether the right model is running for the right purpose. Infrastructure authority asks who owns the runtime layer it runs on — who governs the routing, who defines the failure domain, who owns the recovery path when the invisible inference layer breaks at 2am.
+
+The original shadow IT failure was never really about procurement. It was about operational authority. When a team ran their own file server in a closet, the problem was not the purchase order — it was that nobody owned the update cycle, the backup, the access model, or the failure response.
+The history of ungoverned infrastructure follows a consistent pattern across three generations. Shadow IT in the on-premises era: SaaS tools procured outside IT, living at the application layer, with blast radius contained to that team's workflows. Cloud sprawl in the hybrid era: infrastructure provisioned outside the approved catalog, living at the provisioning layer, with blast radius extending to cost and security posture. AI control plane sprawl in the current era: inference runtime deployed outside operational authority, living at the infrastructure layer, with blast radius that compounds structurally across every system touching it.
+Each generation moved the ungoverned surface one layer deeper into the stack. Each generation produced a failure mode the previous generation's governance model was not designed to catch. Neither procurement policies nor cloud governance frameworks catch AI control plane sprawl, because what is being deployed is not a tool in a catalog. It is invisible infrastructure.
+When a platform team, an application team, or a product team "deploys an AI tool," what actually goes into production is a stack of infrastructure decisions, most of which were never made explicitly:
+An inference routing layer that selects models, manages fallback chains, and applies cost-tier logic. An authentication and authorization boundary — or the absence of one — that determines what the inference layer can access and on whose behalf. An observability pipeline that either captures inference telemetry or does not. A prompt and context management layer that handles stateful session logic, retrieval augmentation, and context window behavior. In agentic deployments, an agent orchestration runtime that chains tool calls, manages execution sequences, and decides what runs next. A cost and quota enforcement layer — or none. A retry and fallback model that governs behavior under partial failure.
+Each of these is an infrastructure decision. Collectively, they are an AI control plane — the layer that determines what the inference infrastructure does, how it changes, and who has authority to make it change. None of them appear in a procurement catalog. All of them are live in production.
+
+
+
+
+Dimension
+Shadow IT (Then)
+Shadow AI Control Plane (Now)
+
+
+
+
+Governance surface
+Software procurement catalog
+Inference runtime, routing, and orchestration layer
+
+
+Failure owner
+Application team by default
+Nobody — no defined operational boundary
+
+
+Blast radius
+Localized — application-scoped, isolated
+Compositional — runtime-chained, cross-system, compounding
+
+
+Observability
+Missing from tool, visible at network/cost layer
+Missing from inference layer — invisible during failure
+
+
+Operational authority
+Implicitly owned by buying team
+Undefined — no named infrastructure owner
+
+
+Remediation path
+Procurement policy + software catalog
+Architectural intervention — authority model must be defined
+
+
+
+The blast radius column is where the analogy holds most clearly — and where the stakes diverge most sharply. Shadow SaaS failures were localized. AI control plane failures are compositional. One broken routing layer can simultaneously corrupt model selection logic, alter authorization behavior, spike latency to downstream automation, eliminate observability during the failure window, and produce cost anomalies that take days to reconstruct.
+
+A control plane is the layer that determines what the infrastructure does, how it changes, and who has authority to make it change. That definition applies to the Kubernetes API server. It applies to vCenter. It applies to your CI/CD pipeline. And it applies to the inference routing, orchestration, and policy layer that governs AI workloads in production — the AI control plane — with the same architectural force.
+When an inference routing layer is deployed without operational ownership, it is not just a tool without a ticket. It is a control plane without an authority model. The console-as-shadow-control-plane problem that affects every infrastructure platform applies here at full strength: the surface that determines system behavior has been handed to an execution environment with no governance boundary.
+Most AI control planes also depend on non-human identity chains the infrastructure team does not govern. API keys brokered between services, delegated authorization across model providers, token chains passed through agent execution sequences, machine identities with inference permissions that no human reviewed. This identity surface is embedded inside the AI control plane, not adjacent to it.
+The Runtime Authority Vacuum — the condition where inference infrastructure is operationally active but has no defined authority model for governance, observability, continuity, or failure ownership — manifests most visibly across three surfaces:
+Inference routing. The model selection, fallback chain, and cost-tier routing logic that determines which inference endpoint handles each request. This layer is typically written into application code, owned by a product team, and deployed with no infrastructure review. When it fails silently, a cost-routing fallback changes model behavior in production with no alert, no signal, and no incident record.
+Agent orchestration. The runtime that chains tool calls, manages context windows, and decides what executes next. When an orchestration layer loops retries against downstream APIs without a circuit breaker, it produces cascading execution behavior across every API in the chain — with latency and cost spikes that look like upstream load until the execution trace is reconstructed manually. An execution trace that, in most current deployments, does not exist.
+Observability — or its absence. Without a governed inference observability layer, the AI infrastructure stack has no failure signal, no cost signal, and no security signal during an incident. When something breaks, the incident response begins with the question every infrastructure team dreads: can we reconstruct what happened?
+Diagnostic: "If your AI inference layer went dark at 2am, which team would own the incident — and do they have the telemetry to reconstruct what happened?"
+Shadow IT got fixed with procurement policies because the ungoverned surface was at the application layer. Policies govern intent. They work when the problem is an application being used outside the approved catalog. They do not work when the problem is an infrastructure layer with no defined ownership, no observability, and no failure model.
+An architectural remediation for AI control plane sprawl requires four interventions: naming an operational owner for each inference control plane surface; building observability into the routing and agent layers before relying on them in production; defining failure domains explicitly before the first incident forces the question; and treating prompt and context management as stateful infrastructure, not application configuration.
+When AI agents become the execution layer — making decisions, calling tools, triggering downstream workflows — the AI control plane is no longer just inference infrastructure. It is operational infrastructure, and the authority model for an agentic system that can modify production state is an infrastructure authority question, not a model governance question.
+AI Gravity & Placement Engine — model the placement and routing logic embedded in your current AI infrastructure.
+Organizations do not have an AI tool problem. They have a Runtime Authority Vacuum — an operationally active AI control plane with no defined authority model for governance, observability, continuity, or failure ownership. The tools are real. The infrastructure is real. The authority is absent.
+The reason this is harder to address than shadow IT is not technical complexity. It is that the ungoverned surface is invisible by default. Shadow SaaS was visible on invoices, in browser history, in network traffic. The AI control plane — the routing layer, the orchestration runtime, the prompt management logic, the non-human identity chain — does not show up in any of those places. It is visible only when something breaks and the incident response team discovers they cannot reconstruct what happened because the observability layer was never built for infrastructure nobody classified as infrastructure.
+An AI control plane without operational ownership is not innovation. It is unmanaged infrastructure — and unmanaged infrastructure does not become managed infrastructure through policy. It becomes managed infrastructure when someone defines the authority model, builds the observability layer, and carries the pager.
+The Console Is the Shadow Control Plane — Auth Layer 2: ungoverned execution surfaces as de facto control planes
+Agentic AI Has a Control Plane Problem — when AI agents acquire operational infrastructure authority
+Inference Observability: Why You Don't See the Cost Spike Until It's Too Late — the telemetry gap that makes inference incidents unrecoverable
+The Model Answered. Nobody Asked Who Authorized That. — authorization at the LLM execution boundary
+Your CI/CD Pipeline Is Your Real Infrastructure Control Plane — the control plane framing applied to the deployment layer
+Cisco's acquisition of Astrix Security — non-human identity and AI agent security as emerging infrastructure governance
+Originally published at rack2cloud.com..."
+image: /img/blog/generated/the-authority-vacuum-in-ai-control-planes-a-call-for-governance-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![The Authority Vacuum in AI Control Planes: A Call for Governance](/img/blog/generated/the-authority-vacuum-in-ai-control-planes-a-call-for-governance-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### The Invisibility of AI Control Planes
+
+As organizations increasingly integrate artificial intelligence (AI) into their operations, they often overlook the critical infrastructure that supports these technologies: the AI control plane. Unlike traditional shadow IT, where applications are procured outside of established channels, AI control planes operate at a deeper infrastructure level, often without formal governance or oversight. This lack of visibility leads to a situation where AI control planes become "invisible infrastructure," making it difficult for organizations to manage their operational authority effectively.
+
+### Defining the AI Control Plane and Its Components
+
+An AI control plane comprises several integral components, including inference routing layers, authentication boundaries, observability pipelines, and orchestration runtimes. Each of these elements plays a crucial role in determining how AI models are deployed, managed, and monitored. For instance, the inference routing layer is responsible for selecting the appropriate AI model and managing fallback logic, while the observability pipeline captures telemetry data to monitor system performance. When these components lack defined ownership, organizations face significant risks, as failures can propagate silently through the infrastructure, making it challenging to identify and rectify issues.
+
+### The Runtime Authority Vacuum: A New Governance Challenge
+
+The concept of a "Runtime Authority Vacuum" arises when there is no clear operational authority over the AI control plane. This vacuum can lead to chaotic decision-making processes, where critical actions are taken without a comprehensive understanding of their implications. For example, if an inference routing layer fails without alerting any responsible team, it can lead to incorrect model selections and operational disruptions. The absence of defined ownership means that no team is accountable for the performance, reliability, and security of the AI systems, exacerbating the risks associated with ungoverned infrastructures.
+
+### Historical Context: From Shadow IT to AI Control Plane Sprawl
+
+The evolution from shadow IT to AI control plane sprawl reflects a broader trend in IT governance. Initially, shadow IT involved unsanctioned applications that posed security vulnerabilities. As organizations began to adopt cloud technologies, the scope of ungoverned technology expanded to include cloud resources provisioned outside approved catalogs. Today, AI control planes represent the next phase of this challenge, where the ungoverned surface has penetrated deeper into the stack, affecting foundational infrastructure decisions. Each iteration of ungoverned technology has introduced new failure modes that prior governance models were ill-equipped to address, underscoring the need for a tailored approach to governance that considers the unique complexities of AI systems.
+
+### Real-World Examples of Operational Authority Failures
+
+Several organizations have faced significant operational challenges due to the absence of defined authority over their AI control planes. For instance, a leading healthcare provider deployed an AI model for patient diagnosis without establishing clear ownership of the inference routing layer. When the model began to produce inaccurate diagnoses, the lack of accountability hindered the organization’s ability to respond quickly, resulting in delayed patient care and legal repercussions. Similarly, a large retail company experienced substantial revenue losses when an AI-driven pricing model malfunctioned due to undefined governance, leading to incorrect pricing displayed to customers. These examples highlight the critical need for organizations to establish operational authority and governance frameworks around their AI infrastructures.
+
+### The Cascading Risks of Ungoverned AI Control Planes
+
+The risks associated with ungoverned AI control planes are multifaceted and can have cascading effects across the entire organization. For example, a failure in the inference routing layer can lead to incorrect model selections, increased latency, and security vulnerabilities. Moreover, the absence of observability means that organizations may struggle to diagnose issues when they arise, often leading to prolonged outages or degraded performance. Without the ability to trace back through the system to identify the root cause of a failure, organizations may find themselves ill-prepared for incident response, further compounding operational challenges.
+
+### Strategies for Establishing Operational Authority in AI Deployments
+
+To mitigate the risks posed by ungoverned AI control planes, organizations must implement strategies that establish clear operational authority. This begins with appointing an operational owner for each component of the AI control plane, ensuring accountability for performance and reliability. Additionally, organizations should prioritize building observability into their AI infrastructures. This involves implementing telemetry systems that capture key metrics and logs, allowing teams to monitor the health of their AI systems in real time. Defining failure domains explicitly before incidents occur can also help organizations understand the potential impact of failures and develop appropriate response plans.
+
+### Implementing Observability: A Critical Necessity
+
+Observability is vital for effective governance of AI control planes. Without it, organizations cannot adequately monitor the performance of their AI systems or respond to incidents in a timely manner. Building an observability pipeline that captures relevant telemetry data from the AI control plane is essential for understanding system behavior and diagnosing issues. This includes tracking metrics such as latency, error rates, and resource utilization. By implementing robust observability practices, organizations can gain insights into their AI infrastructures, enabling them to make informed decisions and respond quickly to emerging challenges.
+
+### The Importance of Defining Failure Domains
+
+Defining failure domains is crucial for effective governance of AI control planes. A failure domain refers to the scope of impact when a component of the AI infrastructure fails. By clearly outlining these domains, organizations can better understand the potential consequences of failures and develop targeted mitigation strategies. For example, if an inference routing layer fails, knowing which downstream systems are affected allows teams to prioritize their response efforts and minimize operational disruptions. This proactive approach to failure management is essential for maintaining the integrity and reliability of AI systems.
+
+### Case Study: Successful Governance Implementation
+
+A notable example of effective governance in AI control planes comes from a large financial institution that deployed an AI system for fraud detection. Initially, the deployment was managed by a product team without clear operational authority, resulting in numerous incidents where the AI model produced false positives. After experiencing significant operational disruptions, the organization recognized the need for governance. They established a dedicated AI governance team responsible for overseeing the AI control plane, defining operational boundaries, implementing observability measures, and creating incident response protocols. This strategic shift improved the organization’s ability to manage AI-related risks and enhanced the overall reliability of its fraud detection system.
+
+### Conclusion: The Path to Effective AI Governance
+
+As organizations continue to embrace AI technologies, the need for defined operational authority and governance in AI control planes becomes increasingly critical. By recognizing AI control planes as essential infrastructure and implementing strategies to establish ownership, build observability, and define failure domains, organizations can mitigate risks and enhance their operational resilience. The journey toward effective AI governance requires not only technical solutions but also a cultural shift within organizations to prioritize accountability and oversight in the deployment of AI systems. By taking these steps, organizations can unlock the full potential of AI while safeguarding their operations against the risks associated with ungoverned infrastructures.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/ntctech/the-ai-control-plane-is-becoming-the-new-shadow-it-46fh)
+
+---
+
+<SocialShare title="The Authority Vacuum in AI Control Planes: A Call for Governance" slug="the-authority-vacuum-in-ai-control-planes-a-call-for-governance" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
