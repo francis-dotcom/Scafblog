@@ -1,0 +1,479 @@
+---
+slug: enhancing-operational-visibility-implementing-custom-source-specs-for-internal-apis-in-devops
+title: "Enhancing Operational Visibility: Implementing Custom Source Specs for Internal APIs in DevOps"
+authors: [francis]
+tags: [devops, backend, api, microservices]
+date: 2026-05-31T08:39:23.234Z
+description: "⚔️ This post is my submission for the "Chart New Waters" bounty in the Pirates of the Coral-bean hackathon by WeMakeDevs.
+Source Spec: payment-api.yaml
+When building an Enterprise Agent, there's one massive architectural challenge: enterprises don't just use GitHub, Sentry, and Slack.
+A real enterprise relies on hundreds of internal, private microservices — custom payment gateways, user management APIs, internal inventory systems, health monitoring dashboards. These services:
+❌ Have no public API documentation
+
+❌ Are not listed in any marketplace
+
+❌ Have no native Coral connector
+
+❌ Sit behind VPNs and private networks
+
+
+
+If your incident correlation engine can only query public SaaS tools, you're missing half the picture.
+🔥 This is where Coral's Custom Source Specs save the day. One YAML file turns any REST API into a SQL table.
+You might wonder: "If the payment API already sends errors to Sentry, and Coral already reads Sentry, why do we need to query the API directly?"
+The answer highlights a critical DevOps distinction:
+Passive Monitoring (Sentry):
+  Error occurs → Sentry captures snapshot → "What BROKE 5 min ago?"
+
+Active Monitoring (Custom Source):
+  Coral queries /api/health → Real-time response → "Is the API UP right now?"
+
+
+
+
+
+Type
+Tool
+Question It Answers
+When
+
+
+
+
+Passive
+Sentry
+"What broke 5 minutes ago?"
+After the fact
+
+
+Active
+Custom Source Spec
+"Is the service alive RIGHT NOW?"
+Real-time
+
+
+
+During a major outage at 2AM, a DevOps engineer's first question is: "Is the API completely dead, or is it recovering?" Sentry can't answer that — it only logs past errors. The custom source can.
+With our spec, the Incident Investigator can execute powerful logic:
+"I see the database error in Sentry from 5 minutes ago. Let me instantly query payment_api.health to check if the service is currently online and what the response time is."
+Think of a custom source spec as a translator between SQL and HTTP.
+
+The YAML file maps:
+SQL table name → HTTP endpoint
+
+
+SQL columns → JSON response fields
+
+
+SQL query → HTTP request (method, path, headers)
+From the user's perspective, they just write SQL. Coral handles the HTTP call, JSON parsing, and column mapping automatically.
+Our demo-payment-api is a Flask microservice with these endpoints:
+
+
+
+Endpoint
+Returns
+
+
+
+
+GET /api/health
+Service health, response times, endpoint status
+
+
+GET /api/payments
+List of processed and pending payments
+
+
+
+In a real enterprise, this could be any internal microservice — a user management API, an inventory system, a billing platform. The pattern is the same.
+Every custom source needs a name, version, and the Coral DSL version:
+name: payment_api          # This becomes the SQL schema: payment_api.health
+version: 0.1.0
+dsl_version: 3             # Current Coral DSL version
+backend: http              # We're connecting to an HTTP API
+description: "Internal Payment API for processing and tracking mock payments"
+base_url: "http://localhost:5001"   # Where the API lives
+
+ℹ️ The name is critical — it becomes the SQL schema prefix. After registration, you'll query tables as payment_api.health, payment_api.payments, etc.
+Even internal APIs need authentication. We configure Bearer token auth:
+inputs:
+  PAYMENT_API_TOKEN:
+    kind: secret
+    hint: "Bearer token for the Payment API"
+
+auth:
+  type: HeaderAuth
+  headers:
+    - name: Authorization
+      from: template
+      template: "Bearer {{input.PAYMENT_API_TOKEN}}"
+
+The inputs section tells Coral to ask for a PAYMENT_API_TOKEN environment variable when adding the source. This keeps secrets out of the YAML file itself.
+This is the magic part. For each API endpoint, we create a SQL table definition:
+Table 1: health — Maps GET /api/health
+The API returns JSON like:
+[
+  {"endpoint": "/api/health", "status": "healthy", "response_time_ms": 12, "timestamp": "2026-05-29T18:00:00Z"},
+  {"endpoint": "/api/payments", "status": "healthy", "response_time_ms": 45, "timestamp": "2026-05-29T18:00:00Z"}
+]
+
+We map it in YAML:
+tables:
+  - name: health
+    description: "Payment service health status and uptime metrics"
+    request:
+      method: GET
+      path: /api/health
+    response:
+      rows_path: []          # Response IS the array (no wrapper key)
+    columns:
+      - name: endpoint
+        type: Utf8
+        expr: { kind: path, path: [endpoint] }
+      - name: status
+        type: Utf8
+        expr: { kind: path, path: [status] }
+      - name: response_time_ms
+        type: Int64
+        expr: { kind: path, path: [response_time_ms] }
+      - name: timestamp
+        type: Utf8
+        expr: { kind: path, path: [timestamp] }
+
+Key details:
+rows_path: [] means the JSON response IS the array (not wrapped in a key like {"data": [...]})
+Each column's expr: { kind: path, path: [...] } extracts a specific JSON field
+type maps JSON types to SQL types (Utf8 = string, Int64 = integer, Float64 = decimal)
+Table 2: payments — Maps GET /api/payments
+  - name: payments
+    description: "List of processed and pending payments"
+    request:
+      method: GET
+      path: /api/payments
+    response:
+      rows_path: [data]      # Rows are inside the "data" key
+    columns:
+      - name: id
+        type: Utf8
+        expr: { kind: path, path: [id] }
+      - name: amount
+        type: Float64
+        expr: { kind: path, path: [amount] }
+      - name: currency
+        type: Utf8
+        expr: { kind: path, path: [currency] }
+      - name: status
+        type: Utf8
+        expr: { kind: path, path: [status] }
+      - name: customer
+        type: Utf8
+        expr: { kind: path, path: [customer] }
+
+Notice rows_path: [data] — this tells Coral the rows are nested inside a "data" key in the JSON response.
+Good source specs include test queries that Coral runs during registration to validate everything works:
+test_queries:
+  - SELECT status, endpoint FROM payment_api.health LIMIT 1
+  - SELECT id, amount, status FROM payment_api.payments LIMIT 1
+
+# 1. Lint the YAML to check for syntax errors
+coral source lint coral-config/payment-api.yaml
+
+# 2. Add the source (providing the auth token)
+PAYMENT_API_TOKEN=mock_token_123 coral source add --file coral-config/payment-api.yaml
+
+# 3. Query it like a database!
+coral sql "SELECT endpoint, status, response_time_ms FROM payment_api.health"
+
+✅ From this moment on, Coral treats your private microservice exactly the same as GitHub or Sentry.
+Here's the full payment-api.yaml:
+name: payment_api
+version: 0.1.0
+dsl_version: 3
+backend: http
+description: "Internal Payment API for processing and tracking mock payments"
+base_url: "http://localhost:5001"
+
+inputs:
+  PAYMENT_API_TOKEN:
+    kind: secret
+    hint: "Bearer token for the Payment API"
+
+auth:
+  type: HeaderAuth
+  headers:
+    - name: Authorization
+      from: template
+      template: "Bearer {{input.PAYMENT_API_TOKEN}}"
+
+test_queries:
+  - SELECT status, endpoint FROM payment_api.health LIMIT 1
+  - SELECT id, amount, status FROM payment_api.payments LIMIT 1
+
+tables:
+  - name: health
+    description: "Payment service health status and uptime metrics"
+    request:
+      method: GET
+      path: /api/health
+    response:
+      rows_path: []
+    columns:
+      - name: endpoint
+        type: Utf8
+        expr: { kind: path, path: [endpoint] }
+      - name: status
+        type: Utf8
+        expr: { kind: path, path: [status] }
+      - name: response_time_ms
+        type: Int64
+        expr: { kind: path, path: [response_time_ms] }
+      - name: timestamp
+        type: Utf8
+        expr: { kind: path, path: [timestamp] }
+
+  - name: payments
+    description: "List of processed and pending payments"
+    request:
+      method: GET
+      path: /api/payments
+    response:
+      rows_path: [data]
+    columns:
+      - name: id
+        type: Utf8
+        expr: { kind: path, path: [id] }
+      - name: amount
+        type: Float64
+        expr: { kind: path, path: [amount] }
+      - name: currency
+        type: Utf8
+        expr: { kind: path, path: [currency] }
+      - name: status
+        type: Utf8
+        expr: { kind: path, path: [status] }
+      - name: customer
+        type: Utf8
+        expr: { kind: path, path: [customer] }
+
+With this custom source, the DevOps Incident Investigator can now:
+Query internal API health in real-time:
+
+
+
+
+   SELECT endpoint, status, response_time_ms FROM payment_api.health
+
+Cross-reference with Sentry errors:
+
+
+
+
+   -- "Is the payment API healthy after this Sentry error appeared?"
+   SELECT h.status, h.response_time_ms, i.title AS error
+   FROM payment_api.health h, sentry.issues i
+   WHERE i.level = 'error'
+   LIMIT 5
+
+Extend to ANY internal service:
+The same YAML pattern works for user-management APIs, inventory systems, billing platforms — any service with an HTTP endpoint.
+
+Every enterprise has internal tools that are:
+Private — behind VPNs, not publicly accessible
+Undocumented — no OpenAPI spec, no marketplace listing
+Critical — the payment gateway, the user auth service, the config management system
+Without custom source specs, an incident investigator is blind to these services. With them, any REST API becomes a SQL table in minutes.
+The pattern is always the same:
+Write a YAML file mapping endpoints → tables
+Run coral source add --file your-spec.yaml
+
+Query with SQL: SELECT * FROM your_api.your_table
+
+
+
+One YAML file. Any API. Full SQL access.
+# 1. Clone both repos
+git clone https://github.com/khadirullah/devops-incident-investigator
+git clone https://github.com/khadirullah/demo-payment-api
+
+# 2. Start the payment API
+cd demo-payment-api && pip install -r requirements.txt && python3 app.py
+# Running on http://localhost:5001
+
+# 3. Register the custom source with Coral
+cd ../devops-incident-investigator
+PAYMENT_API_TOKEN=mock_123 coral source add --file coral-config/payment-api.yaml
+
+# 4. Query your internal API with SQL!
+coral sql "SELECT * FROM payment_api.health"
+coral sql "SELECT id, amount, status FROM payment_api.payments LIMIT 5"
+
+ℹ️ Official Guide: How to write a custom source spec →
+🔗 View on GitHub
+Built as part of the DevOps Incident Investigator for the Pirates of the Coral-bean hackathon by WeMakeDevs.
+#ChartNewWaters #Coral #DevOps #CustomSourceSpec #PiratesOfTheCoralBean
+Originally published on khadirullah.com..."
+image: /img/blog/generated/enhancing-operational-visibility-implementing-custom-source-specs-for-internal-apis-in-devops-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Enhancing Operational Visibility: Implementing Custom Source Specs for Internal APIs in DevOps](/img/blog/generated/enhancing-operational-visibility-implementing-custom-source-specs-for-internal-apis-in-devops-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### The Complexity of Monitoring Internal APIs
+
+In today's enterprise environments, monitoring internal APIs presents significant challenges. Unlike public APIs, internal services often lack documentation, are not listed in any marketplace, and may be obscured by VPNs and private networks. This obscurity can lead to blind spots in incident response, where DevOps teams struggle to obtain real-time insights into service health and operational metrics. The reliance on traditional monitoring tools that focus on passive error reporting can exacerbate these issues, leaving teams unable to quickly diagnose and resolve incidents.
+
+### Limitations of Passive Monitoring Tools
+
+Passive monitoring tools like Sentry capture errors after they occur, providing a snapshot of what went wrong but failing to offer insights into the current state of services. For instance, when an outage occurs, a DevOps engineer's first question is often, "Is the API completely down, or is it recovering?" Passive tools can only answer the former, as they log historical data without real-time context. This limitation can lead to prolonged downtime and increased mean time to resolution (MTTR) as teams scramble to piece together the current state of their systems.
+
+### The Promise of Custom Source Specs
+
+Coral's Custom Source Specs offer a transformative solution to these challenges by enabling DevOps teams to query internal APIs as if they were SQL tables. This capability allows for active monitoring, where teams can obtain real-time health checks and operational metrics directly from their APIs. By leveraging a simple YAML configuration, teams can define how to interact with internal services, bridging the gap between traditional monitoring and real-time operational insights.
+
+### Crafting a Custom Source Spec YAML File
+
+Creating a custom source spec begins with a YAML file that defines the API endpoints, authentication methods, and data mappings. The structure of the YAML file is crucial; it must clearly delineate the API's endpoints and how they correspond to SQL tables. For example, a basic structure includes metadata such as the name, version, and description of the API, along with the base URL where the API is hosted. Below is an illustrative snippet of a YAML file for a payment API:
+
+```yaml
+name: payment_api
+version: 0.1.0
+dsl_version: 3
+backend: http
+description: "Internal Payment API for processing and tracking mock payments"
+base_url: "http://localhost:5001"
+```
+
+### Defining Authentication for Secure Access
+
+Security is paramount when dealing with internal APIs, especially those that require authentication. In the YAML file, teams can specify how to authenticate requests, such as using a Bearer token. This is done by defining an `inputs` section that prompts for sensitive information without hardcoding it into the YAML file. Here’s how to configure Bearer token authentication:
+
+```yaml
+inputs:
+  PAYMENT_API_TOKEN:
+    kind: secret
+    hint: "Bearer token for the Payment API"
+
+auth:
+  type: HeaderAuth
+  headers:
+    - name: Authorization
+      from: template
+      template: "Bearer {{input.PAYMENT_API_TOKEN}}"
+```
+
+### Mapping API Responses to SQL Tables
+
+Once the authentication is set, the next step is to define how API responses map to SQL tables. Each endpoint can be represented as a separate table in SQL, with columns corresponding to the fields in the API's JSON response. For example, if the `/api/health` endpoint returns service health metrics, the corresponding YAML configuration might look like this:
+
+```yaml
+tables:
+  - name: health
+    description: "Payment service health status and uptime metrics"
+    request:
+      method: GET
+      path: /api/health
+    response:
+      rows_path: []
+    columns:
+      - name: endpoint
+        type: Utf8
+        expr: { kind: path, path: [endpoint] }
+      - name: status
+        type: Utf8
+        expr: { kind: path, path: [status] }
+      - name: response_time_ms
+        type: Int64
+        expr: { kind: path, path: [response_time_ms] }
+      - name: timestamp
+        type: Utf8
+        expr: { kind: path, path: [timestamp] }
+```
+
+### Validating the Source Spec with Test Queries
+
+To ensure the custom source spec is functioning correctly, it is beneficial to include test queries that Coral will run during the registration process. These queries validate that the API endpoints return the expected data formats. For instance, you might include:
+
+```yaml
+test_queries:
+  - SELECT status, endpoint FROM payment_api.health LIMIT 1
+  - SELECT id, amount, status FROM payment_api.payments LIMIT 1
+```
+
+### Registering the Custom Source with Coral
+
+Once the YAML file is complete, the next step is to register the custom source with Coral. This process involves providing the authentication token and executing a command that adds the source to Coral's monitoring framework. Here’s how to do it:
+
+```bash
+PAYMENT_API_TOKEN=mock_token_123 coral source add --file coral-config/payment-api.yaml
+```
+
+### Executing SQL Queries on Internal APIs
+
+With the custom source registered, DevOps teams can now execute SQL queries against their internal APIs. For example, a simple query to check the health of the payment API could look like this:
+
+```sql
+SELECT endpoint, status, response_time_ms FROM payment_api.health;
+```
+
+This query provides immediate insights into the service's operational status, allowing teams to react quickly to any issues.
+
+### Real-World Application: Cross-Referencing API Health with Error Logs
+
+One of the most powerful features of custom source specs is the ability to cross-reference data from various sources. For instance, teams can query the health of an API in real-time and correlate it with error logs from Sentry. An example SQL query might be:
+
+```sql
+SELECT h.status, h.response_time_ms, i.title AS error
+FROM payment_api.health h, sentry.issues i
+WHERE i.level = 'error'
+LIMIT 5;
+```
+
+This query enables incident investigators to determine whether the payment API was healthy at the time an error was logged, providing crucial context for troubleshooting.
+
+### The Broader Implications of Custom Source Specs
+
+The introduction of custom source specs fundamentally changes the landscape of incident management in enterprise environments. By enabling real-time monitoring of internal APIs, teams can significantly reduce MTTR and improve operational efficiency. This capability is especially vital in complex microservices architectures where multiple services interact, and issues can arise from any number of components.
+
+### Conclusion: The Future of API Monitoring in DevOps
+
+In conclusion, custom source specs represent a critical advancement for DevOps teams tasked with monitoring internal APIs. By transforming REST APIs into SQL tables, teams gain unprecedented visibility into their services, allowing for proactive incident management and enhanced operational efficiency. As enterprises continue to evolve their infrastructures, the ability to monitor and respond to issues in real-time will be paramount to maintaining service reliability and performance.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/khadirullah/charting-new-waters-building-a-custom-coral-source-spec-for-internal-enterprise-apis-160e)
+
+---
+
+<SocialShare title="Enhancing Operational Visibility: Implementing Custom Source Specs for Internal APIs in DevOps" slug="enhancing-operational-visibility-implementing-custom-source-specs-for-internal-apis-in-devops" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
