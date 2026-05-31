@@ -1,0 +1,484 @@
+---
+slug: streamlining-cross-platform-ai-code-review-with-go-a-pragmatic-approach
+title: "Streamlining Cross-Platform AI Code Review with Go: A Pragmatic Approach"
+authors: [francis]
+tags: [ai, cloud, systems, automation]
+date: 2026-05-31T17:14:13.228Z
+description: "Hello, I'm Shrijith Venkatramana. I'm building git-lrc, an AI code reviewer that runs on every commit. Star Us to help devs discover the project. Do give it a try and share your feedback for improving the product.
+Claude Code hooks are powerful. They let you intercept tool execution, enforce policies, run validations, collect telemetry, or integrate external systems before and after Claude performs actions.
+Unfortunately, the moment you try to distribute hooks to real developers, you run into a problem:
+Some developers use Linux
+Some use macOS
+Some use Windows PowerShell
+Some use Git-Bash
+Some use WSL
+Some use combinations of all of the above
+A simple shell script quickly turns into a compatibility nightmare.
+After experimenting with several approaches, I arrived at a surprisingly effective pattern:
+Use thin platform-specific wrappers whose only job is downloading and launching a Go binary. Put all real logic inside the Go executable.
+This gives you the convenience of native hooks while keeping the implementation portable, testable, and maintainable.
+Let's walk through the architecture.
+Suppose you build a hook that validates commands before Claude executes them.
+The naive implementation might look like this:
+#!/usr/bin/env bash
+
+python validate.py
+
+Looks fine until:
+Python isn't installed
+The user runs PowerShell
+The user runs Git-Bash
+The user runs WSL
+Path handling differs
+Quoting rules differ
+Now you have:
+validate.sh
+validate.ps1
+validate.py
+requirements.txt
+
+And eventually:
+works-on-my-machine/
+
+The problem isn't Claude.
+The problem is that shells are operating-system specific.
+Instead, think of the hook as a bootstrapper.
+Claude Hook
+     |
+     v
+Thin Wrapper
+     |
+     v
+Download Go Binary (if needed)
+     |
+     v
+Execute Go Binary
+     |
+     v
+Actual Hook Logic
+
+The wrapper becomes extremely small.
+The Go executable contains:
+Policy checks
+Configuration loading
+JSON parsing
+API calls
+Logging
+Cross-platform filesystem access
+Everything else
+Once the binary exists locally, future hook invocations bypass installation entirely.
+The wrapper checks whether the executable exists.
+If not:
+Detect platform
+Download correct binary
+Make executable if needed
+Run binary
+Example release layout:
+releases/
+├── hook-linux-amd64
+├── hook-linux-arm64
+├── hook-darwin-amd64
+├── hook-darwin-arm64
+├── hook-windows-amd64.exe
+└── hook-windows-arm64.exe
+
+A GitHub Releases page works perfectly for hosting.
+Example Bash wrapper:
+#!/usr/bin/env bash
+
+set -e
+
+HOOK_DIR="$HOME/.claude-hooks"
+BIN="$HOOK_DIR/hook"
+
+mkdir -p "$HOOK_DIR"
+
+if [ ! -f "$BIN" ]; then
+    curl -L \
+      https://example.com/hook-linux-amd64 \
+      -o "$BIN"
+
+    chmod +x "$BIN"
+fi
+
+exec "$BIN" "$@"
+
+The wrapper is tiny and almost never changes.
+Windows users deserve first-class support.
+PowerShell wrapper:
+$HookDir = "$env:USERPROFILE\.claude-hooks"
+$Binary = "$HookDir\hook.exe"
+
+New-Item `
+  -ItemType Directory `
+  -Force `
+  -Path $HookDir | Out-Null
+
+if (!(Test-Path $Binary)) {
+
+    Invoke-WebRequest `
+        -Uri "https://example.com/hook-windows-amd64.exe" `
+        -OutFile $Binary
+}
+
+& $Binary $args
+exit $LASTEXITCODE
+
+The important detail is that PowerShell's quoting rules differ significantly from Bash.
+By moving all logic into Go, you avoid maintaining duplicate implementations.
+This is where things become interesting.
+Many Windows developers don't actually run PowerShell.
+They run:
+WSL Ubuntu
+Git-Bash
+MSYS2
+Cygwin
+Each environment reports itself differently.
+A good Go bootstrapper can detect them.
+Example:
+func detectEnvironment() string {
+
+    if runtime.GOOS != "windows" {
+        return "native"
+    }
+
+    if os.Getenv("WSL_DISTRO_NAME") != "" {
+        return "wsl"
+    }
+
+    if os.Getenv("MSYSTEM") != "" {
+        return "git-bash"
+    }
+
+    return "powershell"
+}
+
+You can then adjust behavior.
+For example:
+switch detectEnvironment() {
+
+case "wsl":
+    // Linux paths
+
+case "git-bash":
+    // Mixed Windows/POSIX paths
+
+case "powershell":
+    // Native Windows paths
+}
+
+This is dramatically easier than maintaining separate shell implementations.
+The Go standard library already solves most portability issues.
+Avoid hardcoded separators.
+Bad:
+path := home + "/config/settings.json"
+
+Good:
+path := filepath.Join(
+    home,
+    "config",
+    "settings.json",
+)
+
+Avoid platform assumptions.
+home, err := os.UserHomeDir()
+
+Works on:
+Linux
+macOS
+Windows
+WSL
+Finding your own binary location:
+exe, err := os.Executable()
+
+Useful when loading bundled resources.
+switch runtime.GOOS {
+
+case "windows":
+    // Windows
+
+case "linux":
+    // Linux
+
+case "darwin":
+    // macOS
+}
+
+fmt.Println(runtime.GOARCH)
+
+Possible values:
+amd64
+arm64
+386
+
+Useful for selecting downloads.
+A minimal self-updating launcher:
+package main
+
+import (
+    "io"
+    "net/http"
+    "os"
+)
+
+func download(url string, dest string) error {
+
+    resp, err := http.Get(url)
+    if err != nil {
+        return err
+    }
+    defer resp.Body.Close()
+
+    out, err := os.Create(dest)
+    if err != nil {
+        return err
+    }
+    defer out.Close()
+
+    _, err = io.Copy(out, resp.Body)
+
+    return err
+}
+
+Combined with:
+runtime.GOOS
+runtime.GOARCH
+
+you can dynamically fetch the correct binary.
+The biggest benefit isn't portability.
+It's maintainability.
+Without this pattern:
+hook.sh
+hook.ps1
+hook.py
+hook.js
+
+With this pattern:
+hook.sh      (tiny)
+hook.ps1     (tiny)
+
+hook-go/
+    all logic
+
+The wrappers rarely change.
+The Go binary evolves independently.
+Testing becomes easier.
+Distribution becomes easier.
+Versioning becomes easier.
+And most importantly, you stop fighting shell differences.
+Many engineering teams start by writing Claude hooks as shell scripts because it feels fast.
+That works for one machine.
+The moment multiple operating systems enter the picture, the complexity grows rapidly.
+A small bootstrap wrapper plus a Go executable gives you a surprisingly robust deployment model:
+Bash support
+PowerShell support
+Linux support
+macOS support
+Windows support
+WSL support
+Git-Bash support
+Single implementation of business logic
+The shell becomes a launcher.
+Go becomes the platform.
+That's usually the point where hook maintenance stops being a headache.
+How are you handling cross-platform automation today—shell scripts, Node.js, Python, or compiled binaries? I'd be interested to hear which approach has held up best as your team and environments grew.
+*AI agents write code fast. They also silently remove logic, change behavior, and introduce bugs -- without telling you. You often find out in production.
+git-lrc fixes this. It hooks into git commit and reviews every diff before it lands. 60-second setup. Completely free.*
+Any feedback or contributors are welcome! It's online, source-available, and ready for anyone to use.
+ / 
+        git-lrc
+      
+    
+| 🇩🇰 Dansk | 🇪🇸 Español | 🇮🇷 Farsi | 🇫🇮 Suomi | 🇯🇵 日本語 | 🇳🇴 Norsk | 🇵🇹 Português | 🇷🇺 Русский | 🇦🇱 Shqip | 🇨🇳 中文 |
+
+
+
+git-lrc
+Free, Micro AI Code Reviews That Run on Commit
+
+ 
+        
+
+
+
+
+AI agents write code fast. They also silently remove logic, change behavior, and introduce bugs -- without telling you. You often find out in production.
+git-lrc fixes this. It hooks into git commit and reviews every diff before it lands. 60-second setup. Completely free.
+See It In Action
+See git-lrc catch serious security issues such as leaked credentials, expensive cloud
+operations, and sensitive material in log statements
+git-lrc-intro-60s.mp4
+    
+  
+
+  
+
+  
+
+
+
+Why
+🤖 AI agents silently break things. Code removed. Logic changed. Edge cases gone. You won't notice until production.
+🔍 Catch it before it ships. AI-powered inline comments show you exactly what changed and what looks wrong.
+🔁 Build a…
+View on GitHub..."
+image: /img/blog/generated/streamlining-cross-platform-ai-code-review-with-go-a-pragmatic-approach-e94d4dd3.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Streamlining Cross-Platform AI Code Review with Go: A Pragmatic Approach](/img/blog/generated/streamlining-cross-platform-ai-code-review-with-go-a-pragmatic-approach-e94d4dd3.svg)
+
+*Photo credit: [Shrijith Venkatramana](https://dev.to/shrsv/building-truly-cross-platform-claude-code-hooks-with-go-bash-powershell-wsl-and-git-bash-1ceo)*
+
+
+### Navigating the Cross-Platform Landscape in AI Development
+
+Cross-platform development presents a significant challenge in the realm of AI systems. Developers must contend with a multitude of operating systems—Linux, macOS, Windows, and their various distributions—each introducing unique dependencies and environmental configurations. This diversity often leads to compatibility issues, particularly when integrating tools that require uniform behavior across different platforms. As AI systems increasingly rely on automated code review processes, the need for a cohesive and consistent approach becomes critical.
+
+### The Significance of Code Review Hooks in AI Systems
+
+Code review hooks are pivotal in ensuring code quality within AI systems. They facilitate the interception of code changes, enabling policy enforcement, input validation, and integration with external systems before code changes are committed. However, distributing these hooks across a variety of platforms often results in compatibility headaches. Traditional methods, primarily reliant on shell scripts, lead to a proliferation of platform-specific implementations that complicate maintenance and increase the risk of inconsistencies.
+
+### The Pitfalls of Shell Scripts in Cross-Platform Environments
+
+The reliance on shell scripts for implementing code review hooks can quickly become a maintenance nightmare. A simple validation script may require distinct versions for Bash, PowerShell, and other shells, each with its own syntax and operational semantics. This fragmentation not only complicates development but also introduces the potential for bugs and inconsistencies. As the number of supported platforms increases, the complexity of managing these scripts escalates, highlighting the need for a more robust solution.
+
+### Embracing Go as a Unified Logic Handler
+
+Utilizing Go as a central logic handler for AI code review hooks offers a promising solution to the cross-platform dilemma. By encapsulating core logic within a Go binary, developers can create lightweight platform-specific wrappers that manage environment-specific details while maintaining a consistent and portable functionality. This architecture simplifies the development process, as the Go executable can be built once and executed across different systems without modification.
+
+### Crafting Platform-Specific Wrappers for Seamless Integration
+
+The architecture of this solution involves developing minimal wrappers for each platform that serve as bootstrappers to the Go binary. For example, a Bash wrapper might resemble the following:
+
+```bash
+#!/usr/bin/env bash
+
+set -e
+
+HOOK_DIR="$HOME/.claude-hooks"
+BIN="$HOOK_DIR/hook"
+
+mkdir -p "$HOOK_DIR"
+
+if [ ! -f "$BIN" ]; then
+    curl -L \
+      https://example.com/hook-linux-amd64 \
+      -o "$BIN"
+
+    chmod +x "$BIN"
+fi
+
+exec "$BIN" "$@"
+```
+
+This Bash script checks for the existence of the Go binary and downloads it if necessary. The equivalent PowerShell wrapper would follow a similar logic but adhere to PowerShell's syntax and conventions:
+
+```powershell
+$HookDir = "$env:USERPROFILE\.claude-hooks"
+$Binary = "$HookDir\hook.exe"
+
+New-Item `
+  -ItemType Directory `
+  -Force `
+  -Path $HookDir | Out-Null
+
+if (!(Test-Path $Binary)) {
+    Invoke-WebRequest `
+        -Uri "https://example.com/hook-windows-amd64.exe" `
+        -OutFile $Binary
+}
+
+& $Binary $args
+exit $LASTEXITCODE
+```
+
+These wrappers are designed to be lightweight, primarily responsible for managing environment-specific nuances while the Go binary encapsulates the actual logic, significantly enhancing maintainability.
+
+### Managing Dependencies with Go Modules
+
+The Go ecosystem provides robust tools for dependency management, particularly through Go Modules. This feature simplifies the process of specifying and managing dependencies, which is especially advantageous in cross-platform scenarios where different platforms may have varying requirements. By ensuring that all dependencies are included within the Go binary, the risk of runtime errors due to missing dependencies is substantially reduced.
+
+### Ensuring Security When Downloading Binaries
+
+When implementing a solution that involves downloading binaries, security considerations must be paramount. Developers should employ measures such as checksums or digital signatures to verify the integrity of downloaded binaries. For instance, after downloading a binary, a checksum can be computed and compared against a known value:
+
+```go
+import (
+    "crypto/sha256"
+    "encoding/hex"
+    "io/ioutil"
+    "os"
+)
+
+func verifyChecksum(filePath, expectedChecksum string) error {
+    data, err := ioutil.ReadFile(filePath)
+    if err != nil {
+        return err
+    }
+    hash := sha256.Sum256(data)
+    computedChecksum := hex.EncodeToString(hash[:])
+    if computedChecksum != expectedChecksum {
+        return fmt.Errorf("checksum mismatch: expected %s, got %s", expectedChecksum, computedChecksum)
+    }
+    return nil
+}
+```
+
+This function reads the downloaded binary, computes its SHA-256 checksum, and compares it to the expected value, ensuring that the binary has not been tampered with during the download process.
+
+### Testing Across Diverse Environments
+
+Testing the Go executable across various environments is crucial for ensuring reliability. A well-defined testing strategy should encompass unit tests for the Go code itself, as well as integration tests that simulate the execution of the hooks in different environments. Continuous integration (CI) pipelines can automate the building and testing of the Go binary across platforms, allowing developers to catch potential issues early in the development cycle.
+
+### The Value of Maintainability in Code Review Systems
+
+One of the most significant advantages of this architecture is its maintainability. By centralizing the logic within a Go binary, developers can avoid the complexities associated with managing multiple script files across different platforms. This approach not only simplifies updates and enhancements but also reduces the likelihood of introducing bugs during modifications. The Go binary evolves independently, allowing teams to focus on improving the core functionality without the overhead of maintaining disparate scripts.
+
+### Future Directions for Cross-Platform Automation in AI Development
+
+As software development continues to evolve, the demand for efficient cross-platform automation will only increase. The approach of utilizing Go as a central logic handler for AI code review hooks represents a significant advancement in addressing the complexities of cross-platform compatibility. By adopting this model, development teams can concentrate on building robust systems without the burden of managing intricate shell script variations.
+
+### Conclusion: A Unified Approach to Cross-Platform Development
+
+In summary, integrating Go for handling the logic of AI code review hooks provides a streamlined solution to the challenges of cross-platform development. By creating thin wrappers for each platform, developers can maintain a single codebase for core functionality, significantly reducing maintenance overhead and enhancing reliability. As teams navigate the complexities of diverse operating environments, embracing this unified approach will be crucial for achieving greater efficiency and effectiveness in their development workflows.
+
+### Call to Action: Share Your Insights
+
+How does your team currently tackle cross-platform automation? Are you still relying on shell scripts, or have you explored alternatives like Go? Your experiences could offer valuable insights into the evolving landscape of cross-platform development in AI systems.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/shrsv/building-truly-cross-platform-claude-code-hooks-with-go-bash-powershell-wsl-and-git-bash-1ceo)
+
+---
+
+<SocialShare title="Streamlining Cross-Platform AI Code Review with Go: A Pragmatic Approach" slug="streamlining-cross-platform-ai-code-review-with-go-a-pragmatic-approach" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
