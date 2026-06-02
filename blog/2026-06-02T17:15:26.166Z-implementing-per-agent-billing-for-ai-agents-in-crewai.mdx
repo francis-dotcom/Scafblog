@@ -1,0 +1,1091 @@
+---
+slug: implementing-per-agent-billing-for-ai-agents-in-crewai
+title: "Implementing Per-Agent Billing for AI Agents in CrewAI"
+authors: [francis]
+tags: [ai, billing, crewai, kong]
+date: 2026-06-02T17:15:26.166Z
+description: "Setting up billing for a single AI agent is easy. The agent uses tokens, you multiply by a price, you send an invoice. Setting up billing for a CrewAI crew is more challenging. A crew has multiple agents working together. Each agent uses tokens differently. Roll them all into one number and you can't tell which agent drove the cost.
+In this tutorial, we will build per-agent token billing for a CrewAI multi-agent app. We will track token usage per agent role in CrewAI, send the usage to Kong Konnect Metering & Billing (the managed version of OpenMeter), and turn one crew run into three invoice line items, one per agent.
+Here is why this matters. In my CrewAI research crew, the Writer agent uses about twice as many tokens as the Researcher agent. A flat per-token price overcharges Researcher-heavy runs and undercharges Writer-heavy runs. Per-agent billing fixes that. Each agent gets its own meter slice, its own filter, and its own price.
+This is a common need for any multi-agent SaaS product, any team trying to monetize CrewAI agents, and any team setting up usage-based billing for AI agents. The same pattern works for LangChain agents, AutoGen crews, or any multi-agent framework that exposes per-call token usage.
+Here's how the billing looks for each agent of your CrewAI in Kong Metering and Billing, you will be able to ahcieve this by the end of this tutorial.
+
+The full app is about 200 lines of Python. Setup takes about 30 minutes end to end.
+The full reference repo: github.com/tejakummarikuntla/Billing-CrewAI-with-KongMB. Clone it if you want to skim the working code first, or follow the steps below and build it file by file.
+git clone https://github.com/tejakummarikuntla/Billing-CrewAI-with-KongMB.git
+cd Billing-CrewAI-with-KongMB
+
+
+Every LLM call produces two events. One for the prompt (input) tokens, one for the completion (output) tokens. Both events carry the agent_role. Kong's meter groups token usage per agent. Each feature pulls one agent's slice out of the meter. The plan attaches a per-token price to each feature. The invoice ends up with three line items, one per agent.
+This tutorial has two parts: a Python app that uses CrewAI, and a set of resources you configure in Kong Konnect Metering & Billing.
+A research crew with three agents. Researcher, Analyst, and Writer. Each agent has its own role, goal, and backstory. They run sequentially: Researcher gathers facts, Analyst picks the key insights, Writer turns the insights into a one-page briefing.
+A billing listener that captures every LLM call. This is a small Python class called KongBillingListener. It subscribes to CrewAI's event bus. CrewAI fires a notification called LLMCallCompletedEvent every time an agent makes an LLM call. Our listener catches that event, reads the token count and the agent's role, and sends a usage event to Kong.
+An entry-point script. Loads the API keys, builds the crew, runs it, and prints a per-agent token summary.
+A meter. A meter is a rule that tells Kong which incoming events to count. We create one meter that listens for crewai.llm_call events and sums the tokens.
+Three features, one per agent role. A feature is a named "slice" of a meter, filtered by a dimension value. We create one feature for Researcher tokens, one for Analyst tokens, one for Writer tokens. Each feature filters the meter by agent_role.
+A plan with three rate cards. A plan groups features and assigns prices. Our plan is called CrewAI Research Pro. It charges $0.0001 per Researcher token, $0.0002 per Analyst token, $0.0005 per Writer token.
+A customer and an active subscription. The customer is acme. The subscription connects the customer to the plan. Usage and invoice values then show up in the Konnect portal.
+repo
+
+
+
+File
+What it does
+
+
+
+
+crew.py
+Builds the three agents (Researcher, Analyst, Writer), defines their tasks, and wires them into a sequential Crew. The agent role strings are what end up tagged on every billing event.
+
+
+billing.py
+
+KongBillingListener subclasses CrewAI's BaseEventListener, subscribes to LLMCallCompletedEvent, and POSTs one CloudEvent per token bucket (input + output) to Kong M&B. Tracks per-agent totals in memory for the run summary.
+
+
+main.py
+Entry point. Loads .env, instantiates the listener, builds the crew, runs kickoff(), and prints the final briefing plus per-agent usage.
+
+
+setup_kong.py
+One-shot provisioner. Creates the meter, three filtered features, plan, customer, and active subscription via the Kong M&B API. Pass --teardown to clean up an earlier run before recreating.
+
+
+requirements.txt
+Three deps: crewai, httpx, python-dotenv. No LiteLLM, no LangChain.
+
+
+.env.example
+Template for the four secrets and three config values.
+
+
+
+Python 3.10, 3.11, 3.12, or 3.13 (CrewAI requires Python below 3.14)
+An OpenAI API key
+A free Kong Konnect account: konghq.com
+
+A Konnect Personal Access Token with Metering & Billing write permissions
+🧑‍💻 Part 1: Build the Python app (CrewAI)
+Set up the project
+Define the research crew
+Subscribe to LLMCallCompletedEvent
+
+Run the crew and see per-agent tokens
+🧾 Part 2: Set up billing in Kong Metering & Billing
+Provision Kong with one script (or skip to the manual path)
+Create the meter
+Create one feature per agent role
+Create a plan with three rate cards
+Create the customer and subscribe
+Run the crew again and check usage
+Set up the project
+Define the research crew
+Subscribe to LLMCallCompletedEvent
+Run the crew and see per-agent tokens
+Provision Kong with one script
+Create the meter
+Create one feature per agent role
+Create a plan with three rate cards
+Create the customer and subscribe
+Run the crew again and check usage
+Create a new folder and a Python virtual environment:
+mkdir crewai-mb && cd crewai-mb
+python3.12 -m venv .venv
+source .venv/bin/activate
+
+Three pinned dependencies. No LangChain, no LiteLLM, nothing hidden under the hood.
+# requirements.txt
+crewai>=1.14.0,<2.0.0
+httpx>=0.27.0
+python-dotenv>=1.0.1
+
+Install:
+pip install -r requirements.txt
+
+Create a .env.example next to your code. This is where the API keys and other config live:
+# .env.example
+
+# OpenAI API key (from https://platform.openai.com/api-keys)
+OPENAI_API_KEY=sk-...
+
+# OpenAI model used by every CrewAI agent in this demo
+MODEL=gpt-4o-mini
+
+# Kong Konnect Metering & Billing ingestion endpoint
+# US:  https://us.api.konghq.com/v3/openmeter/events
+# EU:  https://eu.api.konghq.com/v3/openmeter/events
+# AU:  https://au.api.konghq.com/v3/openmeter/events
+KONG_INGEST_URL=https://us.api.konghq.com/v3/openmeter/events
+
+# Personal Access Token from Konnect with Metering & Billing write permissions
+# Konnect UI -> profile menu -> Personal Access Tokens
+KONG_PAT=kpat_...
+
+# Customer identifier. Becomes the `subject` on every CloudEvent
+# and the customer in Konnect M&B once events arrive.
+CUSTOMER_ID=acme
+
+# Source identifier, becomes the `source` on every CloudEvent.
+# Helps you tell different apps apart in the events view.
+EVENT_SOURCE=crewai-research-crew
+
+The KONG_INGEST_URL is region-specific. US orgs use us.api.konghq.com, EU orgs use eu.api.konghq.com, AU orgs use au.api.konghq.com. Use the wrong region and events get silently rejected. Check your region in the Konnect organization settings.
+Copy .env.example to .env and fill in real values. Add .env to a .gitignore so secrets never get committed:
+# .gitignore
+.venv/
+__pycache__/
+*.pyc
+.env
+.env.local
+*.log
+
+Three agents, three tasks, run one after the other. The agent role is the most important field. The role string is what we attach to every billing event and what shows up on the invoice. Pick names you are happy seeing on a customer's bill.
+# crew.py
+"""Three-agent research crew: Researcher -> Analyst -> Writer."""
+
+from __future__ import annotations
+
+import os
+
+from crewai import LLM, Agent, Crew, Process, Task
+
+
+def _llm() -> LLM:
+    return LLM(
+        model=os.environ.get("MODEL", "gpt-4o-mini"),
+        api_key=os.environ["OPENAI_API_KEY"],
+        temperature=0.4,
+    )
+
+
+def build_crew(topic: str) -> Crew:
+    llm = _llm()
+
+    researcher = Agent(
+        role="Researcher",
+        goal=f"Gather concrete, factual material about: {topic}",
+        backstory=(
+            "You are an analyst who pulls together raw facts, names, dates, "
+            "and numbers on a topic. You write in dense bullet lists and "
+            "never speculate."
+        ),
+        llm=llm,
+        allow_delegation=False,
+        verbose=True,
+    )
+
+    analyst = Agent(
+        role="Analyst",
+        goal="Distill research notes into the three sharpest insights",
+        backstory=(
+            "You read research notes and pull out the three insights that "
+            "matter most. You discard noise. You explain each insight in "
+            "two sentences."
+        ),
+        llm=llm,
+        allow_delegation=False,
+        verbose=True,
+    )
+
+    writer = Agent(
+        role="Writer",
+        goal="Turn the analyst's insights into a polished one-page briefing",
+        backstory=(
+            "You write executive briefings. You open with a one-sentence "
+            "summary, then expand each insight with concrete supporting "
+            "evidence. You never use jargon."
+        ),
+        llm=llm,
+        allow_delegation=False,
+        verbose=True,
+    )
+
+    research_task = Task(
+        description=(
+            f"Collect a tight set of facts about: {topic}. "
+            "Aim for 8 to 12 bullet points. Each bullet should be a single "
+            "fact with a year or named source where possible."
+        ),
+        expected_output="A bullet list of facts.",
+        agent=researcher,
+    )
+
+    analysis_task = Task(
+        description=(
+            "Read the research notes. Pick the three insights that "
+            "matter most to a builder evaluating this space. For each "
+            "insight, write two sentences."
+        ),
+        expected_output="Three numbered insights, two sentences each.",
+        agent=analyst,
+        context=[research_task],
+    )
+
+    writing_task = Task(
+        description=(
+            "Write a one-page briefing for a busy engineering leader. "
+            "Open with a one-sentence summary. Then expand each of the "
+            "three insights with supporting evidence drawn from the "
+            "research notes. Plain language only."
+        ),
+        expected_output="A one-page briefing in markdown.",
+        agent=writer,
+        context=[research_task, analysis_task],
+    )
+
+    return Crew(
+        agents=[researcher, analyst, writer],
+        tasks=[research_task, analysis_task, writing_task],
+        process=Process.sequential,
+        verbose=True,
+    )
+
+CrewAI has a built-in event bus. Every LLM call inside an agent fires an LLMCallCompletedEvent. The event carries the token count, the model name, and the agent's role. To hook into it, we subclass BaseEventListener and register a handler.
+# billing.py
+"""Per-agent token billing listener for CrewAI.
+
+Subscribes to LLMCallCompletedEvent and ships one CloudEvent per token bucket
+(input + output) to Kong Konnect Metering & Billing.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import uuid
+from datetime import datetime, timezone
+from typing import Any
+
+import httpx
+from crewai.events import BaseEventListener, LLMCallCompletedEvent
+
+logger = logging.getLogger(__name__)
+
+EVENT_TYPE = "crewai.llm_call"
+CLOUDEVENTS_SPEC_VERSION = "1.0"
+
+
+class KongBillingListener(BaseEventListener):
+    """Forwards CrewAI LLM token usage to Kong M&B as CloudEvents.
+
+    One LLM call produces two events: one for prompt (input) tokens and
+    one for completion (output) tokens. Both carry the agent_role so the
+    meter can group spend per agent in the crew.
+    """
+
+    def __init__(
+        self,
+        ingest_url: str,
+        api_key: str,
+        subject: str,
+        source: str = "crewai-research-crew",
+        timeout: float = 5.0,
+    ) -> None:
+        self.ingest_url = ingest_url
+        self.subject = subject
+        self.source = source
+        self._client = httpx.Client(
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/cloudevents+json",
+            },
+            timeout=timeout,
+        )
+        self.events_sent = 0
+        self.tokens_by_agent: dict[str, dict[str, int]] = {}
+        super().__init__()
+
+    def setup_listeners(self, crewai_event_bus: Any) -> None:
+        @crewai_event_bus.on(LLMCallCompletedEvent)
+        def handle_llm_call(_source: Any, event: LLMCallCompletedEvent) -> None:
+            self._record(event)
+
+    def _record(self, event: LLMCallCompletedEvent) -> None:
+        usage = event.usage or {}
+        agent_role = getattr(event, "agent_role", None) or "unknown"
+        model = event.model or "unknown"
+        call_id = event.call_id
+
+        prompt_tokens = int(usage.get("prompt_tokens", 0) or 0)
+        completion_tokens = int(usage.get("completion_tokens", 0) or 0)
+
+        bucket = self.tokens_by_agent.setdefault(
+            agent_role, {"input": 0, "output": 0}
+        )
+
+        if prompt_tokens:
+            self._emit(call_id, agent_role, model, "input", prompt_tokens)
+            bucket["input"] += prompt_tokens
+
+        if completion_tokens:
+            self._emit(call_id, agent_role, model, "output", completion_tokens)
+            bucket["output"] += completion_tokens
+
+    def _emit(
+        self,
+        call_id: str,
+        agent_role: str,
+        model: str,
+        token_type: str,
+        tokens: int,
+    ) -> None:
+        payload = {
+            "specversion": CLOUDEVENTS_SPEC_VERSION,
+            "id": f"{call_id}-{token_type}-{uuid.uuid4().hex[:8]}",
+            "source": self.source,
+            "type": EVENT_TYPE,
+            "subject": self.subject,
+            "time": datetime.now(timezone.utc).isoformat(),
+            "datacontenttype": "application/json",
+            "data": {
+                "tokens": tokens,
+                "type": token_type,
+                "agent_role": agent_role,
+                "model": model,
+                "call_id": call_id,
+            },
+        }
+
+        try:
+            response = self._client.post(self.ingest_url, json=payload)
+            response.raise_for_status()
+            self.events_sent += 1
+        except httpx.HTTPError as exc:
+            logger.warning(
+                "Kong M&B ingest failed for %s (%s tokens): %s",
+                agent_role,
+                tokens,
+                exc,
+            )
+
+    def close(self) -> None:
+        self._client.close()
+
+    def summary(self) -> str:
+        lines = ["Per-agent token usage:"]
+        for role, counts in self.tokens_by_agent.items():
+            total = counts["input"] + counts["output"]
+            lines.append(
+                f"  {role:25s}  input={counts['input']:6d}  "
+                f"output={counts['output']:6d}  total={total:6d}"
+            )
+        lines.append(f"Events sent to Kong M&B: {self.events_sent}")
+        return "\n".join(lines)
+
+
+def from_env() -> KongBillingListener:
+    ingest_url = os.environ["KONG_INGEST_URL"]
+    api_key = os.environ["KONG_PAT"]
+    subject = os.environ.get("CUSTOMER_ID", "acme")
+    source = os.environ.get("EVENT_SOURCE", "crewai-research-crew")
+    return KongBillingListener(
+        ingest_url=ingest_url,
+        api_key=api_key,
+        subject=subject,
+        source=source,
+    )
+
+Three things worth pointing out in this code:
+Two events per LLM call, not one. The listener sends one event for input tokens and one for output tokens. Splitting them now lets us bill them at different rates later.
+Unique event IDs for safe retries. Each event ID is built from CrewAI's call_id, the token type (input or output), and a short random string. Kong deduplicates events by id plus source, so this format makes retries safe without losing the input/output split.
+Errors are logged, not raised. If Kong is briefly down, the crew run keeps going. A dropped event is better than a crashed customer run. In production, add a retry queue for the dropped events.
+The from_env() helper at the bottom is what main.py uses to build the listener from .env values.
+The entry-point script loads .env, builds the listener (which registers itself on the event bus during __init__), and kicks off the crew.
+# main.py
+"""Run the research crew and ship per-agent token usage to Kong M&B."""
+
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+
+from dotenv import load_dotenv
+
+from billing import from_env
+from crew import build_crew
+
+
+def main() -> int:
+    load_dotenv()
+
+    parser = argparse.ArgumentParser(description="CrewAI research briefing")
+    parser.add_argument(
+        "topic",
+        nargs="?",
+        default="Usage-based pricing for AI agent products in 2026",
+        help="Topic the crew should research",
+    )
+    parser.add_argument(
+        "--customer",
+        default=None,
+        help="Customer ID to bill (overrides CUSTOMER_ID env var)",
+    )
+    args = parser.parse_args()
+
+    if args.customer:
+        os.environ["CUSTOMER_ID"] = args.customer
+
+    listener = from_env()
+    print(f"Billing customer: {os.environ['CUSTOMER_ID']}")
+    print(f"Topic:            {args.topic}\n")
+
+    try:
+        crew = build_crew(args.topic)
+        result = crew.kickoff()
+        print("\n--- Briefing ---\n")
+        print(result.raw if hasattr(result, "raw") else result)
+        print("\n--- Billing ---\n")
+        print(listener.summary())
+    finally:
+        listener.close()
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+
+The per-agent summary at the end comes from listener.summary(). The listener tracks tokens in memory as events fire and formats them at the end of the run.
+Run it:
+python main.py "Strategies for monetizing developer tools with usage-based pricing"
+
+You will see CrewAI's verbose output as each agent thinks, then the final briefing, then the billing summary. From one of my runs:
+Per-agent token usage:
+  Researcher                 input=   154  output=   453  total=   607
+  Analyst                    input=   587  output=   176  total=   763
+  Writer                     input=   779  output=   421  total=  1200
+Events sent to Kong M&B: 6
+
+This is why per-agent billing matters. Each agent has a different token shape:
+Researcher: short prompt in, long fact dump out.
+Analyst: long facts in, three short insights out.
+Writer: everything before it in, the longest output out.
+Each role uses tokens differently. The cost per agent is different. A single flat price hides all of that.
+The events are in Kong M&B now, but no meter is matching them yet. They sit in the events table with a validation warning. The next steps fix that.
+The next four steps (meter, features, plan, customer, subscription) can be done in a single command using the setup_kong.py script from the repo:
+python setup_kong.py
+
+To start over from a clean slate, pass --teardown. The script cancels the subscription, archives the plan, deletes the features and meter, and then recreates everything:
+python setup_kong.py --teardown
+
+The customer record is kept across teardowns so event history stays attached to the same subject.
+Here is the script in full. It is the source of truth for the role names (Researcher, Analyst, Writer) and prices ($0.0001, $0.0002, $0.0005) used in the rest of this tutorial. The same values show up in the manual UI walk-through below, so the script and the click-by-click path produce the same setup.
+# setup_kong.py
+"""One-shot provisioner for Kong Konnect Metering & Billing.
+
+Creates the meter, three features, a published plan with three rate cards,
+the customer, and an active subscription. Designed to be re-run on a clean
+org. Run with --teardown to delete a previous provisioning before recreating.
+
+Each feature uses a meter group-by filter on agent_role so that the Researcher,
+Analyst, and Writer features each only count tokens consumed by that agent.
+Without the filter, every feature would aggregate the entire meter and the
+invoice would show no per-role breakdown.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+
+import httpx
+from dotenv import load_dotenv
+
+ROLES = ["Researcher", "Analyst", "Writer"]
+PRICES = {"Researcher": "0.0001", "Analyst": "0.0002", "Writer": "0.0005"}
+METER_KEY = "crewai_tokens"
+PLAN_KEY = "crewai_research_pro"
+
+
+def _client() -> httpx.Client:
+    load_dotenv()
+    base = os.environ["KONG_INGEST_URL"].rsplit("/", 1)[0]
+    pat = os.environ["KONG_PAT"]
+    return httpx.Client(
+        base_url=base,
+        headers={
+            "Authorization": f"Bearer {pat}",
+            "Content-Type": "application/json",
+        },
+        timeout=15.0,
+    )
+
+
+def teardown(s: httpx.Client, customer_key: str) -> None:
+    """Cancel/archive then delete subscription -> plan -> features -> meter.
+
+    Subscriptions are cancelled (not deleted), plans are archived. Features
+    and meters use DELETE. The customer is preserved so subjects keep their
+    history.
+    """
+    print("Teardown ...")
+    customers = s.get("/customers", params={"key": customer_key}).json().get("data", [])
+    for c in customers:
+        if c["key"] != customer_key:
+            continue
+        for sub in s.get("/subscriptions").json().get("data", []):
+            if sub["customer_id"] == c["id"] and sub.get("status") == "active":
+                r = s.post(f"/subscriptions/{sub['id']}/cancel", json={})
+                print(f"  subscription {sub['id']} cancel -> {r.status_code}")
+
+    for plan in s.get("/plans").json().get("data", []):
+        if plan["key"] != PLAN_KEY:
+            continue
+        if plan.get("status") == "active":
+            r = s.post(f"/plans/{plan['id']}/archive", json={})
+            print(f"  plan {plan['id']} archive -> {r.status_code}")
+
+    for feat in s.get("/features").json().get("data", []):
+        if not feat["key"].startswith("crewai_"):
+            continue
+        r = s.delete(f"/features/{feat['id']}")
+        print(f"  feature {feat['key']} -> {r.status_code}")
+
+    for meter in s.get("/meters").json().get("data", []):
+        if meter["key"] != METER_KEY:
+            continue
+        r = s.delete(f"/meters/{meter['id']}")
+        print(f"  meter {meter['key']} -> {r.status_code}")
+
+
+def provision(s: httpx.Client, customer_key: str) -> None:
+    # 1. Meter
+    print("Creating meter ...")
+    r = s.post("/meters", json={
+        "key": METER_KEY,
+        "name": "CrewAI Tokens",
+        "description": "Tokens consumed by CrewAI agents per role",
+        "event_type": "crewai.llm_call",
+        "value_property": "$.tokens",
+        "aggregation": "sum",
+        "dimensions": {
+            "agent_role": "$.agent_role",
+            "type": "$.type",
+            "model": "$.model",
+        },
+    })
+    r.raise_for_status()
+    meter = r.json()
+    print(f"  meter id={meter['id']}")
+
+    # 2. Three features, each filtered by agent_role
+    print("Creating features ...")
+    feature_ids: dict[str, str] = {}
+    for role in ROLES:
+        key = f"crewai_{role.lower()}_tokens"
+        r = s.post("/features", json={
+            "key": key,
+            "name": f"CrewAI {role} Tokens",
+            "meter": {
+                "id": meter["id"],
+                "filters": {"agent_role": {"eq": role}},
+            },
+        })
+        r.raise_for_status()
+        feature_ids[role] = r.json()["id"]
+        print(f"  {key:30s} id={feature_ids[role]}")
+
+    # 3. Plan with three rate cards
+    print("Creating plan ...")
+    rate_cards = []
+    for role in ROLES:
+        rate_cards.append({
+            "key": f"crewai_{role.lower()}_tokens",
+            "name": f"{role} Tokens",
+            "billing_cadence": "P1M",
+            "feature": {"id": feature_ids[role]},
+            "price": {"type": "unit", "amount": PRICES[role]},
+        })
+    r = s.post("/plans", json={
+        "key": PLAN_KEY,
+        "name": "CrewAI Research Pro",
+        "currency": "USD",
+        "billing_cadence": "P1M",
+        "pro_rating_enabled": True,
+        "phases": [
+            {"key": "default", "name": "Default", "rate_cards": rate_cards}
+        ],
+    })
+    r.raise_for_status()
+    plan_id = r.json()["id"]
+    print(f"  plan id={plan_id} status={r.json().get('status')}")
+
+    # 4. Publish
+    print("Publishing plan ...")
+    r = s.post(f"/plans/{plan_id}/publish", json={})
+    r.raise_for_status()
+    print(f"  plan status={r.json().get('status')}")
+
+    # 5. Customer (reuse if exists)
+    print(f"Ensuring customer key={customer_key} ...")
+    existing = [c for c in s.get("/customers", params={"key": customer_key}).json().get("data", []) if c["key"] == customer_key]
+    if existing:
+        customer_id = existing[0]["id"]
+        print(f"  reusing customer id={customer_id}")
+    else:
+        r = s.post("/customers", json={
+            "key": customer_key,
+            "name": "Acme Inc",
+            "currency": "USD",
+            "usage_attribution": {"subject_keys": [customer_key]},
+        })
+        r.raise_for_status()
+        customer_id = r.json()["id"]
+        print(f"  customer id={customer_id}")
+
+    # 6. Subscription
+    print("Subscribing customer to plan ...")
+    r = s.post("/subscriptions", json={
+        "customer": {"id": customer_id},
+        "plan": {"id": plan_id},
+    })
+    r.raise_for_status()
+    sub = r.json()
+    print(f"  subscription id={sub['id']} status={sub.get('status')}")
+
+    print("\nDone. Provisioning summary:")
+    print(f"  meter:        {meter['id']}")
+    print(f"  features:     {feature_ids}")
+    print(f"  plan:         {plan_id}")
+    print(f"  customer:     {customer_id}")
+    print(f"  subscription: {sub['id']}")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--teardown", action="store_true",
+                        help="Delete prior CrewAI provisioning before recreating")
+    args = parser.parse_args()
+
+    customer_key = os.environ.get("CUSTOMER_ID", "acme")
+    with _client() as s:
+        if args.teardown:
+            teardown(s, customer_key)
+        provision(s, customer_key)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+
+A few things worth pointing out before the manual walk-through.
+The four constants at the top are the only knobs. ROLES, PRICES, METER_KEY, and PLAN_KEY are the values you would change to use this script for a different crew or pricing model. Everything below them is mechanical.
+The feature filter shape is strict. The script uses meter: {id, filters: {agent_role: {eq: role}}}. If you change the shape, the Kong API still returns 201 but it silently drops the filter. The feature then sums the whole meter and per-agent billing breaks. After creating a feature, always GET it back and confirm meter.filters is set.
+Subscriptions and plans are not deleted. They are cancelled or archived. The teardown helper uses POST /subscriptions/{id}/cancel and POST /plans/{id}/archive. Features and meters do support DELETE.
+The next four sections walk through the same steps by hand using the UI and curl. Read them to understand what each Kong resource does, or skip ahead to Run the crew again and check usage if you already ran the script.
+A meter is a rule that tells Kong how to count incoming events. Open Konnect, go to Metering & Billing → Metering, and click Create Meter.
+For this tutorial we skip the LLM Tokens template (it expects events from Kong AI Gateway) and configure the meter from scratch.
+
+
+
+Field
+Value
+
+
+
+
+Name
+CrewAI Tokens
+
+
+Key
+crewai_tokens
+
+
+Event type
+crewai.llm_call
+
+
+Value property
+$.tokens
+
+
+Aggregation
+Sum
+
+
+Dimensions
+
+agent_role → $.agent_role, type → $.type, model → $.model
+
+
+
+
+The event_type must match the type field on the CloudEvents your listener sends. If they don't match, events still flow in but no meter picks them up.
+Dimensions are important. They tell the meter to keep agent_role, type, and model available as group-by axes. Without dimensions, you get one big bucket of tokens with no breakdown.
+curl -X POST https://us.api.konghq.com/v3/openmeter/meters \
+  -H "Authorization: Bearer $KONG_PAT" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "key": "crewai_tokens",
+    "name": "CrewAI Tokens",
+    "description": "Tokens consumed by CrewAI agents per role",
+    "event_type": "crewai.llm_call",
+    "value_property": "$.tokens",
+    "aggregation": "sum",
+    "dimensions": {
+      "agent_role": "$.agent_role",
+      "type": "$.type",
+      "model": "$.model"
+    }
+  }'
+
+The response includes the meter id (a ULID starting with 01). Save it. You will need it when creating features.
+A feature is a named slice of a meter, optionally filtered by dimension values. We need three features, one per agent role. All three point at the same crewai_tokens meter.
+Go to Product Catalog → Features tab → Create Feature. Repeat three times, once per role:
+
+
+
+Name
+Key
+Meter
+Filter
+
+
+
+
+CrewAI Researcher Tokens
+crewai_researcher_tokens
+CrewAI Tokens
+agent_role = Researcher
+
+
+CrewAI Analyst Tokens
+crewai_analyst_tokens
+CrewAI Tokens
+agent_role = Analyst
+
+
+CrewAI Writer Tokens
+crewai_writer_tokens
+CrewAI Tokens
+agent_role = Writer
+
+
+
+The feature key must match the rate card key you set on the plan in the next step. Pick descriptive keys now and the rest of the wiring stays clean.
+Get the filter shape right. Kong expects the meter as an object with the meter id and a filters map. Filter values use operators like {"eq": "..."}, not bare strings. If you get it wrong, the API still returns 201 but silently drops the filter. The feature then sums the whole meter and your invoice ends up empty. After creating a feature, always GET it back and check that meter.filters is set.
+# Look up the meter id once
+METER_ID=$(curl -s "https://us.api.konghq.com/v3/openmeter/meters" \
+  -H "Authorization: Bearer $KONG_PAT" | \
+  jq -r '.data[] | select(.key=="crewai_tokens") | .id')
+
+for role in Researcher Analyst Writer; do
+  lower=$(echo "$role" | tr '[:upper:]' '[:lower:]')
+  curl -X POST https://us.api.konghq.com/v3/openmeter/features \
+    -H "Authorization: Bearer $KONG_PAT" \
+    -H "Content-Type: application/json" \
+    -d "{
+      \"key\": \"crewai_${lower}_tokens\",
+      \"name\": \"CrewAI ${role} Tokens\",
+      \"meter\": {
+        \"id\": \"${METER_ID}\",
+        \"filters\": {\"agent_role\": {\"eq\": \"${role}\"}}
+      }
+    }"
+done
+
+A plan ties features to prices. Go to Product Catalog → Plans tab → New Plan. Name it CrewAI Research Pro, currency USD, monthly cadence. Then add three rate cards in the default phase:
+
+
+
+Rate card key
+Feature
+Price (USD per token)
+
+
+
+
+crewai_researcher_tokens
+CrewAI Researcher Tokens
+0.0001
+
+
+crewai_analyst_tokens
+CrewAI Analyst Tokens
+0.0002
+
+
+crewai_writer_tokens
+CrewAI Writer Tokens
+0.0005
+
+
+
+The rate card key must match the feature key. If they don't match, Kong returns a rate_card_key_feature_key_mismatch error.
+Prices are per single token. To charge $5 per million tokens, enter 0.000005, not 5. The decimals look uncomfortable but they are correct. I used round numbers like 0.0001 here so usage and dollar amounts are easy to read while testing. Real production pricing usually looks like 0.0000003.
+After the rate cards are in, click Publish. A draft plan cannot accept subscriptions.
+Build the plan in two steps: create as draft, then publish.
+PLAN=$(curl -s -X POST https://us.api.konghq.com/v3/openmeter/plans \
+  -H "Authorization: Bearer $KONG_PAT" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "key": "crewai_research_pro",
+    "name": "CrewAI Research Pro",
+    "currency": "USD",
+    "billing_cadence": "P1M",
+    "pro_rating_enabled": true,
+    "phases": [{
+      "key": "default",
+      "name": "Default",
+      "rate_cards": [
+        {"key": "crewai_researcher_tokens", "name": "Researcher Tokens",
+         "billing_cadence": "P1M",
+         "feature": {"key": "crewai_researcher_tokens"},
+         "price": {"type": "unit", "amount": "0.0001"}},
+        {"key": "crewai_analyst_tokens", "name": "Analyst Tokens",
+         "billing_cadence": "P1M",
+         "feature": {"key": "crewai_analyst_tokens"},
+         "price": {"type": "unit", "amount": "0.0002"}},
+        {"key": "crewai_writer_tokens", "name": "Writer Tokens",
+         "billing_cadence": "P1M",
+         "feature": {"key": "crewai_writer_tokens"},
+         "price": {"type": "unit", "amount": "0.0005"}}
+      ]
+    }]
+  }' | jq -r .id)
+
+curl -X POST "https://us.api.konghq.com/v3/openmeter/plans/$PLAN/publish" \
+  -H "Authorization: Bearer $KONG_PAT"
+
+In Konnect, go to Customers → New Customer. Name it Acme Inc, key acme, currency USD. The important field is Subject keys. It must include acme. This is how Kong matches incoming events to a customer. Our listener sets the subject field on every event to acme (from the CUSTOMER_ID value in .env).
+Then open the customer, click Add Subscription, pick CrewAI Research Pro, and start it immediately.
+CUSTOMER=$(curl -s -X POST https://us.api.konghq.com/v3/openmeter/customers \
+  -H "Authorization: Bearer $KONG_PAT" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "key": "acme",
+    "name": "Acme Inc",
+    "currency": "USD",
+    "usage_attribution": {"subject_keys": ["acme"]}
+  }' | jq -r .id)
+
+curl -X POST https://us.api.konghq.com/v3/openmeter/subscriptions \
+  -H "Authorization: Bearer $KONG_PAT" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"customer\": {\"id\": \"$CUSTOMER\"},
+    \"plan\": {\"key\": \"crewai_research_pro\"}
+  }"
+
+One detail is easy to miss. Events sent to Kong before a subscription starts do not get billed. Only events with a timestamp inside the active subscription window roll into an invoice.
+Run the crew one more time after the subscription is active:
+python main.py "Best practices for instrumenting LLM token usage in multi-agent systems"
+
+Open Konnect, go to the Acme Inc customer, and switch to the Usage tab. You should see three rows, one per feature, each with a total token count and a cost. Switch to Invoices and the same three rows show up as line items on the upcoming invoice.
+To check from the CLI, query the events endpoint and confirm validation_errors is empty:
+curl -s "https://us.api.konghq.com/v3/openmeter/events?type=crewai.llm_call&limit=6" \
+  -H "Authorization: Bearer $KONG_PAT" | \
+  jq '.data[] | {role: .event.data.agent_role,
+                 type: .event.data.type,
+                 tokens: .event.data.tokens,
+                 errors: (.validation_errors | length)}'
+
+A clean run looks like:
+{"role": "Writer", "type": "output", "tokens": 421, "errors": 0}
+{"role": "Writer", "type": "input", "tokens": 779, "errors": 0}
+{"role": "Researcher", "type": "output", "tokens": 453, "errors": 0}
+{"role": "Analyst", "type": "input", "tokens": 587, "errors": 0}
+{"role": "Analyst", "type": "output", "tokens": 176, "errors": 0}
+{"role": "Researcher", "type": "input", "tokens": 154, "errors": 0}
+
+Six events, one per (agent role, token type) bucket. All six match the meter and roll into the customer's subscription.
+Per role like in this tutorial? Per total tokens? Per task? Per crew run? The right answer depends on what your customers can predict and what hurts your margin when they cannot. Drop a comment with the pricing model you use. I want to hear what is working in the wild.
+The full code is at github.com/tejakummarikuntla/Billing-CrewAI-with-KongMB. PRs welcome...."
+image: /img/blog/generated/implementing-per-agent-billing-for-ai-agents-in-crewai-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Implementing Per-Agent Billing for AI Agents in CrewAI](/img/blog/generated/implementing-per-agent-billing-for-ai-agents-in-crewai-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### The Necessity of Accurate Billing in Multi-Agent AI Systems
+
+In the realm of AI-driven applications, particularly those employing multi-agent systems, the need for precise billing mechanisms has become increasingly crucial. Unlike single-agent systems, where token consumption is easily trackable, multi-agent setups present unique challenges. Each agent operates independently, performing distinct roles that lead to varying token usage patterns. Consequently, organizations face the risk of mischarging clients if billing is not granular enough to reflect these differences accurately. Implementing a per-agent billing system not only enhances transparency but also promotes fair pricing, ultimately leading to improved customer satisfaction and retention.
+
+### Integrating CrewAI and Kong for Effective Metering
+
+CrewAI serves as a robust framework for developing and deploying AI agents capable of executing complex workflows. When integrated with Kong, a powerful metering and billing solution, organizations can achieve a detailed understanding of token consumption at the agent level. This integration allows for the creation of invoices that break down costs by agent role, ensuring that clients are billed fairly based on actual usage. By leveraging the capabilities of both CrewAI and Kong, teams can implement a comprehensive billing strategy that aligns with the operational dynamics of multi-agent systems.
+
+### Establishing the Python Development Environment
+
+Before diving into the implementation of per-agent billing, developers must set up a suitable Python environment. This involves creating a virtual environment and installing the necessary dependencies. The `requirements.txt` file typically includes essential packages such as `crewai`, `httpx`, and `python-dotenv`. Below is a command sequence that outlines the setup process:
+
+```bash
+mkdir crewai-billing && cd crewai-billing
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+This setup ensures that all required libraries are available for building the AI agents and the billing listener, laying the groundwork for a successful implementation.
+
+### Defining the Roles and Tasks of AI Agents
+
+Creating AI agents is a pivotal step in the billing implementation process. Each agent must be defined with specific roles and tasks that align with the overall objectives of the crew. For instance, a research crew may consist of a Researcher, Analyst, and Writer, each with distinct responsibilities. The following Python code snippet illustrates how to define these agents within the CrewAI framework:
+
+```python
+from crewai import Agent
+
+researcher = Agent(
+    role="Researcher",
+    goal="Gather factual material on the assigned topic.",
+    backstory="You compile raw facts and present them in bullet points.",
+)
+
+analyst = Agent(
+    role="Analyst",
+    goal="Distill research notes into key insights.",
+    backstory="You extract the most relevant information from the research.",
+)
+
+writer = Agent(
+    role="Writer",
+    goal="Create a polished briefing from the insights.",
+    backstory="You craft a clear and concise summary for stakeholders.",
+)
+```
+
+This structure not only establishes the agents but also prepares the system for tracking their token usage during execution.
+
+### Implementing the Billing Listener: Capturing Token Usage
+
+To facilitate per-agent billing, a billing listener must be implemented. This listener subscribes to events emitted by CrewAI, specifically those indicating the completion of Large Language Model (LLM) calls. The listener captures token usage data and sends it to Kong for processing. Below is an excerpt from the billing listener implementation, which showcases how to capture and record token usage effectively:
+
+```python
+from crewai.events import BaseEventListener, LLMCallCompletedEvent
+
+class KongBillingListener(BaseEventListener):
+    def setup_listeners(self, crewai_event_bus):
+        @crewai_event_bus.on(LLMCallCompletedEvent)
+        def handle_llm_call(_source, event):
+            self._record(event)
+
+    def _record(self, event):
+        usage = event.usage or {}
+        agent_role = getattr(event, "agent_role", None) or "unknown"
+        prompt_tokens = int(usage.get("prompt_tokens", 0) or 0)
+        completion_tokens = int(usage.get("completion_tokens", 0) or 0)
+
+        # Logic to send token usage to Kong
+        self.send_to_kong(agent_role, prompt_tokens, completion_tokens)
+
+    def send_to_kong(self, agent_role, prompt_tokens, completion_tokens):
+        total_tokens = prompt_tokens + completion_tokens
+        # Example payload to send to Kong
+        payload = {
+            "agent_role": agent_role,
+            "tokens": total_tokens,
+            "type": "billing"
+        }
+        # Code to post payload to Kong's API
+```
+
+This listener is essential for aggregating token usage data by agent role, enabling precise billing based on actual consumption. It ensures that each LLM call generates two events: one for input tokens and another for output tokens, allowing for a more detailed billing approach.
+
+### Configuring Kong's Metering and Billing System
+
+After establishing the billing listener, the next step is to configure Kong's Metering & Billing system. This involves creating a meter that tracks token usage and defining features for each agent role. Each feature will filter the meter's data based on the agent's role, enabling detailed tracking. Below is a sample configuration for creating a meter and features in Kong:
+
+```python
+import requests
+
+KONG_INGEST_URL = "http://your-kong-ingest-url"
+KONG_PAT = "your-kong-pat"
+
+meter_response = requests.post(
+    f"{KONG_INGEST_URL}/meters",
+    headers={"Authorization": f"Bearer {KONG_PAT}"},
+    json={
+        "key": "crewai_tokens",
+        "name": "CrewAI Tokens",
+        "description": "Tokens consumed by CrewAI agents per role",
+        "event_type": "crewai.llm_call",
+        "value_property": "$.tokens",
+        "aggregation": "sum",
+        "dimensions": {
+            "agent_role": "$.agent_role",
+            "type": "$.type",
+        },
+    },
+)
+
+if meter_response.status_code == 201:
+    print("Meter created successfully.")
+else:
+    print(f"Failed to create meter: {meter_response.text}")
+```
+
+This configuration ensures that all token usage is properly categorized and can be billed according to the defined pricing structure, providing clarity and fairness in billing.
+
+### Testing the Implementation: Validating Billing Accuracy
+
+Once the agents and billing listener are set up, it is crucial to test the entire system to verify that billing is accurate. Running the crew should generate token usage data that can be checked against the expected output. The following command can be used to execute the crew and print the billing summary:
+
+```bash
+python main.py "Research topic"
+```
+
+Upon execution, the system should display a per-agent token usage summary, allowing developers to confirm that the billing listener is correctly capturing and reporting usage data. This step is critical to ensure that the integration between CrewAI and Kong is functioning as intended.
+
+### Analyzing Billing Summaries: Insights into Token Usage
+
+After running the crew, the resulting billing summaries provide valuable insights into token usage across different agents. Each agent's contributions are broken down, allowing organizations to see where costs are incurred. An example output might look like this:
+
+```
+Per-agent token usage:
+  Researcher                 input=   154  output=   453  total=   607
+  Analyst                    input=   587  output=   176  total=   763
+  Writer                     input=   779  output=   421  total=  1200
+```
+
+This level of detail is invaluable for understanding the cost dynamics of multi-agent systems and helps in optimizing resource allocation and pricing strategies. It also supports data-driven decision-making for future projects.
+
+### Future Directions: Evolving Billing Strategies
+
+As AI systems continue to evolve, so too should the billing strategies employed by organizations. The ability to implement per-agent billing not only enhances transparency but also allows for more flexible pricing models. Companies may consider introducing tiered pricing based on usage patterns or offering discounts for high-volume clients. Future considerations could involve integrating machine learning models to predict usage and optimize pricing dynamically.
+
+### Conclusion: The Strategic Advantage of Granular Billing
+
+Implementing per-agent billing in AI systems like CrewAI, facilitated by Kong's Metering & Billing, represents a significant advancement in how organizations can manage and monetize their AI resources. By accurately tracking token usage per agent, businesses can ensure fair pricing, enhance customer satisfaction, and ultimately drive better revenue management. As the landscape of AI continues to evolve, the importance of such granular billing strategies will only increase, making this integration a critical component of any multi-agent system's architecture.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/konghq/how-to-set-up-per-agent-billing-for-crewai-agents-with-kong-53cc)
+
+---
+
+<SocialShare title="Implementing Per-Agent Billing for AI Agents in CrewAI" slug="implementing-per-agent-billing-for-ai-agents-in-crewai" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
