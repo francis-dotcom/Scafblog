@@ -1,0 +1,153 @@
+---
+slug: tailoring-calibration-set-sizes-for-reliable-llm-evaluations
+title: "Tailoring Calibration Set Sizes for Reliable LLM Evaluations"
+authors: [francis]
+tags: [ai, llm, evaluation, kappa]
+date: 2026-06-04T17:15:37.539Z
+description: "TL;DR. The human-labeled calibration set you use to validate an LLM-as-judge does not need a fixed size. It needs a size that depends on how balanced your labels are. For roughly balanced binary criteria with no heavy tail, 50 stratified traces will usually pin Cohen's kappa to within a tolerable band (in my runs, a 95 percent bootstrap interval on the order of plus or minus 0.10 to 0.15). The moment you have a rare-but-expensive category, say a safety violation that shows up in 6 percent of traces, 50 is not enough and you should plan for 200 or more, because the variance of kappa is dominated by the count of minority-class examples, not the total. Below I give the kappa formula and why it is sensitive to the marginal distribution, the sample-size intuition, Wilson confidence intervals for small-n per-class precision, and the stratified-sampling routine that keeps marginals stable week to week. Pasteable Python at the end.
+Cohen's kappa (Cohen, 1960) measures agreement between two raters corrected for the agreement you would expect by chance. Here the two raters are your human labeler and your LLM-as-judge. The formula is kappa = (p_o - p_e) / (1 - p_e), where p_o is observed agreement and p_e is chance agreement computed from the marginals. For a binary label, if the human marks "pass" with probability a and the judge with probability b, then p_e = a*b + (1-a)*(1-b).
+The part people skim past is that p_e is a function of the label marginals, and that function is not linear. When the classes are balanced (a and b near 0.5), p_e sits near 0.5, the denominator is near 0.5, and kappa is well-behaved. When one class is rare (a near 0.95), p_e is pushed close to 1, the denominator collapses toward zero, and kappa becomes a ratio of two small numbers. Small numbers in a denominator are how you get instability. This is the origin of the kappa paradoxes: you can have 95 percent observed agreement and a kappa near zero, purely because the marginals are lopsided. It is not a bug in your judge. It is the chance-correction working as designed on a distribution where chance agreement is already very high. The practical consequence for sizing: a class-imbalanced set carries less information per trace, so you need more traces for the same precision on kappa. I want to be careful not to overclaim. Kappa is not broken on imbalanced data. It is higher-variance, and you pay for that variance with sample size.
+A note on what I report. I treat kappa as descriptive, not as a hypothesis test. The interesting question is never "is kappa significantly greater than zero" (it almost always is, and that bar is meaningless). The question is "is kappa high enough, with a tight enough interval, that I trust this judge to stand in for a human." That is a question about the width of the interval, which is a question about n.
+If your label is a roughly balanced binary criterion, 50 stratified human labels are often enough to make a deployment decision. Two things have to hold: the criterion is genuinely binary and roughly balanced (each class in the 30 to 70 percent range), and there is no rare-but-costly tail you care about separately. Under those conditions the variance of kappa is at its most forgiving.
+A concrete example from my own work. I had a 5-class quality scale (a 1-to-5 Likert a previous team had wired into the judge). Kappa with humans was 0.47, and the bootstrap interval on 80 examples was wide enough that I could not tell 0.47 from 0.35. The 5-class scale was the problem: it spread the marginals thin across five buckets, so most cells had tiny counts. I split it into three binary criteria (is it factually supported, is it relevant, is it complete) and re-labeled the same traces. On the "factually supported" criterion, which was close to balanced, kappa came out at 0.78 on 50 examples with an interval I was comfortable shipping on. Same traces, same judge prompt structure, very different statistical footing. The honest caveat: 50 works for "does this judge agree with us well enough on the common case." It does not work for "does this judge catch the rare bad thing."
+The variance of kappa scales inversely with n, which everyone knows, but it also scales with the rarity of the minority class, which fewer people budget for. If the category you care about appears in 6 percent of traces, a 50-trace sample contains, in expectation, three examples of it. Three. Your estimate of the judge's recall on that category is being driven by three data points. This is where I insist on 200 or more. Not because 200 is magic, but because of what it does to the minority-class count: at a 6 percent base rate, 200 traces gives about 12 minority examples in expectation, 400 gives about 24. Pick the rarest class you care about, decide how many examples you need to estimate its precision and recall to a tolerable width, then back out the total n from the base rate. If you need 20 examples of a 6 percent class, you need roughly 20 / 0.06, over 300 traces of raw sampling, or you oversample the rare class deliberately and weight afterward.
+This is the moment to mention the thing I keep repeating, phrased plainly. Quality detection without an uncertainty estimate around the metric does not actually catch the failure. If you report "the judge has 0.81 recall on hallucinations" from a sample with seven hallucinations in it, you have not measured recall. You have measured noise and rounded it to two decimal places. When the question is a paired comparison instead (you changed the judge prompt and want to know whether agreement improved on the same traces), McNemar's test is the right tool. It looks only at the discordant pairs and tests whether the split between the two kinds of disagreement is significant.
+Once you report per-class precision and recall (and on an imbalanced set you must, because aggregate kappa hides the minority class), you need a confidence interval on a proportion estimated from a small count. The normal approximation (p plus or minus 1.96 times the square root of p(1-p)/n) fails exactly when you need it most: when the count is small or the proportion is near 0 or 1, it produces intervals that run below zero or above one. Wilson (1927) gives the interval I default to. It centers on a value pulled slightly toward 0.5, derives its width from the score test, stays inside [0, 1], and has far better coverage near the boundaries. For "the judge flagged 9 traces as violations and 7 were real," the Wilson interval on that 7-of-9 precision is honest. The normal-approximation interval on the same 7-of-9 is not.
+Everything above assumes the calibration set's label distribution resembles production. It will not, if you sample naively, because production drifts. I learned this once: I trained a judge for factual accuracy, got kappa 0.61 on the dev set, deployed it, and three weeks later kappa on a fresh sample was 0.39. The input distribution had shifted (more domain jargon than my calibration set contained). The kappa drop was not the judge getting worse. It was the calibration set no longer describing the job. The fix is to stratify across time windows and across whatever covariate moves your marginals: pull traces in weekly strata, sample within each week proportionally, oversample any rare class so its count is high enough within each window. This keeps the marginal distribution stable week to week and lets you watch for drift, because if this week's stratified sample shows a kappa outside last week's interval, that is a drift signal rather than sampling noise.
+import numpy as np
+
+
+
+  
+  
+  1. Cohen's kappa between human labels and judge labels.
+
+
+human = np.array(["pass", "fail", "pass", "pass", "fail", "pass"])
+
+
+
+  
+  
+  2. Wilson score interval for a proportion (per-class
+
+
+precision/recall on small n).
+
+
+
+  
+  
+  3. Bootstrap the variance (and CI) of kappa at a given n.
+
+
+def bootstrap_kappa(human, judge, n_boot=2000, seed=0):
+
+
+Two things to read off the bootstrap: the std is your standard error on kappa at this n, and the percentile CI is the band you should be quoting. Run it once at n=50 and once at n=200 on your own labels and you will see the interval shrink. That shrinkage, scaled by your minority-class rate, is the entire sizing decision.
+Cohen, J. (1960). A coefficient of agreement for nominal scales. Educational and Psychological Measurement, 20(1), 37 to 46.
+Is kappa the right metric at all? For nominal labels with two raters, kappa is a reasonable default. If your label is ordinal (a real 1-to-5 scale where the distance between buckets matters), weighted kappa or an intraclass correlation is more appropriate. My preference is to avoid ordinal judge scales and decompose into binary criteria.
+Can I just label more data instead of doing any of this math? Yes, and if labeling is cheap for you, more data is the cleanest fix. The math matters when labels are expensive, which is the usual case for the rare-and-costly category.
+Why bootstrap kappa instead of a closed-form variance? There is a closed-form asymptotic variance, but it is an asymptotic result and I do not trust it at the small n where I am actually operating. The bootstrap makes no large-sample assumption and surfaces the rare-class degeneracy directly.
+What kappa value is good enough to ship a judge? There is no universal threshold and I am suspicious of the ones in circulation. It depends on the cost of the judge being wrong. For a low-stakes triage filter I have shipped in the high 0.6s. For anything where a missed positive is expensive, I want a higher kappa and a tight interval on the minority class specifically.
+The relationship between bootstrap interval width and minority-class count: I have a working intuition you can predict the n you need from the rare-class rate alone, but I have not pinned down the constant across label types. Stratification under genuine drift: holding the marginals fixed makes the comparison legitimate but may hide the very change I should detect, and I do not have a principled way to do both at once. And whether any of this transfers to multi-judge ensembles, where pairwise kappa stops being the natural object and the right tool is probably closer to an intraclass correlation. If you have labeled data sitting around, the most useful thing you can do is run the bootstrap at two sizes on your own task and see where your interval lands. The number that matters is not the kappa. It is how much the kappa moves when you resample...."
+image: /img/blog/generated/tailoring-calibration-set-sizes-for-reliable-llm-evaluations-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Tailoring Calibration Set Sizes for Reliable LLM Evaluations](/img/blog/generated/tailoring-calibration-set-sizes-for-reliable-llm-evaluations-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### The Calibration Set: A Foundation for Trustworthy Evaluations
+
+In the evaluation of Large Language Models (LLMs) as judges, the calibration set plays a pivotal role. This set comprises human-labeled examples that provide a benchmark against which the performance of LLMs can be measured. However, the efficacy of this evaluation is not merely a function of the set's size; it is critically influenced by the distribution of labels within the calibration set. A well-structured calibration set, both in terms of size and label balance, is essential for obtaining reliable performance metrics, particularly Cohen's kappa.
+
+### Understanding Cohen's Kappa: The Metric of Agreement
+
+Cohen's kappa ($\kappa$) serves as a statistical measure that quantifies the agreement between two raters—in this context, a human labeler and an LLM. The formula for Cohen's kappa is given by:
+
+$$
+\kappa = \frac{p_o - p_e}{1 - p_e}
+$$
+
+where $p_o$ is the observed agreement and $p_e$ represents the expected agreement by chance, derived from the marginal distributions of the labels. The sensitivity of $\kappa$ to label distribution is crucial; when classes are balanced, $\kappa$ behaves predictably. Conversely, in scenarios with label imbalance, particularly when one class is rare, the variance of $\kappa$ can become unstable, leading to misleading interpretations of model performance.
+
+### The Paradox of Kappa: Label Imbalance at Play
+
+Label imbalance can significantly distort the variance of Cohen's kappa. For instance, consider a binary classification scenario where an LLM achieves 95% agreement, yet the minority class constitutes only 5% of the dataset. In such cases, the kappa value may approach zero, indicating poor performance in recognizing the minority class. This phenomenon arises because the chance agreement ($p_e$) is disproportionately high due to the imbalance, which collapses the denominator in the kappa formula. It is imperative for practitioners to develop a nuanced understanding of label distribution to interpret kappa values accurately.
+
+### Determining Calibration Set Size: A Function of Label Distribution
+
+The determination of an appropriate calibration set size is contingent upon the distribution of labels within that set. For balanced binary criteria, a calibration set of approximately 50 examples may suffice to yield a reliable kappa estimate. However, when dealing with rare classes—such as a safety violation category that appears in only 6% of traces—50 examples would yield only about three instances of that category. This is inadequate for reliable estimation. In such cases, increasing the calibration set size to 200 or more examples becomes essential to ensure that enough minority class instances are present for accurate kappa calculations.
+
+### Case Study: The Impact of Calibration Set Size on Kappa Outcomes
+
+A concrete example illustrates the implications of calibration set size on kappa outcomes. In one evaluation, a model was assessed against a five-class quality scale, resulting in a kappa of 0.47, accompanied by a wide confidence interval. This wide interval indicated uncertainty in the model's performance. By restructuring the evaluation into three binary criteria, the kappa improved to 0.78 with a significantly narrower interval using the same traces. This shift emphasizes the importance of label balance and demonstrates how the categorization of labels can drastically affect the reliability of kappa estimates.
+
+### Best Practices for Sampling: Achieving Label Balance
+
+To maintain balanced labels in calibration sets, implementing best practices in sampling and stratification is crucial. Stratified sampling ensures that each class is represented proportionally in the calibration set, thereby stabilizing the marginal distributions over time. This technique is especially vital in dynamic environments where label distributions may drift. For instance, by sampling across time windows and ensuring that rare classes are adequately represented, practitioners can maintain the integrity of their calibration sets and enhance the reliability of kappa estimates.
+
+### Implementing Stratified Sampling: A Practical Approach
+
+A practical implementation of stratified sampling involves dividing the data into strata based on relevant characteristics, such as time or other covariates that may affect label distribution. For example, if evaluating a model over several weeks, one could sample from each week proportionally to ensure that all classes, especially the rare ones, are adequately represented. This approach helps mitigate the risk of label drift and ensures that the calibration set remains reflective of the production environment.
+
+### Common Pitfalls in LLM Evaluations: Risks to Avoid
+
+Several common pitfalls can undermine the effectiveness of LLM evaluations. One significant risk is oversimplifying the relationship between calibration set size and label distribution. Practitioners may assume that merely increasing the sample size will resolve issues of label imbalance, but without addressing the distribution, the resulting kappa values may still be unreliable. Additionally, neglecting the representation of minority classes can lead to a false sense of confidence in model performance. Addressing these pitfalls is crucial for ensuring robust evaluations.
+
+### Enhancing Actionable Insights for Practitioners
+
+To provide more specific actionable insights for practitioners, the following strategies should be emphasized:
+
+1. **Conduct Regular Audits**: Regularly review the calibration set to ensure it remains representative of the current label distribution in production. This may involve re-sampling or adjusting the set as necessary.
+
+2. **Utilize Bootstrapping for Variance Estimation**: Implement bootstrapping techniques to estimate the variance of kappa at different sample sizes. This can provide a clearer picture of the reliability of kappa estimates and inform decisions about sample size.
+
+3. **Monitor Label Drift**: Establish a monitoring system to detect shifts in label distribution over time. If significant drift is observed, recalibrating the model with a new calibration set may be necessary.
+
+4. **Engage in Continuous Learning**: Foster a culture of continuous learning and adaptation within the team. This involves sharing insights from evaluations and discussions around best practices in calibration set management.
+
+5. **Incorporate Minority Class Oversampling**: When preparing calibration sets, consider oversampling the minority classes to ensure their representation. This can help mitigate the risk of bias in kappa estimates and improve overall model evaluation.
+
+### Conclusion: The Path to Effective LLM Calibration
+
+In summary, the calibration set size is a pivotal factor in the effective evaluation of LLMs as judges. The intricate relationship between calibration set size and label distribution necessitates careful consideration to ensure reliable kappa measurements. By comprehending the implications of label imbalance, determining appropriate calibration set sizes, and implementing best practices in sampling and stratification, practitioners can significantly enhance the reliability of their evaluations. These insights are essential for data scientists, AI researchers, and machine learning practitioners striving to leverage LLMs effectively, ensuring that evaluations are robust and reflective of real-world scenarios.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/maya_andersson_dev/calibration-set-size-for-llm-as-judge-when-50-traces-is-enough-and-when-200-is-mandatory-d1d)
+
+---
+
+<SocialShare title="Tailoring Calibration Set Sizes for Reliable LLM Evaluations" slug="tailoring-calibration-set-sizes-for-reliable-llm-evaluations" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
