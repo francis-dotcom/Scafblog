@@ -1,0 +1,217 @@
+---
+slug: the-mechanics-of-ai-citation-structured-identity-vs-social-media-influence
+title: "The Mechanics of AI Citation: Structured Identity vs. Social Media Influence"
+authors: [francis]
+tags: [ai, citations, llm, structured-identity]
+date: 2026-06-05T09:27:13.457Z
+description: "By Marin T. Kael — independent researcher, AI Citation Behaviour Lab. Published 5 June 2026. Open data, code, and the full bilingual report are linked at the end.
+On 11 May 2026 I created a person who does not exist. A pseudonymous fantasy author — me, in a sense — with no prior web presence, no published book, nothing for a search engine or a language model to have ever seen. Then I pointed five web-grounded LLMs at him every day for 23 days and scored roughly 16,000 answers for whether they cited him correctly, missed him, or hallucinated.
+The headline number: the first correct LLM citation landed on day six. Six days from a cold start to "yes, this entity is real and here is what it does," fetched live from his own website.
+But the headline is the least interesting part. The interesting part is everything that number hides — a locked front door, a chasm between providers that masquerades as a capability ladder, and the discovery that going viral on Reddit bought me exactly zero AI citations.
+This is not a success story. It is a measurement. Here is what I measured.
+There is a lot of confident writing about "AI SEO" and "getting cited by LLMs," and almost none of it is controlled. Brands optimize a hundred things at once on domains that are already years old, then attribute whatever moves to whatever they shipped last. You cannot learn causality from that. The signal is buried under a decade of accumulated authority.
+So I built the cleanest natural experiment I could afford: a single brand-new entity, born on a known date, with zero prior footprint. If an LLM can suddenly describe him, the cause has to be something that happened after his birth — and I logged everything that happened after his birth.
+The subject is "Marin T. Kael," a pseudonymous author whose debut novel Das vierte Feld (series: Prägungen des Reiches) is scheduled for 22 September 2026. The book is real and forthcoming; the public entity was the instrument. The honest catch — and I will keep saying this — is that this is a single-subject design. n = 1. The investigator is the subject. I will come back to why that is less fatal than it sounds, and exactly where it limits the claims.
+I wrote the protocol down and timestamped it before collecting data. That matters more than it looks, because when you are both the experimenter and the thing being experimented on, the only thing standing between you and motivated reasoning is a pre-commitment you can't quietly edit later. The full failure log is public for the same reason.
+Surfaces: 5 web-grounded LLM endpoints.
+Instrument: 16 standardized questions across 6 categories (direct identity, biographical detail, work/series, genre discovery, recommendation, and disambiguation controls).
+Cadence: polled daily for 23 days.
+Volume: ~16,000 scored datapoints.
+Scoring: every answer got +1 (correct and source-grounded), 0 (entity not found), or −1 (hallucinated — confidently wrong).
+That −1 is the whole game. Most "AI visibility" tools count mentions. A mention that invents your biography is not visibility; it is a liability with your name on it. I wanted a metric that punishes confident fiction as hard as it rewards truth, because from where I sit those are not close to equivalent.
+Figure 1 — Daily citation score per surface across the 23-day window; vertical markers at T+4 (Google Knowledge Graph entry) and T+6 (first correct LLM citation).
+The Google Knowledge Graph picked him up on day four (T+4). The first correct, source-grounded LLM citation followed on day six (T+6).
+I want to be careful about what "six days" means, because it is easy to over-read. It does not mean every model knew him in six days — most never reliably did. It means the fastest path from non-existence to a correct, grounded citation in a major web-grounded LLM is measured in days, not months, when the structured-identity scaffolding is in place from day one. The Knowledge Graph led; the LLM followed two days later. Hold that ordering — it recurs.
+Here is the result that reframed the entire study for me.
+Cloudflare returned HTTP 403 to every AI crawler on 22 of the 23 days. Not because I configured it that way — because that is the silent opt-out default for new domains now. The front door to my own website was bolted shut against the exact bots I was trying to reach, and I didn't know until I read the logs.
+And the entity became AI-visible anyway.
+Figure 2 — Two-track diagram: on-site crawl path (blocked, 403 on 22/23 days) versus the path that actually worked — Knowledge Graph / Wikidata plus inference-time grounding on third-party mentions.
+If crawlers couldn't read his site, how did a correct citation appear on day six? Two paths, neither of which is "crawl the homepage":
+The Knowledge Graph (via Wikidata) — structured identity that propagates without anyone scraping your HTML.
+Inference-time grounding on third-party mentions — the model fetches and reads pages about the entity at query time, from places that are not your locked-down domain.
+The lesson is uncomfortable for the standard "optimize your on-site content for LLMs" playbook: a brand-new entity got cited while its own site was returning 403 to every AI bot for 96% of the study. On-site crawling was not the channel. Structured identity and off-site presence were.
+The honest limit, stated plainly: because the crawlers were blocked the entire time, this study can say nothing about whether llms.txt, on-page answer-block formatting, or any other on-site optimization works. I never got to test them — the door was shut. If someone tells you their llms.txt moved their AI citations, ask them to prove the crawler ever made it through the door. Mine didn't, and I still got cited.
+This is the finding I most want people to internalize, because it kills a comfortable mental model.
+The intuitive story is a ladder: smarter, newer models cite more reliably; weaker ones cite less. Tidy. Wrong. What I measured is a chasm — a discontinuity that tracks which sources a provider retrieves from, not how capable the underlying model is.
+Precision here = correct-to-hallucinated citation ratio over a rolling 7-day window. Higher is better; below 1.0 means the model hallucinates about the entity more often than it gets it right.
+Figure 3 — Precision (correct : hallucinated) by surface, 7-day window. Dashed line at 1.0 = break-even.
+
+
+
+Surface
+Precision (correct : hallucinated)
+Read
+
+
+
+
+OpenAI GPT-5.4 (web)
+4.7 : 1
+reliable
+
+
+OpenAI Search API
+4.0 : 1
+reliable
+
+
+OpenAI GPT-5.2 (web)
+1.9 : 1
+positive but weaker
+
+
+Gemini
+0.47 : 1
+net-negative — hallucinates ~2× as often as it's right
+
+
+Claude
+~5% cite rate
+rarely cites, but abstains rather than confabulating*
+
+
+
+* A word on Claude, because my own instrument nearly got it wrong. The automated scorer first flagged Claude as net-negative — more "hallucinations" than correct citations. When I read the flagged answers by hand, the scorer was wrong: the single most common "hallucination" was Claude correctly pointing out that Das vierte Feld is already a real 1999 book by Mokka Müller and declining to invent a brand-new author for it, and others were Claude disambiguating the name collision with the Maritime Research Institute (MARIN). A validated re-analysis (manual adjudication of n=50, Cohen's κ=0.79; classifier recall 100%; book claims web-verified) put genuine errors at only ≈11% (95% CI 7–16%) — all low-severity ("Marin" read as "marine") — with zero fabricated author biographies. So Claude rarely surfaces this brand-new entity (~5%, about what you'd expect for a days-old identity) but it abstains or correctly disambiguates rather than confabulating. On the corrected read it was the most honest model in the study. Gemini's net-negative result, by contrast, is genuine and verified — which is exactly the asymmetry the construct-validity section is about.
+Two things to sit with.
+First, within one provider, the newer generation cited more reliably. GPT-5.4 (4.7:1) cleanly beats GPT-5.2 (1.9:1). So model generation does matter — within a retrieval stack.
+Second, and bigger: the gap between providers dwarfs the gap between generations, and it isn't about raw capability. The mechanism is retrieval-source divergence. I traced where each provider actually pulled the entity from:
+OpenAI grounded on the entity's own domain 119 times. It went to the source.
+Gemini grounded on that domain 0 times. It pulled the entity exclusively from Reddit — 17 out of 17 retrievals. One source. A community forum.
+That is the whole story of the chasm. Gemini isn't "worse at reasoning" here; it is looking somewhere else. When your only window onto an entity is Reddit threads, your description of that entity is whatever Reddit happened to say — which is why Gemini's precision sits underwater. Same entity, same questions, same week. Different door.
+One more number, because I've seen this misquoted already: the OpenAI-web citation rate plateaus around ~10%, with peaks to 16.3%. It is not 18%. If you see 18% attributed to this study, it's wrong.
+The flip side of OpenAI's reliability is how complete the description is when it lands.
+Figure 4 — Annotated screenshot of a correct OpenAI answer; the fetched source URL carries utm_source=openai, confirming a live retrieval at inference time.
+Where OpenAI found the entity, it didn't just confirm he exists. It returned the series name, the setting, the release date — and even the pseudonym status and the existence of this research project. Complete and source-grounded. And I can prove it was fetched live, not recalled from training: the source URL it pulled carried utm_source=openai, a tag that only exists because the model went and got the page at query time.
+So the depth ceiling is high. The problem is never "the answer is shallow." The problem is whether you get an answer at all — which is Finding 6.
+I ran two interventions against each other, and the result rearranged my priors.
+Structured identity moved the needle. Social reach did not.
+The citation breakthrough — the day correct citations became real — was 17 May. Crucially, that came before I did any serious Reddit community-building. Then I built the social side: a 23× karma jump, from 12 to 281.
+The citation lift from that 23× social surge was zero.
+Figure 5 — Two time series on a shared axis: Reddit karma (12 → 281) versus correct-citation rate. The citation step-change precedes the karma climb; the karma climb produces no corresponding lift.
+Read that carefully, because it's the most actionable thing here. What moved AI citations was the boring infrastructure: a Wikidata entry feeding the Knowledge Graph, a website, and DOIs — durable, structured, machine-legible identity. What did not move AI citations was virality. The karma climbed; the citation curve didn't flinch.
+The clean takeaway: social virality buys human readers; structured identity buys AI citations. They are separate channels, and optimizing one does not subsidize the other. If your goal is "get cited by the model," karma is a vanity metric. If your goal is "get read by people," it isn't — it's just answering a different question than the one I was measuring.
+The last finding is the one that should temper any victory lap.
+The entity is citable when you name him and effectively invisible when you don't.
+Figure 6 — Hit-rate by question category: Direct "Who is…?" at 38.9% versus genre/recommendation at 0%.
+Direct identity ("Who is Marin T. Kael?") → 38.9% hit-rate. Name him and there's a real chance the model knows him.
+Organic discovery ("recommend a new fantasy author who…", "books in the style of…") → 0%. He never surfaces unprompted.
+Organic search: per Google Search Console, 0 clicks and 0 impressions from organic search across the window.
+This is the difference between retrieval and discovery, and it's the honest ceiling on the whole "zero to cited" story. A new entity can cross the recognition threshold — answer correctly when asked by name — long before it crosses the recommendation threshold, where the model volunteers it among peers. Six days bought me recognition. It did not buy me discovery. Those may be different timescales entirely, and nothing in 23 days let me see the second one move.
+I'll be blunt about why I think this design refutes the naive methods even at n = 1. Most "we got cited!" claims can't tell a real citation from an echo of the author's own marketing, and can't tell a correct citation from a confident hallucination. Three controls did that work:
+Primary-vs-control channel separation, to catch echo bias — a model parroting my own copy back at me and calling it corroboration.
+A fabricated-attribution catch: a model attributed the entity to "Wikipedia" 24 times — for an entity that has no Wikipedia page. That is a hallucination my scoring caught and a credulous mention-counter would have logged as a win. Twenty-four phantom citations to a page that does not exist.
+Entity-collision controls: "MARIN" also denotes the Maritime Research Institute, so disambiguation was scored explicitly rather than assumed away.
+None of this makes n = 1 into n = 100. It makes n = 1 honest. The two real mitigations are that the protocol was pre-registered (I couldn't retrofit the hypotheses) and the failure log is public (you can audit where it broke). What this is: a clean, reproducible measurement of one entity's path from zero to cited. What it isn't: a population estimate. Please don't cite it as one. I'm asking other people to run the same protocol on their own new entities precisely because my single data point can't carry that weight alone.
+There's a strange loop worth naming. Gemini grounds its knowledge of this entity almost entirely on Reddit. This write-up will be posted and discussed on Reddit. Which means publishing this is itself the next experimental intervention — the act of writing about the measurement perturbs the thing being measured. I can't escape the observer effect here; I can only log it. Consider this paragraph part of the apparatus.
+If you're trying to be legible to AI systems — as a person, a product, an author, anything:
+Build structured identity first. Wikidata → Knowledge Graph, a real website, durable IDs (DOIs/ORCID). That is what moved citations in days. It's unglamorous and it works.
+Check your own front door. Your new domain may be returning 403 to every AI crawler by default and you'd never know without reading the logs. Off-site presence and the Knowledge Graph got me cited despite a shut door — but don't assume your door is open.
+Know which channel you're optimizing. Virality → human readers. Structured identity → AI citations. Don't spend on one expecting the other.
+Treat "cited" and "discovered" as different finish lines. Recognition-when-named came fast. Recommendation-when-unprompted never came at all in 23 days.
+Don't trust mention counts. Twenty-four citations to a Wikipedia page that doesn't exist should end the practice of counting mentions and calling it visibility.
+The full report, the ~16,000-row dataset, the scoring code, and the public failure log are all open. Run the protocol on your own new entity and tell me where my n = 1 holds and where it breaks. That's the only way a single subject becomes a finding.
+Full report (bilingual EN + DE, CC-BY) — the citable link: https://doi.org/10.5281/zenodo.20549020?utm_source=devto
+
+
+Report page (web, live): https://marin-t-kael.de/en/research/zero-to-cited?utm_source=devto
+
+
+Code (MIT): https://github.com/marintkael/marin-research-tools?utm_source=devto
+
+
+Open dataset: https://huggingface.co/datasets/marintkael/ai-citation-fidelity?utm_source=devto
+
+
+ORCID: https://orcid.org/0009-0006-2105-8190
+
+
+
+I'm Marin T. Kael, an independent researcher working on AI citation behaviour — and, transparently, the pseudonymous subject of this study. The pre-registration and public failure log exist so you don't have to take my word for any of it...."
+image: /img/blog/generated/the-mechanics-of-ai-citation-structured-identity-vs-social-media-influence-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![The Mechanics of AI Citation: Structured Identity vs. Social Media Influence](/img/blog/generated/the-mechanics-of-ai-citation-structured-identity-vs-social-media-influence-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### The Paradigm Shift in AI Citation Dynamics
+
+The dynamics of AI citation are undergoing a significant transformation, challenging long-held beliefs about how entities gain visibility in machine learning systems. Traditional methods have emphasized social media virality as a pathway to recognition. However, recent findings suggest that structured identity, characterized by machine-readable data formats and integration into knowledge graphs, plays a more critical role in how AI models recognize and cite entities. This shift necessitates a reevaluation of strategies employed by authors and brands aiming for AI visibility.
+
+### Methodological Framework for Understanding AI Citations
+
+To explore these dynamics, the case study of a pseudonymous author, Marin T. Kael, provides a rigorous methodological framework. The study involved creating a new entity with no prior web presence and observing its citation behavior across five web-grounded large language models (LLMs) over 23 days. The methodology included daily polling of these models using 16 standardized questions across various categories, allowing for a comprehensive analysis of citation accuracy. By maintaining a controlled environment, the study effectively isolates the impact of structured identity on citation rates, providing valuable insights into the mechanisms at play.
+
+### The Citation Timeline: A Case Study in Rapid Recognition
+
+The timeline of citations for Marin T. Kael reveals critical insights into the speed of AI recognition. The first correct citation appeared just six days after the establishment of a structured identity through the Google Knowledge Graph. This rapid progression emphasizes that the pathway to AI citation is not merely a function of model sophistication but is significantly influenced by the availability of structured identity data. The experiment underscores the importance of foundational elements, such as knowledge graph entries, in facilitating swift recognition by AI systems.
+
+### The Role of the Google Knowledge Graph in AI Recognition
+
+The Google Knowledge Graph serves as a vital intermediary in the citation dynamics observed in this study. By enabling structured identities to propagate across various platforms without direct web crawling, the Knowledge Graph accelerates the visibility of new entities. In the case of Marin T. Kael, the Knowledge Graph identified the entity on day four, laying the groundwork for subsequent citations by LLMs. This finding illustrates that integrating structured identities into widely recognized databases is crucial for achieving faster and more accurate recognition by AI systems.
+
+### Disparities in AI Model Performance: A Comparative Analysis
+
+The experiment also revealed significant disparities in citation rates across different AI models, highlighting the importance of retrieval sources. For instance, OpenAI's GPT-5.4 exhibited a precision ratio of 4.7:1, indicating that it correctly cited the entity nearly five times for every hallucinated response. In contrast, Gemini demonstrated a net-negative precision of 0.47:1, primarily due to its reliance on a single source—Reddit—for information. This divergence emphasizes that the effectiveness of AI citation is not solely determined by model sophistication but is also heavily influenced by the quality and diversity of the retrieval sources utilized.
+
+### The Illusion of Social Media Influence on AI Citations
+
+One of the more surprising outcomes of the study was the negligible impact of social media presence on AI citation rates. Despite a significant increase in Reddit karma following community engagement efforts, the citation rate remained unchanged. This challenges the conventional wisdom that social virality translates to AI visibility. Instead, the findings reinforce the notion that structured identity, rather than social media metrics, is the key driver behind successful AI citations. This distinction is critical for authors and brands seeking to optimize their visibility in AI systems.
+
+### Implications for Future AI Citation Strategies
+
+The insights garnered from this experiment carry profound implications for authors, researchers, and brands aiming to enhance their AI citation strategies. The clear takeaway is that establishing a structured identity should be prioritized over attempts to generate social media buzz. This can be achieved through the creation of comprehensive Wikidata entries, maintaining an accessible website, and securing durable identifiers like Digital Object Identifiers (DOIs). By focusing on these foundational elements, entities can ensure that they are recognized by AI systems, thereby increasing their chances of being cited.
+
+### The Distinction Between Recognition and Discovery in AI Systems
+
+An important nuance in the study is the differentiation between recognition and discovery in AI citations. While the pseudonymous author achieved recognition when explicitly named, there was no corresponding increase in organic discovery when queried in broader contexts. This suggests that while structured identity can facilitate immediate recognition, it does not guarantee that the entity will be discovered unprompted. Understanding this distinction is crucial for developing effective strategies that cater to both recognition and discovery in AI systems.
+
+### The Impact of Data Quality on AI Citation Accuracy
+
+The study also highlights the significance of data quality in AI citation dynamics. The precision of citations is heavily influenced by the sources from which AI models retrieve information. Models that accessed the author's own domain produced more accurate citations compared to those relying on less authoritative sources. This underscores the necessity for entities to not only establish a structured identity but also to ensure that the associated data is of high quality and accessible to AI systems.
+
+### The Observer Effect in AI Research and Citation Behavior
+
+The experiment raises an intriguing point about the observer effect in AI research. As the findings are disseminated and discussed within communities, the visibility of the research itself may influence the behavior of AI models. This phenomenon emphasizes the dynamic nature of AI citation behavior, where the act of publishing research can alter the landscape of recognition and citation. Researchers must be mindful of this effect when designing future studies and interpreting their results.
+
+### Conclusion: Building a Robust Foundation for AI Visibility
+
+In conclusion, the exploration of AI citation dynamics through the lens of structured identity reveals critical insights for authors and brands seeking to enhance their visibility in AI systems. The experiment conducted by Marin T. Kael serves as a blueprint for understanding the mechanisms behind AI citations, emphasizing the importance of establishing a structured identity and the limitations of social media influence. As the landscape of AI continues to evolve, prioritizing structured identity will be essential for entities aiming to navigate the complexities of AI citation behavior effectively. By focusing on robust data structures and leveraging knowledge graphs, authors and brands can significantly improve their chances of being recognized and cited by AI systems.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/marintkael/zero-to-cited-in-six-days-i-built-a-fake-author-and-measured-how-fast-ai-started-believing-in-him-dci)
+
+---
+
+<SocialShare title="The Mechanics of AI Citation: Structured Identity vs. Social Media Influence" slug="the-mechanics-of-ai-citation-structured-identity-vs-social-media-influence" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
