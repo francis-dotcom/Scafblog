@@ -1,0 +1,239 @@
+---
+slug: evaluating-ai-agent-platforms-a-structural-approach-for-2026
+title: "Evaluating AI Agent Platforms: A Structural Approach for 2026"
+authors: [francis]
+tags: [ai, agents, cloud, infrastructure]
+date: 2026-06-14T17:12:38.089Z
+description: "Most "AI agent platform" pitches in 2026 collapse into the same demo: a model, a loop, and a browser clicking around. That tells you almost nothing about whether the thing will survive contact with your team. The questions that actually predict success are boring and structural — where does memory live, what runtime executes the work, what real tools can the agent reach, can two agents hand off, and how does pricing scale when usage isn't a straight line. This is a checklist you can run any vendor (or your own homegrown setup) through before you commit. I'll use a self-hosted setup I'll call OpenClaw and a cloud-native platform as two ends of the spectrum, because the trade-off between them is the decision most teams are actually making.
+
+If you've evaluated more than two agent platforms, you already know the demos are nearly identical. Someone types a prompt, an agent spins up, a browser opens, a file gets written, applause. The model underneath is almost a commodity — you can swap GPT-class, Claude-class, and open-weight models in and out, and for most workflows the differences wash out within a quarter.
+So the model is not the moat. The platform around the model is. And the platform is where every painful surprise lives three months in: the agent forgot the thing it learned last week, the runtime can't actually run your build, there's no way for the "research agent" to hand findings to the "writer agent," and your bill went sideways because pricing was metered on something you couldn't predict.
+The checklist below is organized around the six dimensions that have actually broken deployments I've watched: memory, runtime, tools, collaboration, channels, and pricing. Run each candidate through all six. A platform that's brilliant on five and broken on one will still hurt.
+This is the single most under-asked question, and it's the one that determines whether your agent gets smarter or just chattier over time.
+There are roughly three memory models out there:
+Context-window memory. The "memory" is whatever fits in the prompt. Once the conversation scrolls, it's gone. Fine for one-shot tasks, useless for anything an agent should learn from.
+Vector-store memory. Embeddings of past chats, retrieved on similarity. Better, but it's lossy and opaque — you can't open it, audit it, or correct a specific fact. When it retrieves the wrong thing, you debug a black box.
+File-grounded memory. The agent's durable knowledge is real files it reads and writes — SOPs, policies, prior outputs, research — and you can open, version, and correct them like any document.
+Questions to ask:
+Can I open and edit what the agent "knows," or is it locked in an embedding store?
+Is chat history treated as durable knowledge (a trap) or as transient context that must be saved somewhere durable to persist?
+When the agent learns something useful in one session, how does the next session see it?
+This is where the design philosophy of a platform like Buda is worth studying even if you don't adopt it: it's explicitly Drive-based, meaning each agent has a file cabinet (the Drive) that holds its long-term knowledge, and the platform's whole mental model assumes chat history is not durable knowledge — important context gets written to files on purpose. That's a strong opinion, and it's the right one for teams: it makes memory inspectable and ownable instead of a mystery embedding blob. Whatever you pick, push for this property. You want to be able to answer "why did the agent say that?" by opening a file, not by re-running a retrieval and hoping.
+A lot of "agents" are a thin orchestration loop that calls APIs. The moment a task needs to run something — clone a repo, install dependencies, execute a script, build a site — you find out whether there's a real computer behind the agent or just a chat box with delusions of competence.
+The two ends of the spectrum:
+Self-hosted / local-hardware (the OpenClaw style). You run the agent on your own machine — a Mac Mini in the closet, a workstation, a box you control. The appeal is real and I don't want to undersell it:
+Your data never leaves your hardware.
+No per-seat cloud bill; you've already paid for the silicon.
+Total control, full hacker-friendliness, and you can poke at every layer.
+The costs are equally real: you are now ops. You patch it, you keep it online, you deal with the noisy neighbor when a build pegs the CPU, and "scaling" means buying more hardware. It's single-machine by nature, which makes it a fantastic personal setup and an awkward team one.
+Cloud-native sandbox. The runtime is an isolated, durable cloud environment the agent owns. No hardware to buy or babysit; the platform handles isolation, persistence, and scale.
+The questions that separate a real runtime from a wrapper:
+Is there a real shell the agent (and I) can use, or just function calls?
+Can it do Git-heavy work — clone, branch, diff, commit, roll back — with sane storage for node_modules and friends?
+Can I watch and intervene while it works, or is it a fire-and-forget black box?
+Does the environment persist between runs, or do I rebuild state every time?
+On the cloud-native side, the architecture detail worth asking about is the separation between a compute layer and a scheduling layer. Buda, for instance, splits these explicitly — a compute layer (it calls it Claw Computer) that provides the isolated, durable runtime, and a scheduling layer (Buda Organizer) that decides what runs when. That separation is what lets it be "an agent runtime plus workspace system" rather than a model wrapper, and it's a useful test to apply to anyone: is your runtime a first-class system, or an afterthought bolted onto a chat UI?
+For a self-hosted setup, you get the runtime by definition — it's your box. The trade is operational burden vs. convenience, not capability vs. toy.
+An agent that can only talk is a chatbot. An agent that can act needs a toolbelt, and the depth of that toolbelt is where platforms diverge hard.
+The baseline you should expect in 2026:
+Browser — and ideally two modes: an AI-controlled browser running in the sandbox (for automation, scraping, form-filling) and a passive viewer for previewing internal tools or localhost.
+Terminal — a real shell, not a sandboxed echo of one.
+Git — with visual diffs, branches, and rollback, because an agent that writes code without version control is a liability.
+HTTP / OpenAPI — so the agent can call your existing APIs instead of you wrapping everything by hand.
+Nice-to-haves that signal a serious platform:
+VS Code Remote SSH into the agent's environment, so a human can drop in and fix things directly.
+WebPreview — expose a localhost app inside the sandbox as a shareable preview URL.
+A retrieval tool that reads messy formats — PDFs, images, spreadsheets, video — not just plain text.
+A quick sniff test I use. Ask the vendor to do this live:
+# Clone something real, build it, and serve a preview.
+git clone https://github.com/some/real-repo.git
+cd real-repo && npm install && npm run build
+# ...then expose the running app as a preview URL I can open.
+
+If the agent can run that end to end — clone, install, build, preview — and show you the diffs along the way, it has a real runtime and a real toolbelt. If it stalls at npm install or can't surface a preview URL, you've got a demo, not a platform. Self-hosted setups usually pass this test (it's your machine, of course it can build) but may lack the polished workspace surfaces — visual Git, in-browser IDE, hosted previews — that make a team productive rather than just one tinkerer.
+Single-agent tools are everywhere. The interesting question for 2026 is whether the platform treats agents as a team.
+Two layers matter here.
+Multi-agent orchestration. Can a research agent hand its findings to a writer agent, who hands a draft to a reviewer agent? Real workflows are pipelines, not monologues. Look for first-class support for agents with distinct roles, instructions, and skills that pass work between each other — not just a single mega-prompt pretending to be five specialists.
+Human collaboration. This is where self-hosted setups tend to show their seams. A box under your desk is implicitly single-user. Team platforms need an org boundary — shared storage, shared billing, member permissions, and a way to scope which humans can manage which agents.
+Buda's model is a clean example of thinking about this up front: it borrows a company metaphor — a Space is the org/office (members, permissions, billing, shared storage), an Agent is an employee, a Team is a group of agents that hand work off to each other, and a Session is a temporary workbench. You don't have to adopt that exact vocabulary, but you should demand the capabilities it encodes: shared knowledge, role separation, permissioned membership, and agent-to-agent handoff. If a platform can't tell you how two agents collaborate or how three teammates share one agent's knowledge, it's a personal tool wearing an enterprise hat.
+Questions to ask:
+Can agents hand off tasks to each other with separate roles and skills?
+Is there a real org/permission boundary, or is "the team" just everyone sharing one login?
+Is knowledge shared at the org level, or trapped per-user?
+An agent nobody can talk to from where they already work is shelfware. By 2026, "channel-connected" should be table stakes, but the quality of that connection varies a lot.
+What to check:
+Which surfaces? Web is the floor. Real platforms reach Slack, WhatsApp, Telegram, Discord, Microsoft Teams, and regional players like Feishu/Lark and WeCom. Buda supports that whole spread plus OpenAPI, which matters if your users live in chat, not in your app.
+Session isolation per channel. This is the one people forget until it bites. If your support agent serves customers over WhatsApp, each phone number must get its own isolated session — one user's history leaking into another's is a privacy incident, not a bug. Ask explicitly how the platform scopes sessions per user, per DM, per group.
+Channels are entry points, not memory. A subtle but important framing: a channel is a doorway, not a filing cabinet. Durable knowledge belongs in the memory layer (see point 1); the channel just routes messages. Platforms that conflate the two tend to lose context the moment you switch surfaces.
+For a self-hosted/local setup, channel integrations are usually DIY — you can wire up a Telegram bot in an afternoon, but multi-channel, isolated-session, always-on routing is a project you now own and maintain.
+Pricing is where evaluations go to die, because the sticker price is rarely the real cost. Three things to pin down:
+What's the billable unit, and can you predict it? Per-seat is predictable but punishes large teams. Per-token is honest but volatile — a single agent that gets chatty on a long task can spike your bill. Some platforms (Buda among them) use a composite "credits" unit that bundles model calls and third-party API usage; that's neither tokens nor currency, so you'll want to model it against your real workloads before trusting any monthly estimate. The point isn't which unit is "best" — it's whether you can forecast it.
+Per-what does it scale? Per user, per agent, or per workspace? Buda, for example, bills per Space (its org unit), not per human seat, and charges per purchased agent — so one Space with many human members on a few agents costs differently than a seat-based tool would. That can be cheaper or pricier depending on your shape; the lesson is to map your org onto the billing unit, not the vendor's example org.
+Where do the gated features sit? The expensive capabilities — Browser, Terminal, Git, scheduled automations, high-performance SSD storage — are often paywalled above the free tier. A rough public-pricing read for the cloud-native end of the market, using Buda's published tiers as a concrete reference:
+
+
+
+Tier
+Price (per docs)
+What you typically get
+
+
+
+
+Free
+$0
+Limited daily credits, limited storage; advanced runtime tools usually not included
+
+
+Plus
+$20 / agent / mo
+Monthly credits per agent; Browser, Terminal, Git, automations
+
+
+Pro
+$100 / agent / mo
+More credits/storage; adds high-performance SSD
+
+
+Enterprise
+Custom
+Custom limits, self-host / on-prem, controls
+
+
+
+Always confirm current numbers on the live pricing page — tiers move. For the self-hosted/OpenClaw end, the "pricing" is your hardware plus your time: a one-time-ish capital cost and an ongoing ops tax that doesn't show up on any invoice but is very real.
+Here's the checklist compressed into something you can paste into a doc and fill in per vendor:
+Platform: ____________________
+
+[ ] Memory      — Inspectable/editable? File-grounded vs vector blob?
+[ ] Runtime     — Real shell + Git? Persistent? Can I watch/intervene?
+[ ] Tools       — Browser / Terminal / Git / OpenAPI present and working?
+[ ] Collab       — Multi-agent handoff? Real org + permission boundary?
+[ ] Channels    — Slack/WA/Teams/etc.? Per-user session isolation?
+[ ] Pricing     — Billable unit predictable? Scales per what? Gated features?
+
+Self-host vs cloud trade I'm accepting: ____________________
+
+The honest answer is that there's no universally "best" platform — there's a best fit for where your team sits on the control-vs-convenience axis.
+Lean self-hosted (OpenClaw-style) if you're a solo developer or a small, technical team that wants data on your own hardware, enjoys owning the stack, and runs mostly single-user workflows. You're trading convenience for control, and that's a perfectly good trade when you have the skills and the appetite for ops.
+Lean cloud-native (Buda-style) if you've got a team that needs shared knowledge, multiple agents handing off work, agents reachable from chat channels with proper session isolation, and you'd rather not run infrastructure. You're trading some control for a workspace that scales without you racking hardware — and you get persistent file-based memory and a real runtime without building either yourself.
+Whichever way you lean, run the six-dimension checklist before you sign anything. The flashy demo will pass; it always does. What you're really buying is the boring stuff — memory you can audit, a runtime that actually runs, tools that touch reality, collaboration that scales past one person, channels with clean isolation, and pricing you can forecast. Get those six right and the model underneath barely matters. Get them wrong and no model will save you.
+Suggested tags: ai, agents, devops, architecture..."
+image: /img/blog/generated/evaluating-ai-agent-platforms-a-structural-approach-for-2026-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Evaluating AI Agent Platforms: A Structural Approach for 2026](/img/blog/generated/evaluating-ai-agent-platforms-a-structural-approach-for-2026-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### The Illusion of Demos in AI Platforms
+
+As the landscape of AI agent platforms evolves, the allure of flashy demonstrations often obscures the underlying structural capabilities that truly determine a platform's effectiveness. In 2026, decision-makers must recognize that the success of these platforms is not solely dependent on the sophistication of the AI models they employ, but rather on the architecture that supports them. The superficiality of a demo can mislead teams into investing in systems that falter under real-world conditions, making a thorough evaluation based on structural criteria imperative.
+
+### The Six Dimensions of Evaluation
+
+To navigate the complexities of AI agent platforms, organizations should focus on six critical dimensions: memory, runtime, tools, collaboration, channels, and pricing. Each of these dimensions plays a pivotal role in the operational capabilities of an AI agent platform. A platform that excels in five of these areas but falters in one can lead to significant operational challenges. Thus, a comprehensive evaluation checklist based on these dimensions is essential for informed decision-making.
+
+### Memory Models: The Foundation of Learning
+
+Memory is arguably the most critical dimension when evaluating AI agent platforms. The way an agent retains and retrieves information can significantly impact its performance. There are three primary memory models: context-window memory, vector-store memory, and file-grounded memory. 
+
+Context-window memory retains information only within the confines of the current session, making it inadequate for tasks requiring long-term learning. Vector-store memory offers a more sophisticated approach by storing embeddings of past interactions, but it suffers from opaqueness and potential inaccuracies. In contrast, file-grounded memory allows agents to read and write durable files, providing a transparent and auditable knowledge base. For teams, the ability to inspect and modify what an agent "knows" is crucial for maintaining accuracy and relevance in its responses.
+
+### Runtime Capabilities: Self-Hosted vs. Cloud-Native
+
+The runtime environment of an AI agent platform is another critical aspect to evaluate. Organizations must choose between self-hosted solutions, like OpenClaw, and cloud-native platforms, such as Buda. Self-hosted setups offer total control over the environment, allowing teams to manage their own hardware and data. However, this comes with the operational burden of maintaining the infrastructure, including patching systems and ensuring uptime.
+
+On the other hand, cloud-native platforms provide convenience by managing the operational aspects, allowing teams to focus on development rather than infrastructure. The key questions to ask include whether the platform offers a real shell for executing commands, the ability to perform Git operations, and whether the runtime environment persists between sessions. A well-designed cloud-native architecture, like Buda's separation of compute and scheduling layers, can enhance both performance and usability.
+
+### Essential Tools: A Robust Toolbelt for Agents
+
+An effective AI agent platform must provide a comprehensive set of tools that enable agents to perform a variety of tasks. In 2026, the baseline expectations include a functional browser for automation tasks, a terminal for executing commands, and Git integration for version control. 
+
+Platforms that fall short in these areas may limit the capabilities of the agents, reducing their effectiveness in real-world applications. For instance, an agent that can only interact through a limited interface is essentially a chatbot, lacking the necessary functionality to act autonomously. The ability to clone repositories, run builds, and expose applications as shareable previews are essential capabilities that distinguish a robust platform from a basic one.
+
+### Collaboration Features: Multi-Agent Workflows
+
+As AI agents become integral to team workflows, the ability to facilitate collaboration among multiple agents is crucial. A platform must support multi-agent orchestration, allowing agents to hand off tasks seamlessly. For example, a research agent should be able to pass its findings to a writing agent, which can then deliver a draft to a reviewing agent. 
+
+This capability transforms isolated tasks into cohesive workflows, enhancing productivity and efficiency. Moreover, human collaboration features are essential for ensuring that team members can interact with agents effectively. Platforms that lack a clear organizational structure or permission boundaries may struggle to support collaborative efforts, leading to confusion and inefficiencies.
+
+### Channel Connectivity: Ensuring Effective Communication
+
+In a world where communication occurs across various platforms, channel connectivity is a vital consideration. A robust AI agent platform should support integration with multiple communication channels, such as Slack, Microsoft Teams, and WhatsApp. 
+
+Moreover, it is critical to ensure that session isolation is maintained across these channels. For instance, if a support agent interacts with customers over WhatsApp, each conversation must be isolated to prevent information leakage between users. A platform that fails to implement proper session management can expose organizations to privacy risks and operational inefficiencies.
+
+### Pricing Models: Understanding True Costs
+
+Evaluating pricing models is often a challenging aspect of selecting an AI agent platform. Organizations must go beyond the initial sticker price to understand the underlying cost structure. Key factors to consider include the billable unit (e.g., per-seat, per-token), the scalability of costs, and the location of gated features.
+
+For example, a per-token pricing model may seem attractive initially but can lead to unpredictable expenses as usage scales. Conversely, a per-seat model may penalize larger teams. Understanding how pricing scales with usage and what features are included at each pricing tier is essential for accurate budgeting and forecasting.
+
+### Checklist for Evaluating AI Agent Platforms
+
+To facilitate a thorough evaluation, organizations can use the following checklist:
+
+Platform: ____________________
+
+[ ] Memory — Inspectable/editable? File-grounded vs vector blob?
+
+[ ] Runtime — Real shell + Git? Persistent? Can I watch/intervene?
+
+[ ] Tools — Browser / Terminal / Git / OpenAPI present and working?
+
+[ ] Collaboration — Multi-agent handoff? Real org + permission boundary?
+
+[ ] Channels — Slack/WA/Teams/etc.? Per-user session isolation?
+
+[ ] Pricing — Billable unit predictable? Scales per what? Gated features?
+
+### Case Study: Self-Hosted vs. Cloud-Native
+
+Consider a hypothetical scenario where a software development team is evaluating a self-hosted platform (OpenClaw) against a cloud-native solution (Buda). The team values data privacy and control, making OpenClaw an attractive option. However, they soon realize that the operational overhead of maintaining the infrastructure and ensuring uptime is significant.
+
+In contrast, Buda offers a managed service that allows the team to focus on development without worrying about the underlying infrastructure. The cloud-native platform's robust memory model, real-time collaboration features, and seamless channel integrations ultimately lead the team to choose Buda, despite the initial allure of the self-hosted solution.
+
+### Conclusion: The Path Forward in AI Agent Evaluation
+
+As organizations navigate the evolving landscape of AI agent platforms, a structural approach to evaluation is essential. By focusing on the six critical dimensions—memory, runtime, tools, collaboration, channels, and pricing—teams can make informed decisions that align with their operational needs. 
+
+The future of AI agents will depend not only on the sophistication of the underlying models but also on the robustness of the platforms that support them. By prioritizing structural integrity over flashy demos, organizations can ensure that their AI agents deliver value in real-world applications.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/douzatan/ai-agent-platforms-compared-what-to-look-for-in-2026-57cp)
+
+---
+
+<SocialShare title="Evaluating AI Agent Platforms: A Structural Approach for 2026" slug="evaluating-ai-agent-platforms-a-structural-approach-for-2026" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
