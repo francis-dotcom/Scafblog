@@ -1,0 +1,180 @@
+---
+slug: unlocking-ais-potential-with-model-context-protocol-mcp
+title: "Unlocking AI's Potential with Model Context Protocol (MCP)"
+authors: [francis]
+tags: [ai, mcp, integration, engineering]
+date: 2026-06-18T17:16:55.852Z
+description: "What is MCP? Model Context Protocol Explained. A practical guide for engineers building with AI.
+  
+  
+
+
+I’ve been building with AI tools for a while now. And for a long time, I kept running into a frustrating pattern.
+The model would understand my question perfectly. It would give me a thoughtful, well-reasoned answer.
+And then I’d go actually do the work myself.
+Not because the AI was wrong. But because it couldn’t reach anything. It couldn’t see my GitHub repos. Couldn’t check my Jira board. Couldn’t tail the logs from production. Couldn’t restart a service or pull up a runbook.
+Every AI assistant I used understood the shape of engineering work. None of them could participate in it.
+That gap has a name now. And there’s a protocol designed specifically to close it.
+Ask any AI assistant an operational question — something real, something you’d actually ask a teammate — and you’ll see the pattern immediately.
+“List all open PRs waiting for review.”
+“Check whether the payment service has failing logs.”
+“Read the deployment runbook and tell me the next safe step.”
+These aren’t exotic requests. They’re the kind of questions developers and platform engineers ask a dozen times a day.
+The AI’s answer will usually be something like: “You should check your pull requests” or “Look at your monitoring dashboard.”
+That’s advice, not action.
+The model understands your workflow. It just can’t touch it.
+Before we had a standard way to fix this, teams tried to solve it on their own. And things got messy fast.
+The Integration Problem Nobody Wanted to Admit
+If you wanted it to pull Jira tickets, you built a different connector.
+If you needed AWS access, Confluence, a database, and observability data — that was four separate integration projects, each with its own authentication logic, data format, error handling, and security review.
+The same work kept getting rebuilt. Different teams, different AI products, same problem.
+And as the number of AI applications grew, the cost of this approach compounded. It wasn’t a technical limitation exactly. It was the absence of a standard.
+Every AI application was speaking its own language to every external system. There was no common vocabulary.
+The problem wasn’t that AI was too limited. The problem was that every team was solving the same integration puzzle with no shared pieces.
+That’s the condition MCP was built to address.
+
+MCP stands for Model Context Protocol.
+It’s an open standard for connecting AI applications to external tools and sources of context.
+The operative word is standard.
+Instead of every AI product inventing a different way to talk to every system, MCP defines a shared communication layer. An AI application can speak MCP. An external system can expose an MCP server. And the two sides can communicate through a consistent protocol.
+No custom one-off bridges. No per-product integration sprawl.
+The model gets a common way to discover capabilities, request information, and call approved actions — regardless of what’s on the other side.
+
+Before USB-C became common, devices used a mess of connectors: USB-A, Micro USB, Mini USB, Lightning, and a few others I’ve already forgotten the names of.
+Each one solved a similar problem. In a different shape. With different adapters.
+USB-C didn’t make every device identical. It standardized the connection point.
+MCP does the same thing for AI integrations.
+GitHub, Jira, AWS, your internal database, your documentation system — these are all wildly different tools with different data models and different operational logic. MCP doesn’t pretend they’re the same.
+It just gives AI applications a standard port for communicating with them.
+So instead of asking “how does this assistant connect to this specific tool?” you can ask a simpler question: does this tool expose an MCP server?
+That shift is what makes the ecosystem scalable. Build the server once. Any MCP-compatible client can use it.
+
+Here’s the basic layout.
+At the top is a user — you — asking a question or giving an instruction inside an AI application. That could be a desktop assistant, an IDE, a chat interface, or an agent framework.
+Inside that application is an MCP client. The client handles the protocol side: discovering what servers are available, understanding what capabilities they expose, and helping the AI make structured requests.
+On the other side is an MCP server. The server connects to some external system — a repo, a ticketing platform, a cloud account, a database, an internal service — and exposes what that system can do through the protocol.
+The request flows from the AI application through the MCP client to the MCP server. The server performs the operation or retrieves the context. The response comes back through the same path.
+The AI application doesn’t need to know the internals of every tool. The tool owner exposes capabilities through a server, and the AI interacts through the protocol. Clean separation. Clear responsibilities.
+MCP has two fundamental building blocks: tools and resources.
+They’re different in a way that matters.
+
+A tool represents something the AI can do.
+A GitHub MCP server might expose a tool called list_pull_requests. A Jira server might expose create_ticket. A cloud ops server might expose restart_service or deploy_application.
+The AI can see these tools, understand their input schema, and decide when one is relevant to a request.
+But tools aren’t free-form commands. They’re structured, named, and controlled. That makes them auditable. You can log every tool call. You can gate approval on sensitive actions. You can test and review them the same way you review any other interface.
+That’s the shift that opens the door to real AI agents: not “I can suggest what to do” but “I can perform an approved action for you.”
+
+A resource gives the AI something to read.
+That could be a runbook, a knowledge base article, a log stream, a schema, internal documentation, or a configuration file.
+The distinction matters more than it might seem.
+Not every integration should be an action. Sometimes the most useful and safest thing an AI system can do is read the right context and explain what it means — before doing anything.
+Before restarting the service, read the runbook. Before answering the platform question, retrieve the documentation. That’s the difference between a capable AI and a reckless one.
+MCP supports both patterns: actions through tools, information through resources.
+Once teams start exposing their existing systems as MCP servers, the operational picture shifts quickly.
+A GitHub MCP server gives the AI access to repositories, issues, branches, commits, and pull requests. A Jira server surfaces tickets, priorities, sprint status, and workflow state. An AWS server exposes cloud resources, service health, and approved operational actions. A database server can expose schemas, safe queries, or read-only business data. An observability server connects logs, traces, metrics, alerts, and dashboards.
+Each server speaks the same protocol. Each one represents a completely different domain.
+MCP doesn’t replace your tools. It creates a standard way for AI systems to interact with the tools your team already depends on. The ecosystem grows without requiring every team to rebuild the same bridges.
+AI is moving through phases.
+The first phase was chatbot: ask a question, get an answer. Useful, but limited.
+The second phase was assistant: help me write, summarize, and reason. More useful, still detached from real systems.
+The phase we’re entering now is different. AI systems that can participate in actual workflows.
+An AI engineer that doesn’t just explain code — it inspects a repository.
+A platform assistant that doesn’t just describe an incident response process — it reads the runbook, inspects the logs, and prepares the next action.
+An AI agent that doesn’t just talk about work — it coordinates with tools.
+For that version of AI to exist at scale, and to be safe, integrations need a common foundation. One that’s auditable. One that doesn’t require each team to maintain a pile of custom connectors.
+MCP provides that foundation.
+It gives AI applications a consistent way to access context and capabilities. It gives tool owners a standard way to expose what they build. It gives platform teams a clean interface to govern, log, and secure what AI can reach.
+That’s not a small thing. That’s the infrastructure layer the next generation of AI-native engineering tools is built on top of.
+If you want to walk away with one clear mental model:
+MCP is a standard protocol for connecting AI applications to external systems.
+That’s why MCP is becoming a foundational part of the AI engineering stack — not as a feature, but as a shared language.
+In the next video on the Integrations Ninjas channel, I’m building an MCP server from scratch — connecting it to a real AI application, exposing a tool, exposing a resource, and walking through the full request flow end to end.
+If this explanation helped, I’d genuinely like to know: do you think MCP will become table stakes for AI tooling in the next 12 months, or will teams keep building custom connectors out of inertia? Drop your take in the comments...."
+image: /img/blog/generated/unlocking-ais-potential-with-model-context-protocol-mcp-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Unlocking AI's Potential with Model Context Protocol (MCP)](/img/blog/generated/unlocking-ais-potential-with-model-context-protocol-mcp-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### The Integration Bottleneck in Engineering Workflows
+
+In the realm of engineering, AI models have demonstrated remarkable capabilities in generating insights and recommendations. However, a significant gap persists: these models often cannot directly interact with the operational tools that engineers rely on daily. This disconnect results in a frustrating cycle where engineers receive valuable suggestions from AI but must execute the actions manually. This limitation not only undermines the efficiency gains promised by AI but also leads to operational bottlenecks, as teams revert to time-consuming manual processes that could otherwise be automated.
+
+### The Inefficiency of Custom Connectors
+
+Historically, the integration of AI with various engineering tools has relied heavily on custom connectors. Each tool—whether it be Jira, GitHub, or AWS—requires a unique integration approach, leading to a proliferation of bespoke solutions. This creates a complex integration landscape, resulting in duplicated efforts across teams and escalating maintenance costs as the number of AI applications grows. The absence of a standardized communication protocol further exacerbates this issue, forcing teams to reinvent the wheel for each integration rather than leveraging a shared framework. This inefficiency highlights the need for a more systematic approach to AI integration.
+
+### Defining the Model Context Protocol (MCP)
+
+The Model Context Protocol (MCP) emerges as a transformative solution to these integration challenges. MCP is an open standard designed to facilitate seamless communication between AI applications and external tools. By establishing a common communication layer, MCP eliminates the need for custom connectors and reduces integration sprawl. This standardization enables AI applications to interact with various systems consistently, allowing them to perform actions and retrieve context without extensive custom development. The significance of MCP lies in its ability to unify disparate systems under a common framework, making AI integration not only efficient but also scalable.
+
+### Understanding MCP's Client-Server Architecture
+
+At the heart of MCP is a client-server architecture. An MCP client resides within the AI application and is responsible for discovering available MCP servers and understanding the capabilities they expose. Conversely, an MCP server interfaces with external systems, exposing their functionalities through the protocol. This architecture promotes a clear separation of concerns; the AI application does not need to comprehend the internal workings of each tool but can instead rely on the standardized capabilities provided by the MCP server. This modularity simplifies integration and enhances system maintainability, facilitating easier updates and modifications.
+
+### Tools vs. Resources: Key Components of MCP
+
+MCP introduces a critical distinction between two fundamental components: tools and resources. Tools represent actions that the AI can perform, such as creating a ticket in Jira or restarting a service in AWS. Each tool is defined with a structured input schema, ensuring clear expectations and auditability of actions taken by the AI. In contrast, resources provide the AI with context, such as documentation or logs, which can be read and interpreted prior to any action being taken. This distinction is vital, as it enables AI systems to operate safely and intelligently, ensuring that actions are informed by the necessary context.
+
+### Real-World Applications of MCP in Engineering
+
+The implementation of MCP can significantly streamline workflows in engineering environments. For instance, consider an AI application integrated with a GitHub MCP server. The AI can query the server to retrieve a list of open pull requests or check the status of ongoing deployments. This capability transforms the AI from a passive assistant into an active participant in the engineering workflow, allowing it to automate routine tasks and provide real-time insights. Similarly, integrating with a Jira MCP server allows the AI to check ticket statuses and prioritize tasks based on project needs, enhancing project management efficiency.
+
+### Governance and Security Considerations in MCP Adoption
+
+As organizations adopt MCP, it is crucial to address governance and security considerations. The ability of AI applications to perform actions autonomously necessitates robust governance frameworks to manage the capabilities exposed by MCP servers. This ensures that actions taken by AI agents are auditable and secure. Implementing role-based access controls and logging mechanisms can mitigate risks associated with unauthorized actions. Additionally, organizations should establish clear policies regarding the types of actions that AI can perform, ensuring that sensitive operations are subject to appropriate oversight.
+
+### Challenges in Implementing the Model Context Protocol
+
+While the benefits of MCP are evident, organizations must also be cognizant of the challenges associated with its adoption. Transitioning to a standardized protocol may require significant changes to existing workflows and infrastructure. Teams will need to invest time in developing MCP servers for their tools and ensuring that these servers expose the necessary capabilities. Resistance to change may arise from teams accustomed to their custom solutions, leading to potential friction during implementation. Furthermore, organizations may encounter technical hurdles related to legacy systems that do not readily support the MCP framework. To mitigate these challenges, organizations should prioritize training and support during the transition, ensuring that all stakeholders understand the value of adopting MCP. A thorough assessment of existing tools and workflows can help identify potential integration hurdles early in the process, enabling a smoother transition.
+
+### The Future of AI Agents in Engineering Workflows
+
+The evolution of MCP has profound implications for the future of AI agents in engineering. As organizations increasingly rely on AI to enhance productivity and operational efficiency, we are moving towards a paradigm where AI systems are not merely tools for information retrieval but active participants in operational tasks. This transition necessitates a shift in how teams approach AI integration, emphasizing the importance of safety and accountability in AI operations. The ability to perform actions autonomously will redefine the role of AI in engineering, enabling more sophisticated interactions with tools and resources.
+
+### Embracing MCP for Scalable AI Integration
+
+The adoption of the Model Context Protocol is essential for organizations looking to scale their AI capabilities effectively. By providing a standardized approach to integration, MCP enables teams to focus on building AI applications that add value rather than spending time on custom integration projects. The potential benefits of adopting MCP include increased productivity, reduced operational overhead, and the ability to leverage AI more effectively across various engineering tasks. As organizations continue to seek ways to enhance their workflows, embracing MCP will be a critical step in realizing the full potential of AI in engineering.
+
+### Conclusion: A Paradigm Shift in AI Integration
+
+In conclusion, the Model Context Protocol represents a transformative approach to integrating AI into engineering workflows. By addressing the limitations of current AI models and the inefficiencies of custom connectors, MCP lays the groundwork for a more scalable and efficient integration landscape. The challenges of adopting MCP, such as the need for significant workflow adjustments and potential resistance from teams, must be managed through effective training and support. As organizations increasingly rely on AI to enhance productivity and operational efficiency, adopting MCP will be crucial for unlocking the full potential of AI applications. The future of AI in engineering is bright, and with protocols like MCP, we are poised to enter a new era of intelligent systems that can actively participate in our workflows, driving innovation and efficiency across the board.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/integration_ninjas/every-ai-model-hits-the-same-wall-mcp-is-the-answer-7n3)
+
+---
+
+<SocialShare title="Unlocking AI's Potential with Model Context Protocol (MCP)" slug="unlocking-ais-potential-with-model-context-protocol-mcp" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
