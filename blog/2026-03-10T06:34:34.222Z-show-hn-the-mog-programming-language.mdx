@@ -1,0 +1,68 @@
+---
+slug: capabilities-based-permissions-in-embedded-ai-languages-a-case-study-of-mog
+title: "Capabilities-Based Permissions in Embedded AI Languages: A Case Study of Mog"
+authors: [francis]
+tags: [ai, startup, llm]
+date: 2026-03-10T06:34:53.039Z
+description: "Hi, Ted here, creator of Mog.
+- Mog is a statically typed, compiled, embedded language (think statically typed Lua) designed to be written by LLMs -- ..."
+image: /img/blog/default-post.jpg
+---
+
+<!--truncate-->
+
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+
+
+### The Challenge of AI Agent Security
+As AI systems become increasingly integrated into various applications, the need for robust security measures has never been more critical. Traditional security models, which often grant broad permissions to AI agents, can lead to vulnerabilities where malicious code execution or unintended operations occur. This is particularly concerning when AI-generated code interacts with sensitive resources, as it can result in severe security breaches. The Mog programming language addresses these challenges through a capabilities-based approach that limits the actions of AI-generated code and ensures that permissions are tightly controlled.
+### Capabilities-Based Permissions: An Overview
+The capabilities-based permission model implemented in Mog allows the host program to specify exactly which functions the AI-generated code can access. This approach contrasts sharply with conventional models that grant agents full access to system resources, creating a risk of privilege escalation. By limiting the operations available to the Mog programs, the host can enforce security policies that prevent unauthorized actions. This permission model is particularly advantageous in scenarios where multiple agents may operate concurrently, as it ensures that the security context is preserved across different execution environments.
+### Designing for Safety with Limited Functionality
+Mog's design philosophy inherently limits the capabilities of the programs it executes. For instance, a Mog program cannot directly access system calls or memory, which mitigates the risk of memory corruption or unauthorized access to sensitive data. Instead, it relies on the host to provide the necessary functions for operations such as I/O. This architectural choice is vital for maintaining the integrity of the host application, as it allows for inspection and validation of arguments before any potentially dangerous operations are executed. The host can impose additional constraints, such as resource limits and execution timeouts, further enhancing security.
+### The Role of Safe Rust in Compiler Security
+The compiler for Mog is written in safe Rust, which provides a strong foundation for ensuring the security of the entire toolchain. Rust's ownership model and type system prevent common vulnerabilities such as buffer overflows and data races. By using safe Rust, the Mog compiler can be audited more easily, ensuring that the generated code adheres to safety guarantees. This is crucial in a landscape where AI-generated code may have unpredictable behaviors. Although the language and compiler are still in development, leveraging safe Rust significantly reduces the risk of introducing security flaws.
+### Performance Trade-offs in Capability Enforcement
+While the capabilities-based model enhances security, it introduces certain performance trade-offs. For example, the need for the host to validate arguments and control execution flow can add overhead, particularly in scenarios with tight loops or high-frequency function calls. Mog implements cooperative interrupt polling, which allows the host to check whether the guest program should be halted, but this can lead to performance degradation in compute-intensive applications. The trade-off between security and performance must be carefully managed, especially in real-time systems where latency is critical.
+### Dynamic Code Loading and Self-Modification
+One of the unique features of Mog is its ability to dynamically load and execute code without interrupting the host application. This capability allows AI agents to adapt in real-time based on user feedback, enhancing the user experience. For instance, if a user specifies that an AI should always confirm before deleting a file, the agent can compile and load the necessary permissions logic on-the-fly. This flexibility is crucial for maintaining responsiveness in interactive applications, but it also raises concerns about the integrity of the running environment. Ensuring that dynamically loaded code adheres to the established security policies is paramount to preventing exploitation.
+### Implications for AI Integration and Ecosystem Development
+Mog's design and implementation highlight critical considerations for the integration of AI and programming languages. As AI continues to evolve, the tools and languages that support its development must prioritize security and usability. The capabilities-based permission model can serve as a foundation for future programming languages aimed at AI development, particularly in environments where security is paramount. Furthermore, the ongoing development of a standard library for Mog, including essential functions for JSON parsing, HTTP requests, and database interactions, will be instrumental in broadening its adoption and utility.
+### Future Directions and Community Contributions
+Despite its innovative approach, Mog is still in its infancy, and there are numerous avenues for improvement. Expanding the standard library, enhancing the ergonomic aspects of program lifecycle management, and integrating additional features for AI interactions are all critical next steps. The open-source nature of Mog encourages community contributions, which can accelerate its evolution and create a broader ecosystem of tools and libraries. By fostering collaboration, Mog can become a versatile embedded language that meets the diverse needs of AI developers while maintaining a strong security posture.
+### Conclusion: Navigating the Future of AI Programming Languages
+The development of Mog represents a significant step forward in addressing the security challenges posed by AI-generated code. By leveraging capabilities-based permissions and a safe programming model, Mog provides a framework for building secure AI applications. As the landscape of AI continues to evolve, the principles established by Mog can inform the design of future programming languages, ensuring that they are both powerful and secure. The trade-offs between performance and security will remain a critical consideration, and the ongoing discourse around these issues will shape the future of AI programming.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://moglang.org)
+
+---
+
+<SocialShare title="Capabilities-Based Permissions in Embedded AI Languages: A Case Study of Mog" slug="capabilities-based-permissions-in-embedded-ai-languages-a-case-study-of-mog" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
