@@ -1,0 +1,297 @@
+---
+slug: architectural-paradigms-in-ai-processing-a-comparative-analysis-of-tpus-and-gpus
+title: "Architectural Paradigms in AI Processing: A Comparative Analysis of TPUs and GPUs"
+authors: [francis]
+tags: [ai, tpus, gpus, machinelearning]
+date: 2026-06-21T17:13:51.868Z
+description: "Hello, I'm Shrijith Venkatramana. I'm building git-lrc, an AI code reviewer that runs on every commit. Star Us to help devs discover the project. Do give it a try and share your feedback for improving the product.
+Machine learning engineers spend countless hours optimizing models, tweaking architectures, and squeezing performance out of hardware.
+Yet many developers who train large models today have only a vague understanding of the machines doing the actual work.
+Ask a developer how a GPU works, and you'll usually hear something about "lots of parallel cores."
+Ask how a TPU works, and the answer is often, "Google made a chip for AI."
+But the design differences are much more interesting than that.
+TPUs weren't built as faster GPUs. They were built around a different assumption: that neural networks spend most of their time performing enormous matrix multiplications. Once you accept that premise, the entire chip architecture changes.
+Let's explore how TPUs work, why Google built them, and where they outperform GPUs.
+At a high level, modern neural networks are giant collections of matrix operations.
+Consider a simple transformer layer:
+output = X @ W
+
+Where:
+X is the input activation matrix
+W is the weight matrix
+Under the hood, this becomes millions or billions of multiply-and-add operations.
+For example:
+A (4096 x 4096)
+×
+B (4096 x 4096)
+=
+C (4096 x 4096)
+
+This single operation contains over 68 billion multiply-accumulate computations.
+Training and inference repeatedly execute these operations.
+The hardware question becomes:
+What is the fastest possible machine for multiplying giant matrices?
+GPUs and TPUs answer this question differently.
+GPUs were never originally designed for machine learning.
+They were built to render graphics.
+Rendering a video game requires performing similar operations on millions of pixels simultaneously.
+This naturally led GPU manufacturers to create architectures containing thousands of lightweight processing cores.
+A simplified GPU architecture looks like this:
+CPU
+ |
+ | launches kernels
+ |
+GPU
+ ├── Thousands of parallel cores
+ ├── Shared memory
+ ├── Global memory
+ └── Scheduling logic
+
+The key idea:
+Many threads run simultaneously
+Each thread performs small calculations
+Hardware schedules work dynamically
+This approach works extremely well for deep learning because matrix multiplication can be broken into many independent tasks.
+The result was almost accidental:
+The hardware built for gaming turned out to be excellent for neural networks.
+Around 2013–2015, Google's infrastructure was serving billions of machine learning predictions every day.
+Engineers noticed something important.
+Many GPU features were rarely used during inference:
+Complex scheduling
+Branch prediction
+General-purpose execution logic
+Graphics-related circuitry
+These features are valuable for a broad range of workloads.
+But neural networks are highly predictable.
+Most of the work boils down to:
+Multiply
+Add
+Multiply
+Add
+Multiply
+Add
+
+Over and over.
+Google asked a radical question:
+What if we remove everything that isn't useful for matrix multiplication?
+The answer became the TPU.
+The most important component inside a TPU is the systolic array.
+A systolic array is a grid of processing elements that pass data rhythmically through the chip.
+Imagine a matrix multiplication:
+A × B = C
+
+Instead of sending data back and forth to memory repeatedly, the TPU streams values through a grid.
+A simplified example:
+A →
+[PE][PE][PE]
+[PE][PE][PE]
+[PE][PE][PE]
+      ↓
+      B
+
+Each Processing Element (PE):
+Receives values from neighbors
+Multiplies them
+Accumulates partial results
+Passes data onward
+The data "flows" through the chip like blood through arteries.
+That's where the name systolic comes from.
+This architecture dramatically reduces memory movement, which is often the true bottleneck in modern computing.
+Moving data frequently costs more energy and time than performing arithmetic.
+TPUs are designed around minimizing that movement.
+Many developers assume AI workloads are limited by compute.
+In reality, large models are often limited by memory.
+Consider two scenarios.
+The processor performs:
+2 × 3
+
+This operation is extremely cheap.
+The processor fetches:
+2
+3
+
+from distant memory before performing the multiplication.
+The memory access can cost far more than the arithmetic.
+As models scale, this becomes increasingly important.
+TPUs address this problem using:
+Large on-chip buffers
+High-bandwidth memory
+Data reuse strategies
+Systolic execution
+The goal is simple:
+Move data as little as possible.
+This is one reason TPUs achieve impressive performance-per-watt.
+One TPU is powerful.
+A TPU Pod is where things become interesting.
+Google connects thousands of TPUs using specialized high-speed interconnects.
+Conceptually:
+TPU  TPU  TPU  TPU
+ |    |    |    |
+TPU  TPU  TPU  TPU
+ |    |    |    |
+TPU  TPU  TPU  TPU
+
+These chips behave almost like one giant distributed accelerator.
+Large language models frequently require:
+Model parallelism
+Data parallelism
+Pipeline parallelism
+TPU Pods were designed with these workloads in mind.
+This is one reason many frontier-scale models have historically been trained on TPU infrastructure.
+The networking architecture becomes nearly as important as the chips themselves.
+The answer depends on the workload.
+Running diverse workloads
+Supporting many frameworks
+Performing graphics and AI together
+Requiring maximum ecosystem support
+Advantages:
+Mature tooling
+Massive developer community
+Broad software compatibility
+Flexible execution
+Running large-scale neural networks
+Using TensorFlow or JAX ecosystems
+Maximizing throughput
+Optimizing energy efficiency
+Advantages:
+Specialized matrix hardware
+Excellent scaling characteristics
+High utilization for AI workloads
+Lower overhead for tensor operations
+The tradeoff is flexibility.
+A GPU is a powerful general-purpose parallel computer.
+A TPU is a highly specialized neural network machine.
+Think of it like:
+GPU = Swiss Army knife
+TPU = Industrial assembly line
+The assembly line wins if your workload matches its design.
+As models continue growing, hardware architecture is becoming a first-class concern.
+Ten years ago, most developers could treat hardware as a black box.
+Today:
+Training costs millions of dollars
+Model efficiency directly impacts profitability
+Inference latency affects user experience
+Hardware choices influence architecture decisions
+Understanding TPUs isn't just about learning another chip.
+It's about understanding a broader trend:
+The era of general-purpose computing is giving way to increasingly specialized hardware.
+TPUs are one example.
+AI accelerators from NVIDIA, AMD, Amazon, Microsoft, Cerebras, Groq, and many others are pushing the same idea further.
+The future of AI may not belong to the fastest processor.
+It may belong to the processor whose architecture most closely matches the mathematics of machine learning.
+GPUs helped ignite the deep learning revolution because they offered massive parallelism at scale. TPUs took the next step by asking a narrower question: if neural networks mostly perform matrix multiplication, why not build hardware specifically for that task?
+The result was a radically different architecture centered around systolic arrays, data movement efficiency, and large-scale distributed training.
+As AI systems continue growing, understanding these architectural choices becomes increasingly valuable—not just for hardware engineers, but for every developer building machine learning systems.
+If you were training a large model today, would you prioritize the flexibility of GPUs or the specialization of TPUs—and why?
+*AI agents write code fast. They also silently remove logic, change behavior, and introduce bugs -- without telling you. You often find out in production.
+git-lrc fixes this. It hooks into git commit and reviews every diff before it lands. 60-second setup. Completely free.*
+Any feedback or contributors are welcome! It's online, source-available, and ready for anyone to use.
+ / 
+        git-lrc
+      
+    
+
+| 🇩🇰 Dansk | 🇪🇸 Español | 🇮🇷 Farsi | 🇫🇮 Suomi | 🇯🇵 日本語 | 🇳🇴 Norsk | 🇵🇹 Português | 🇷🇺 Русский | 🇦🇱 Shqip | 🇨🇳 中文 | 🇮🇳 हिन्दी |
+
+
+
+git-lrc
+Free, Micro AI Code Reviews That Run on Commit
+
+ 
+      
+
+
+
+
+GenAI today is a race car without brakes. It accelerates fast -- you describe something, and large blocks of code appear instantly. But AI agents silently break things: they remove logic, relax constraints, introduce expensive cloud calls, leak credentials, and change behavior -- without telling you. You often find out in production.
+git-lrc is your braking system. It hooks into git commit and runs an AI review on every diff before it lands. 60-second setup. Completely free.
+In short, git-lrc helps Prevent Outages, Breaches, and Technical Debt Before They Happen
+At a glance: 10 risk categories · 100+ failure patterns tracked · every commit…
+
+  
+View on GitHub..."
+image: /img/blog/generated/architectural-paradigms-in-ai-processing-a-comparative-analysis-of-tpus-and-gpus-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Architectural Paradigms in AI Processing: A Comparative Analysis of TPUs and GPUs](/img/blog/generated/architectural-paradigms-in-ai-processing-a-comparative-analysis-of-tpus-and-gpus-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### The Necessity of Specialized AI Hardware
+
+As artificial intelligence (AI) systems expand in complexity and scale, the hardware that underpins these systems must also adapt. Tensor Processing Units (TPUs) and Graphics Processing Units (GPUs) are at the forefront of this evolution, each designed to accelerate machine learning workloads but with fundamentally different architectural philosophies. Understanding these distinctions is essential for machine learning engineers and data scientists striving to optimize performance and efficiency in their applications.
+
+### Divergent Architectural Foundations: GPUs vs. TPUs
+
+The architectural genesis of GPUs and TPUs is rooted in their intended applications. GPUs were initially developed for rendering graphics, necessitating massive parallelism to process numerous pixels simultaneously. This led to architectures featuring thousands of lightweight processing cores capable of executing simple tasks in parallel. Conversely, TPUs were engineered explicitly for machine learning, focusing on matrix multiplication, a core operation in neural networks. This specialization results in a radically different architecture that emphasizes efficiency in executing large matrix operations, which is critical for AI tasks.
+
+### Matrix Multiplication: The Core of Neural Network Operations
+
+Matrix multiplication is pivotal in neural networks, underpinning various operations. For example, consider the operation $C = A \times B$, where $A$ and $B$ are large matrices. This operation can entail billions of multiply-accumulate computations, making the efficiency of these operations a determinant of training and inference speed. TPUs are optimized for high-throughput matrix multiplications, achieving performance metrics that often surpass those of GPUs for similar tasks. For instance, a TPU can perform matrix multiplications with a peak performance of 180 teraflops, while high-end GPUs like the NVIDIA A100 achieve around 20 teraflops.
+
+### Systolic Arrays: Revolutionizing Computational Efficiency
+
+The most significant architectural feature of TPUs is the systolic array. A systolic array comprises a grid of processing elements (PEs) that rhythmically pass data through the chip, minimizing data movement. In a typical matrix multiplication scenario, data flows through the grid, allowing each PE to receive, multiply, and pass on values efficiently. This design reduces memory access overhead, a common bottleneck in computing. In contrast, GPUs rely on traditional memory hierarchies, which can introduce latency due to the need to fetch data from global memory. The systolic array architecture allows TPUs to achieve impressive performance-per-watt metrics, often outperforming GPUs in energy efficiency for specific workloads.
+
+### The Memory Movement Bottleneck in AI Workloads
+
+Memory bandwidth presents a critical challenge in AI workloads, where the cost of moving data can frequently exceed that of performing arithmetic operations. TPUs address this issue by incorporating large on-chip buffers and high-bandwidth memory, enabling effective data reuse and minimizing memory access. For instance, during matrix multiplication, a TPU can retain intermediate results within its architecture, significantly reducing the need to access slower external memory. This design consideration is vital for large-scale models, where memory access patterns can greatly influence overall performance. In practice, TPUs can achieve memory bandwidths upwards of 600 GB/s, while high-end GPUs typically range from 1-2 TB/s, showcasing the TPUs' efficiency in memory management.
+
+### Scaling Architectures: TPU Pods vs. GPU Clusters
+
+When it comes to scaling AI workloads, the architecture of processing units becomes increasingly significant. TPU Pods, which consist of thousands of interconnected TPUs, are designed to function as a single distributed accelerator. This architecture supports model parallelism, data parallelism, and pipeline parallelism, making it ideal for training large models. In contrast, GPU clusters can also scale, but they may not achieve the same level of efficiency due to their more generalized architecture. TPU Pods can scale beyond 1 exaflop, enabling the training of frontier-scale models with unprecedented efficiency, while GPU clusters often face diminishing returns as they scale.
+
+### Practical Use Cases: Choosing Between TPUs and GPUs
+
+The decision to utilize TPUs or GPUs often hinges on the specific use case. For workloads heavily reliant on matrix operations, such as training large deep learning models, TPUs can deliver substantial performance advantages. For example, Google’s BERT model was trained on TPU Pods, achieving state-of-the-art performance while significantly reducing training time. Conversely, applications requiring flexibility and support for diverse workloads may find GPUs more suitable. For instance, a project involving both graphics rendering and machine learning may benefit from the versatility of GPUs, whereas a production environment focused solely on neural network inference could leverage the efficiency of TPUs.
+
+### The Trade-Off: Flexibility versus Specialization
+
+A central trade-off between TPUs and GPUs is flexibility versus specialization. GPUs offer a more general-purpose architecture capable of handling a variety of tasks, making them suitable for a broader range of applications. However, this flexibility often comes at the cost of performance efficiency for specific tasks like matrix multiplication. TPUs, being highly specialized for neural network operations, deliver superior performance in those contexts but lack the versatility needed for other types of workloads. This trade-off is crucial for developers when selecting the appropriate hardware for their AI projects, as it directly impacts model design and operational efficiency.
+
+### The Future Trajectory of AI Hardware
+
+As AI systems continue to evolve, the trend toward specialized hardware is becoming increasingly pronounced. The success of TPUs has inspired a wave of AI accelerators from various companies, each engineered to optimize specific aspects of machine learning workloads. This shift indicates a departure from general-purpose computing towards a landscape dominated by specialized processors tailored to the unique requirements of AI. Understanding these architectural choices will become increasingly important for developers, as hardware decisions directly influence model efficiency, training costs, and overall system performance.
+
+### Conclusion: Strategic Implications for Developers
+
+In summary, the architectural differences between TPUs and GPUs have profound implications for AI workloads. By prioritizing the specialized requirements of neural networks, TPUs provide a compelling solution for optimizing performance and efficiency in machine learning applications. As AI continues to advance, developers and researchers must remain informed about the evolving landscape of AI hardware to make strategic decisions that align with their specific needs and objectives. The choice between flexibility and specialization will shape the future of AI development, influencing everything from model design to operational efficiency. Understanding these distinctions is not merely an academic exercise but a necessity for anyone involved in the rapidly evolving field of AI.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/shrsv/tpus-vs-gpus-how-googles-tensor-processing-units-actually-work-c8i)
+
+---
+
+<SocialShare title="Architectural Paradigms in AI Processing: A Comparative Analysis of TPUs and GPUs" slug="architectural-paradigms-in-ai-processing-a-comparative-analysis-of-tpus-and-gpus" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
