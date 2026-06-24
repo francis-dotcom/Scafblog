@@ -1,0 +1,572 @@
+---
+slug: building-the-future-of-ai-agents-a-guide-to-contributing-to-the-aaif-ecosystem
+title: "Building the Future of AI Agents: A Guide to Contributing to the AAIF Ecosystem"
+authors: [francis]
+tags: [ai, open-source, agents, infrastructure]
+date: 2026-06-24T08:55:53.128Z
+description: "AI agents are evolving from chat wrappers into systems that connect to tools, communicate with other agents, and run in production. But the infrastructure underneath, the protocols, runtimes, gateways, and conventions, is still being built. That's where the Agentic AI Foundation (AAIF) comes in.
+AAIF is an open and neutral home at the Linux Foundation for the standards, protocols, and open source projects that make agentic AI work. I was recently selected as an AAIF Ambassador, and this post is my attempt to map out the four core projects, how they fit together, and, most importantly, where you can start contributing today.
+MCP: The Protocol
+Goose: The Agent
+AGENTS.md: The Convention
+AgentGateway: The Infrastructure
+How They Work Together
+Connected Open Source Projects
+Difficulty Ranking
+AGENTS.md · Easiest Entry Point
+MCP Specification · Docs and Schema
+Goose · Rust Agent Framework
+AgentGateway · Production Rust Proxy
+Get Involved
+Model Context Protocol (MCP) is the foundational layer. It standardizes how AI agents connect to tools, data sources, and services. Think of it as a universal adapter between any agent and any tool.
+MCP servers expose three core primitives:
+Tools: Functions the agent can call (e.g., search_code, execute_query)
+Resources: Data the agent can read (e.g., files, database schemas)
+Prompts: Reusable templates for common agent tasks
+The protocol uses JSON-RPC 2.0 over multiple transports (stdio, SSE, Streamable HTTP). Build an MCP server once, and any MCP-compatible agent can use it. No more rebuilding integrations per framework.
+The current spec version uses date-based versioning (2025-11-25) and includes OAuth authentication, progress notifications, logging, and sampling (servers requesting LLM completions through the client).
+The ecosystem is large. Official SDKs exist in 10 languages: TypeScript, Python, Go, Rust, Java, Kotlin, Swift, C#, PHP, and Ruby. There are 7 reference servers (filesystem, git, memory, fetch, sequential thinking, time, everything) and an MCP Inspector for testing and debugging.
+
+
+
+
+
+
+
+
+
+Repo
+modelcontextprotocol/modelcontextprotocol
+
+
+Language
+TypeScript (spec + schema), MDX (docs)
+
+
+License
+Apache 2.0 (code), CC-BY 4.0 (docs)
+
+
+Docs
+modelcontextprotocol.io
+
+
+
+Goose is where MCP comes to life. It's an open source AI agent built in Rust with a native desktop app (macOS, Linux, Windows), a CLI, and an API server.
+Goose isn't just a coding agent. You can use it for research, writing, automation, and data analysis. It connects to 70+ MCP extensions and supports 15+ LLM providers (Anthropic, OpenAI, Google, Ollama, OpenRouter, Azure, Bedrock, and more). You can also use existing Claude, ChatGPT, or Gemini subscriptions via ACP (Agent Client Protocol).
+The Rust workspace is organized into focused crates:
+crates/
+├── goose              # core agent logic
+├── goose-cli          # CLI entry point
+├── goose-server       # backend (binary: goosed)
+├── goose-mcp          # MCP extension integrations
+├── goose-acp-macros   # ACP proc macros
+└── goose-test         # test utilities
+ui/desktop/            # Electron desktop app
+
+Development uses Hermit for reproducible tooling and just for task automation.
+
+
+
+
+
+
+
+
+
+Repo
+aaif-goose/goose
+
+
+Language
+Rust (edition 2021, min rustc 1.91.1), TypeScript (Electron UI)
+
+
+License
+Apache 2.0
+
+
+Docs
+goose-docs.ai
+
+
+
+AGENTS.md solves a specific problem: README files aren't written for AI agents. They tell humans what a project does, but they don't give an agent the build commands, test patterns, and conventions it needs to actually work on the codebase.
+An AGENTS.md file is a dedicated, predictable place for agent-specific context:
+## Dev environment tips
+- Use `pnpm dlx turbo run where <project_name>` to jump to a package.
+- Check the name field inside each package's package.json to confirm the right name.
+
+## Testing instructions
+- Run `pnpm turbo run test --filter <project_name>`.
+- Add or update tests for the code you change, even if nobody asked.
+
+## PR instructions
+- Title format: [<project_name>] <Title>
+- Always run `pnpm lint` and `pnpm test` before committing.
+
+No spec, no protocol. Just a convention. The repository includes a Next.js website at agents.md with examples and a community showcase.
+Notably, several AAIF projects already use AGENTS.md files themselves. Goose's CLAUDE.md points to its own AGENTS.md. The MCP spec repo, MCP Inspector, and MCP Go SDK all have AGENTS.md files guiding contributors and agents alike.
+
+
+
+
+
+
+
+
+
+Repo
+anthropics/agents.md
+
+
+Language
+TypeScript (Next.js), Tailwind CSS
+
+
+License
+MIT
+
+
+Site
+agents.md
+
+
+
+AgentGateway is a Rust-based proxy that sits between your agents, LLMs, tools, and other agents. It provides drop-in security, observability, and governance for agentic traffic.
+It handles three types of communication:
+LLM Gateway: Routes to LLM providers (OpenAI, Anthropic, Gemini, Bedrock, etc.) through a unified OpenAI-compatible API with budget controls, prompt enrichment, load balancing, and failover.
+MCP Gateway: Connects agents to tools via MCP with tool federation, multi-transport support, OpenAPI integration, and OAuth authentication.
+A2A Gateway: Enables agent-to-agent communication using Google's A2A protocol with capability discovery and task collaboration.
+Production features include:
+Auth: JWT, API keys, OAuth, fine-grained RBAC with CEL policy engine
+Guardrails: regex filtering, OpenAI moderation, AWS Bedrock Guardrails, Google Model Armor, custom webhooks
+Observability: OpenTelemetry metrics, logs, and distributed tracing
+Inference routing: Kubernetes Inference Gateway extensions with GPU utilization, KV cache, and LoRA adapter awareness
+From the project charter:
+The mission is to create a secure, scalable, and standardized foundation for AI agents to discover, communicate with, and leverage external tools and services.
+
+
+
+
+
+
+
+
+
+Repo
+agentgateway/agentgateway
+
+
+Language
+Rust (edition 2024, min rustc 1.90), TypeScript (UI)
+
+
+License
+Apache 2.0
+
+
+Docs
+agentgateway.dev
+
+
+
+
+MCP defines how agents connect to tools (the protocol)
+Goose is an agent that uses MCP (the runtime)
+AgentGateway provides infrastructure to operate MCP/LLM/A2A traffic securely at scale (the proxy)
+AGENTS.md gives agents the context they need to work on your codebase (the convention)
+AAIF projects don't exist in isolation. Here are key open source projects in their orbit:
+
+
+
+Project
+What It Does
+Link
+
+
+
+
+MCP TypeScript SDK
+Build MCP clients/servers in TypeScript
+modelcontextprotocol/typescript-sdk
+
+
+MCP Python SDK
+Build MCP clients/servers in Python
+modelcontextprotocol/python-sdk
+
+
+MCP Go SDK
+Build MCP clients/servers in Go
+modelcontextprotocol/go-sdk
+
+
+MCP Rust SDK (rmcp)
+Rust SDK used by Goose internally
+modelcontextprotocol/rust-sdk
+
+
+MCP Reference Servers
+7 reference implementations (filesystem, git, memory, etc.)
+modelcontextprotocol/servers
+
+
+MCP Inspector
+Developer tool for testing/debugging MCP servers
+modelcontextprotocol/inspector
+
+
+MCP Registry
+Discover community-built MCP servers
+registry.modelcontextprotocol.io
+
+
+
+
+
+
+Project
+What It Does
+Relationship
+
+
+
+
+A2A Protocol
+Google's Agent-to-Agent protocol
+AgentGateway implements A2A Gateway
+
+
+Kubernetes Gateway API
+Standard K8s ingress/gateway
+AgentGateway extends it for inference routing
+
+
+OpenTelemetry
+Observability framework
+AgentGateway exports OTEL metrics/logs/traces
+
+
+Ollama
+Run LLMs locally
+Goose uses Ollama as a provider for local inference
+
+
+OpenRouter
+Multi-provider LLM routing
+Goose supports OpenRouter as a provider
+
+
+KServe
+ML model serving on Kubernetes
+Complementary inference infrastructure
+
+
+MarkItDown
+Document-to-Markdown converter
+Useful for feeding documents to MCP resources
+
+
+
+Not all projects require the same level of expertise. Here's a practical ranking based on the actual contributing guides, toolchain requirements, and codebase complexity:
+
+
+
+Rank
+Project
+Barrier to Entry
+Best First Contribution
+
+
+
+
+1 (Easiest)
+AGENTS.md
+Node.js + pnpm
+Add an example, improve docs
+
+
+2
+MCP Spec
+Node.js 24+
+Fix docs, improve examples
+
+
+3
+Goose
+Rust + Hermit + Cargo
+Small bug fix linked to an issue
+
+
+4 (Hardest)
+AgentGateway
+Rust 1.90+ + npm + Make + (optionally K8s)
+Bug fix, docs improvement
+
+
+
+Why it's easiest: It's a Next.js website. If you know TypeScript and React, you can contribute immediately. There's no spec to learn, no protocol to understand.
+Setup:
+git clone https://github.com/YOUR-USERNAME/agents.md.git
+cd agents.md
+pnpm install
+pnpm run dev    # http://localhost:3000
+
+Coding standards:
+TypeScript (.tsx/.ts) for new components
+Use the dev server (pnpm run dev), never run npm run build during development, it breaks HMR
+Co-locate component styles with components
+Run npm run lint before submitting
+What to contribute:
+Add AGENTS.md examples from real-world projects (monorepos, Python packages, Rust crates)
+Improve the website design or UX
+Write documentation explaining best practices for writing AGENTS.md files
+Add case studies showing how AGENTS.md improved agent effectiveness
+Why it's accessible: The spec repo is TypeScript-based with clear tooling. Documentation contributions are the easiest path in, and the project explicitly welcomes them.
+Setup:
+git clone https://github.com/YOUR-USERNAME/modelcontextprotocol.git
+cd modelcontextprotocol
+nvm install       # correct Node version
+npm install
+npm run serve:docs  # preview docs locally
+
+Quality gate before submitting:
+npm run prep    # runs all checks, generates schemas, formats code
+
+Coding standards:
+Schema source of truth: schema/draft/schema.ts (TypeScript → generates JSON Schema + MDX)
+Docs: MDX format in docs/, blog: Hugo in blog/
+
+Date-based spec versioning (YYYY-MM-DD), NOT semver
+npm run format for code formatting
+npm run check:docs:links to verify no broken links
+AI disclosure required: If you use any AI assistance, you must disclose it in your PR description, along with the extent of use. MCP will close PRs that don't comply.
+What to contribute:
+Fix or improve documentation pages (MDX in docs/)
+Add schema examples (JSON files in schema/[version]/examples/[TypeName]/)
+Write blog posts for the Hugo blog (blog/)
+Propose spec changes via the SEP process (review the design principles first)
+Contribute to SDKs in your preferred language (Go, Python, TypeScript, Rust, etc.)
+Tip: The MCP Inspector (npx @modelcontextprotocol/inspector) is a great way to learn MCP interactively before contributing.
+Why it's moderate: Goose is a large Rust workspace. The barrier is Rust fluency and the Hermit-managed toolchain. But the project has clear contributing docs and a strong code review culture.
+Setup:
+git clone https://github.com/YOUR-USERNAME/goose.git
+cd goose
+source bin/activate-hermit    # installs Rust, Node, pnpm, just
+cargo build
+cargo test
+
+Quality gate before submitting:
+cargo fmt
+cargo clippy --all-targets -- -D warnings
+cargo test
+# If you changed server APIs:
+just generate-openapi
+
+Contributing rules:
+Start small. First PRs should be small bug fixes linked to existing issues. Large first PRs will be closed with a redirect to the contributing guide. Don't take it personally.
+Don't open many PRs at once. Submit in order of preference, wait for them to land.
+Conventional Commits required (feat:, fix:, docs:, etc.)
+No AI disclosure needed, but you're responsible for the final code. "Vibe coded" submissions that skip human review will be closed.
+AI code review is used. The project runs Codex as a reviewer. Address all its comments or explain why they don't apply.
+Code style: self-documenting code over comments, no logging unless for errors or security events, anyhow::Result for error handling.
+What to contribute:
+Bug fixes (link to an existing issue to show community need)
+Performance improvements
+New MCP extension integrations (in crates/goose-mcp/)
+UI improvements for the Electron desktop app (ui/desktop/)
+Documentation and examples
+Test improvements (prefer crates/goose/tests/ directory)
+Tip: Run ./target/debug/goose configure after building to set up an LLM provider, then ./target/debug/goose session to try Goose before contributing.
+Why it's hardest: AgentGateway is a production-grade proxy with deep networking code (TLS, HTTP/2, gRPC, xDS), a CEL policy engine, and optional Kubernetes integration. It requires Rust edition 2024 (min rustc 1.90) and understanding of proxy architecture.
+Setup:
+git clone https://github.com/YOUR-USERNAME/agentgateway.git
+cd agentgateway
+# Build UI
+cd ui && npm install && npm run build && cd ..
+# Build gateway
+export CARGO_NET_GIT_FETCH_WITH_CLI=true
+make build
+# Run
+./target/release/agentgateway    # UI at http://localhost:15000/ui
+
+Quality gate before submitting:
+make lint     # cargo fmt + clippy
+make test     # all Rust tests
+# If you touched UI:
+cd ui && npm run lint && npm test
+
+Contributing rules:
+Conventional Commits required
+Follow the Code of Conduct
+
+Add tests for new functionality
+Update docs for API/CLI/user-facing changes
+Formal governance: Technical Steering Committee (TSC) oversees all technical decisions
+For Kubernetes development (optional):
+DEVELOPMENT.md for the Tilt-based local workflow.
+What to contribute:
+Bug fixes (easiest path in)
+Documentation improvements
+New guardrail provider integrations
+OpenTelemetry trace/metric enhancements
+New MCP transport support
+Kubernetes deployment examples
+UI improvements
+Tip: Use GitHub Codespaces. AgentGateway includes a .devcontainer.json for one-click development environments. Click Code → Create codespace on main and you're ready to go.
+All four projects are actively developed and welcome contributors at every level, from typo fixes to protocol proposals.
+
+
+
+Project
+Repo
+Docs
+Community
+
+
+
+
+MCP
+github.com/modelcontextprotocol
+modelcontextprotocol.io
+GitHub Discussions
+
+
+Goose
+github.com/aaif-goose/goose
+goose-docs.ai
+Discord
+
+
+AGENTS.md
+github.com/anthropics/agents.md
+agents.md
+GitHub Issues
+
+
+AgentGateway
+github.com/agentgateway/agentgateway
+agentgateway.dev
+Discord
+
+
+
+The AAIF is at aaif.io. If you're interested in the ambassador program, you can find details there.
+The agentic AI ecosystem is being built right now, in the open. The projects above are the infrastructure layer: protocols, runtimes, gateways, conventions. They're not glamorous, but they're what makes agents actually work in production. If you care about that, pick a project, fork it, and start with something small.
+Happy Learning! 🚀
+Marco Gonzalez is a software engineer and AAIF Ambassador at the Linux Foundation. Find him on GitHub and LinkedIn...."
+image: /img/blog/generated/building-the-future-of-ai-agents-a-guide-to-contributing-to-the-aaif-ecosystem-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Building the Future of AI Agents: A Guide to Contributing to the AAIF Ecosystem](/img/blog/generated/building-the-future-of-ai-agents-a-guide-to-contributing-to-the-aaif-ecosystem-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### The Foundation of Agentic AI Infrastructure
+
+The Agentic AI Foundation (AAIF) is pioneering the development of a comprehensive infrastructure for AI agents, facilitating their evolution from simple chat interfaces to complex systems capable of interacting with various tools, databases, and other agents. This transition necessitates a robust framework that allows developers to create and integrate AI agents efficiently. Understanding the foundational projects of the AAIF is crucial for developers who wish to contribute to this transformative ecosystem.
+
+### Exploring the Core Projects of AAIF
+
+At the heart of the AAIF's mission are four core projects: the Model Context Protocol (MCP), Goose, AGENTS.md, and AgentGateway. Each project plays a vital role in establishing a cohesive environment for AI agents, promoting interoperability, documentation standards, and secure communications.
+
+### The Model Context Protocol (MCP): A Universal Adapter
+
+The Model Context Protocol (MCP) is the cornerstone of the AAIF infrastructure, designed to standardize how AI agents connect with tools, data sources, and services. The MCP operates as a universal adapter, simplifying integration across diverse systems. It exposes three fundamental primitives: tools, resources, and prompts.
+
+- **Tools** are functions that agents can invoke, such as executing queries or performing calculations. For instance, an agent could utilize a tool to fetch real-time weather data from an external API.
+
+- **Resources** refer to the data that agents can access, which may include files, databases, or APIs. A typical resource might be a JSON file containing user preferences or historical data.
+
+- **Prompts** serve as reusable templates for common tasks, enhancing efficiency in agent operations. For example, a prompt could be a predefined query structure that agents use to retrieve information from a knowledge base.
+
+The MCP leverages JSON-RPC 2.0 over various transport methods, including standard input/output, Server-Sent Events (SSE), and streamable HTTP. This versatility enables developers to create MCP servers that any compatible agent can utilize, significantly reducing the complexity of building integrations across different frameworks. This standardization is crucial for developers aiming to ensure their agents can interact seamlessly with other systems.
+
+### Goose: Implementing MCP in an Open-Source Framework
+
+Goose is an open-source AI agent framework that embodies the principles of the MCP, built in Rust. It is designed for a wide range of functionalities, including research, automation, and data analysis. Goose connects to over 70 MCP extensions and supports more than 15 large language model (LLM) providers, such as OpenAI's GPT and Anthropic's Claude.
+
+The architecture of Goose is modular, with distinct components organized into crates that handle core logic, command-line interfaces (CLI), and API servers. For example, developers can easily integrate new functionalities by leveraging existing subscriptions to LLMs through the Agent Client Protocol (ACP). This modularity enhances extensibility and empowers developers to build sophisticated AI applications tailored to specific use cases. A practical example of Goose in action could involve automating data analysis workflows, where agents pull data from various sources, process it, and generate insightful reports.
+
+### AGENTS.md: Standardizing Documentation for AI Agents
+
+While the MCP and Goose provide the technical foundation for AI agents, AGENTS.md addresses a critical need for effective documentation and conventions. Traditional README files often lack the necessary context for AI agents to navigate codebases effectively. AGENTS.md files serve as dedicated resources that provide agent-specific context, including development environment tips, testing instructions, and pull request guidelines.
+
+By standardizing this documentation format, AGENTS.md enables agents to autonomously understand and interact with codebases, thereby improving their effectiveness and reducing the cognitive load on developers. This is particularly beneficial in collaborative environments where multiple contributors may be working on the same project, ensuring that everyone is aligned on expectations and practices. For example, an AGENTS.md file might include a section on common pitfalls when setting up the development environment, along with troubleshooting steps.
+
+### AgentGateway: Ensuring Secure Communication Among Agents
+
+AgentGateway complements the AAIF ecosystem by providing a secure and scalable proxy for agent communications. Built in Rust, this gateway facilitates interactions between agents, LLMs, and tools, ensuring that data flows securely and efficiently. AgentGateway supports multiple communication types, including LLM routing, MCP connections, and agent-to-agent (A2A) interactions.
+
+A standout feature of AgentGateway is its robust security framework, which includes support for JSON Web Tokens (JWT), OAuth authentication, and fine-grained role-based access control (RBAC). This level of security is essential for production environments where sensitive data may be processed, ensuring that only authorized agents can access specific functionalities and data. For instance, an agent might require different access levels when interacting with personal user data compared to public datasets. The implementation of such security measures ensures that developers can build applications with confidence in their data protection protocols.
+
+### Contribution Pathways: How to Get Involved
+
+The AAIF actively encourages contributions from developers of all skill levels, providing clear pathways for involvement across its core projects. Each project has its own set of guidelines and entry points, making it easier for newcomers to find suitable starting points.
+
+#### Getting Started with AGENTS.md
+
+AGENTS.md is the most accessible project for new contributors. Developers familiar with TypeScript and React can quickly get involved by enhancing documentation, adding examples, or improving the website's design. For instance, contributors can add real-world examples of AGENTS.md files from existing projects, which can serve as valuable references for others.
+
+#### Contributing to the Model Context Protocol
+
+The Model Context Protocol presents a moderate challenge, requiring a solid understanding of Node.js and TypeScript. Contributors can enhance documentation, propose schema examples, or contribute to the development of SDKs in various programming languages. The MCP Inspector tool provides a hands-on way to learn about the protocol interactively, allowing contributors to test and debug MCP servers before diving into more complex contributions.
+
+#### Engaging with the Goose Framework
+
+Contributing to Goose requires proficiency in Rust and familiarity with its ecosystem. New contributors can start by addressing small bugs or improving existing features. The project's clear contributing guidelines and supportive community facilitate navigating the initial learning curve. For example, contributors might focus on integrating new LLM extensions or enhancing the command-line interface.
+
+#### Diving into AgentGateway
+
+AgentGateway is the most demanding project, necessitating a deep understanding of networking, security, and proxy architecture. However, even here, contributors can make meaningful contributions by addressing bugs, improving documentation, or adding new features. For instance, contributors could work on enhancing the observability features or integrating new guardrail providers to improve security.
+
+### Community Support: Fostering Collaboration
+
+The AAIF ecosystem is bolstered by a vibrant community of developers and enthusiasts. Each project has dedicated communication channels, such as Discord servers and GitHub Discussions, where contributors can seek assistance, share ideas, and collaborate on solutions. This sense of community is crucial for fostering a collaborative environment where developers can learn from one another and grow their skills.
+
+### The Importance of Collaborative Development in AI
+
+As the AI landscape continues to evolve, the importance of collaborative efforts becomes increasingly clear. The AAIF's infrastructure projects—MCP, Goose, AGENTS.md, and AgentGateway—represent a concerted effort to create a unified foundation for AI agents. By contributing to these projects, developers not only enhance their own skills but also play a vital role in shaping the future of AI technology.
+
+### Conclusion: Building the Future of AI Agents Together
+
+The Agentic AI Foundation offers a unique opportunity for developers to engage with cutting-edge technology and contribute to the development of a cohesive AI ecosystem. By understanding the foundational projects and actively participating in their evolution, developers can help build the infrastructure that will support the next generation of AI agents. Whether you are a seasoned engineer or a newcomer to the field, there is a place for you in this collaborative effort. Join us in building the future of AI agents!
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/mgonzalezo/the-open-source-agentic-ai-stack-what-aaif-projects-do-and-how-to-contribute-24be)
+
+---
+
+<SocialShare title="Building the Future of AI Agents: A Guide to Contributing to the AAIF Ecosystem" slug="building-the-future-of-ai-agents-a-guide-to-contributing-to-the-aaif-ecosystem" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
