@@ -1,0 +1,221 @@
+---
+slug: transforming-unstructured-indian-addresses-with-llms
+title: "Transforming Unstructured Indian Addresses with LLMs"
+authors: [francis]
+tags: [ai, llm, address-parsing, nlp]
+date: 2026-07-02T08:42:00.175Z
+description: "Cross-posting the full pipeline — data labeling, LoRA fine-tuning, cross-framework conversion, and a benchmark against an existing NER model — because most of the interesting bugs weren't in the ML at all.
+Indian addresses are notoriously unstructured. A single line can look like this:
+FLAT NO.32, UTTARA TOWERS, MG ROAD GUWAHATI , Kamrup Unclassified AS 781029
+
+House number, building name, street, locality, district, state, and pincode — all jammed into one free-text string with zero consistent formatting. If you've worked with Indian company registry data, bank KYC records, or delivery logistics, you already know this pain.
+I set out to build something that turns strings like the above into:
+{
+  "houseNumber": "FLAT NO.32",
+  "houseName": "UTTARA TOWERS",
+  "street": "MG ROAD",
+  "city": "GUWAHATI",
+  "district": "Kamrup",
+  "state": "AS",
+  "pincode": "781029",
+  "poi": null, "subsubLocality": null, "subLocality": null,
+  "locality": null, "village": null, "subDistrict": null
+}
+
+13 fields, always present, null when absent. Here's the whole pipeline, warts included.
+Starting point: 4.37M raw addresses from two very differently-shaped sources — Indian MCA (Ministry of Corporate Affairs) company registrations, and bank/business-correspondent branch records. No labels.
+Manual labeling doesn't scale to that volume, so the pipeline is layered:
+Rule-based tagging — regex + gazetteer cross-checks (pincode → district/state lookup from India Post's official pincode CSV) give every record a confidence score. High-confidence ones auto-accept as "silver" labels.
+LLM-assisted labeling for the rest — batched calls to an LLM via OpenRouter, with a system prompt that requires every extracted value to be copied verbatim from the source text. If the model's field value isn't a substring of the input, it gets dropped rather than trusted. This alone eliminates a whole class of hallucination.
+A small human-reviewed slice as a sanity check against the LLM's own accuracy before scaling up.
+One subtlety that actually mattered: MCA addresses have a machine-generated tail like "...Kamrup Unclassified AS 781029", where "Unclassified" is a fixed placeholder meaning "no sub-district classification recorded" — not a place name. Early runs had the LLM tagging "Unclassified" as a subDistrict value. Fixed by explicitly teaching the model about this convention in the prompt. Small thing, but it's the kind of domain quirk no generic address parser would know to avoid.
+Also worth calling out: field taxonomy design is harder than model training. The first schema (Google Maps' full geocoding component taxonomy, 35 types) was too granular for anyone — human or LLM — to label consistently. Collapsed it to 13 fields based on what a human reviewer could actually apply without agonizing over edge cases.
+LoRA on Qwen/Qwen3-0.6B, trained via MLX on an M4 Mac (mlx-lm's lora command — genuinely pleasant to work with on Apple Silicon, no CUDA/bitsandbytes wrangling).
+rank=16, alpha=32, dropout=0.05
+target_modules: q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj
+16 of 28 layers fine-tuned, 2000 iterations, ~1.8 hours
+
+Results on a 237-example held-out gold test set:
+
+
+
+Metric
+Value
+
+
+
+
+JSON parse rate
+100%
+
+
+Mean per-field accuracy
+82.4%
+
+
+Overall exact match (all fields)
+30.8%
+
+
+
+The gap between per-field accuracy and exact-match is the interesting bit. Digging into disagreements, most of it isn't the model being wrong — it's schema ambiguity. locality/subLocality/subsubLocality/village represent the same "named area, different granularity" concept, and even the gold labels are sometimes inconsistent about which bucket a given place name belongs in (I found gold records where the same string was labeled as both locality and village simultaneously). That's a taxonomy problem, not a model problem, and no amount of additional training fixes it without a firmer labeling convention.
+This is where most of the actual debugging time went, and none of it was ML.
+mlx-lm produces its own adapter format — not PEFT-compatible. To make the model usable on CUDA/CPU (not just Apple Silicon), I had to hand-derive the weight conversion:
+# mlx-lm: lora_a [in_features, r], lora_b [r, out_features], used as x @ A @ B
+# PEFT:   lora_A.weight [r, in_features], lora_B.weight [out_features, r]
+# So: peft_A = mlx_a.T, peft_B = mlx_b.T
+
+I verified this against mlx-lm's own fuse() source (delta = (scale * lora_b.T) @ lora_a.T) rather than trusting my own derivation, then confirmed numerically — ran the same 15 addresses through both the original MLX adapter and the converted PEFT version. 13/15 identical outputs; the 2 mismatches landed exactly on the already-known-ambiguous fields, consistent with floating-point differences between backends on a near-tied softmax decision rather than a conversion bug.
+Published the model to Hugging Face (both formats — PEFT at root, MLX in a subfolder), then wrapped it as a pip install-able package: indian-address-parser on PyPI, source on GitHub.
+Then real users tried to install it into their existing environments (Anaconda base envs, specifically), and things broke in sequence:
+peft imports transformers.BloomPreTrainedModel, whose lazy-loading chain unconditionally does import tensorflow. In a conda env with a mismatched TF/numpy/h5py install, that crashed the whole thing before ever touching TensorFlow functionality. Fix: os.environ["USE_TF"] = "0" before any transformers/peft import, so transformers' TF-detection short-circuits.
+
+
+qwen3 model type not recognized. Turns out transformers only added Qwen3 support at exactly version 4.51.0 — verified by bisecting real PyPI releases (4.50.0: no, 4.51.0: yes). My dependency floor (>=4.45.0) was loose enough that pip left an old transformers in place instead of upgrading it.
+
+
+hf_hub_download() got an unexpected keyword argument 'use_auth_token'. peft<0.18.0 unconditionally passes use_auth_token=None into hf_hub_download, regardless of whether the caller asked for it. Recent huggingface_hub (1.x) dropped that deprecated kwarg entirely. Bisected peft's source across ten versions to find the exact fix boundary (0.17.1: unconditional pass, 0.18.0: conditional via walrus operator).
+
+
+
+Each fix was verified against the actual reported failure, not just plausible-sounding — I built a venv pinned to the exact stale dependency trio from the bug report, installed the patched package, confirmed pip auto-upgraded everything, and ran real inference before calling it fixed.
+The lesson, if there is one: >=X.Y.Z floors need to be the actual minimum that works, verified, not "whatever I happened to have installed while developing." Loose floors don't fail for you — they fail for whoever has an older version already sitting in their environment.
+Once things were stable, I compared against Shiprocket's open-tinybert-indian-address-ner — a 6-layer TinyBERT doing BIO-tagged token classification, a fundamentally different architecture (and a different field taxonomy) than a 0.6B causal LM generating JSON.
+Built an explicit field mapping covering the 9 conceptually-overlapping fields (their house_details ↔ my houseNumber, road ↔ street, etc.) and scored both against the same 237-example held-out set:
+
+
+
+Field
+Mine
+Shiprocket's
+
+
+
+
+city
+91.3%
+17.4%
+
+
+state
+96.2%
+41.5%
+
+
+pincode
+100.0%
+69.2%
+
+
+houseNumber
+84.5%
+27.1%
+
+
+
+Higher accuracy on every shared field — but Shiprocket's model is ~240x faster per address (19ms vs 4.6s). That's not a quality artifact, it's architecture: a 6-layer classifier doing a single forward pass vs. autoregressive generation. If your use case needs high-throughput/low-latency parsing over perfect accuracy, that's a legitimate reason to pick the other model. I'd rather publish that tradeoff honestly than pretend the comparison only cuts one way.
+Also shipped the underlying data as two HF datasets:
+indian-addresses-raw — the full 4.37M-record unlabeled corpus
+indian-addresses-gold — 4,834 span-labeled training examples
+Before publishing the raw corpus, I found something worth mentioning: bank/BC address records are KYC-style data and some of them embed real customer phone numbers and relational-name markers (S/O/D/O/W/O/C/O — "son of"/"care of", standard on Indian address forms). That's different from MCA's superficially similar C/O <company director> convention, which is already public disclosure. Wrote a targeted redaction pass for the bank source (verified against the corpus, not assumed — caught a "Door No." vs "D/O [name]" false-positive collision along the way), and for the gold dataset specifically, dropped the small number of affected records instead of redacting in place, since redacting text shifts the character offsets that the span labels depend on.
+pip install indian-address-parser
+
+from indian_address_parser import AddressParser
+
+parser = AddressParser()  # pulls weights from HF automatically
+parser.parse("FLAT NO.32, UTTARA TOWERS, MG ROAD GUWAHATI , Kamrup Unclassified AS 781029")
+
+Everything's open source and Apache 2.0: model · GitHub · PyPI · datasets
+Feedback and PRs welcome, especially on the locality/subLocality boundary ambiguity — I have a hypothesis for a firmer labeling convention that would help, but haven't tested whether it actually resolves the disagreement rate or just moves it around...."
+image: /img/blog/generated/transforming-unstructured-indian-addresses-with-llms-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Transforming Unstructured Indian Addresses with LLMs](/img/blog/generated/transforming-unstructured-indian-addresses-with-llms-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### The Unstructured Nature of Indian Addresses
+
+Parsing Indian addresses is a formidable challenge due to their highly unstructured formats. Unlike standardized Western address systems, Indian addresses can vary dramatically, often cramming multiple components—such as house number, building name, street, locality, district, state, and postal code—into a single line with little to no consistent formatting. For instance, an address might read: “FLAT NO.32, UTTARA TOWERS, MG ROAD GUWAHATI, Kamrup Unclassified AS 781029.” This complexity necessitates a sophisticated parsing solution capable of accurately extracting and structuring these diverse components.
+
+### Data Sources: MCA and Bank Records
+
+The primary data sources for our address parsing project include the Ministry of Corporate Affairs (MCA) and various bank records. The MCA records are particularly challenging due to machine-generated artifacts, such as placeholders like "Unclassified," which can mislead parsers into incorrectly labeling components. Moreover, bank records often contain sensitive information, including customer names and phone numbers, necessitating careful handling to avoid privacy violations. Understanding the intricacies of these data sources is crucial for developing an effective parsing system.
+
+### Initial Approach: Rule-Based Tagging Limitations
+
+Our initial strategy involved rule-based tagging using regular expressions and gazetteer lookups. While this method can provide a baseline for parsing, it exhibits significant limitations. Rule-based systems often struggle with edge cases and domain-specific quirks, leading to high false positive and negative rates. For example, a regex pattern might successfully identify a postal code but fail to recognize variations in locality names, such as distinguishing between "MG Road" and "M.G. Road." Consequently, relying solely on rule-based methods can yield incomplete or inaccurate address parsing.
+
+### Enhancing Labeling with LLMs
+
+To address the limitations of rule-based tagging, we implemented a labeling pipeline that incorporates Large Language Models (LLMs). This methodology involves batching calls to an LLM, prompting it to extract address components directly from the source text. A critical aspect of this approach is ensuring that the model's outputs are verifiable substrings of the input text. This constraint significantly mitigates the risk of hallucination, where the model generates plausible but incorrect outputs. 
+
+### Detailed Labeling Pipeline
+
+The labeling pipeline consists of several stages. First, we apply rule-based tagging to generate initial labels, assigning confidence scores based on the presence of key terms. High-confidence entries are auto-accepted as "silver" labels. For the remaining entries, we utilize LLM-assisted labeling through batched calls to the model. Each prompt is designed to extract specific address components, ensuring that the output is a direct substring of the input text. For instance, given the input "FLAT NO.32, UTTARA TOWERS, MG ROAD GUWAHATI, Kamrup Unclassified AS 781029," the model successfully extracts components like "FLAT NO.32" as the house number and "GUWAHATI" as the city. This meticulous design helps maintain the integrity of the extracted data.
+
+### Addressing Domain-Specific Quirks
+
+One of the most significant challenges during development was addressing domain-specific quirks within the data. For instance, the LLM initially misinterpreted the term "Unclassified" as a valid sub-district value. By explicitly instructing the model about this convention in the prompt, we were able to mitigate such errors. This experience underscores the importance of tailoring the LLM's training and prompts to the dataset's unique characteristics, ensuring it can effectively handle the complexities inherent in Indian addresses.
+
+### Importance of Field Taxonomy Design
+
+A critical component of the parsing system is the design of a robust field taxonomy. Our initial schema, inspired by Google's geocoding taxonomy, included 35 types. However, this proved overly complex for both human annotators and the LLM, leading to inconsistencies in labeling. For example, the model struggled to categorize addresses with multiple locality names or ambiguous district identifiers. We ultimately simplified the taxonomy to 13 essential fields, striking a balance between granularity and usability. This decision was pivotal in enhancing the model's performance and ensuring consistent labeling across the dataset.
+
+### Performance Benchmarking and Trade-offs
+
+To evaluate the effectiveness of our address parser, we benchmarked its performance against existing models, specifically Shiprocket's open-tinybert-indian-address-ner. Our model demonstrated superior accuracy across shared fields, achieving 91.3% accuracy for city identification compared to Shiprocket's 17.4%. However, our model is significantly slower, processing addresses in approximately 4.6 seconds per entry, while Shiprocket's model achieves 19 milliseconds. This trade-off highlights a critical consideration for practitioners: the choice between accuracy and speed depends on the specific requirements of the application.
+
+### Handling Schema Ambiguity
+
+A notable observation from our benchmarking was the discrepancy between per-field accuracy and overall exact match rates. Our model achieved an 82.4% mean per-field accuracy, yet the overall exact match rate was only 30.8%. This gap underscores the issue of schema ambiguity, particularly in fields like locality, sub-locality, and village, which can represent overlapping concepts. For instance, an address may list "MG Road" as both a street and a locality, leading to confusion in categorization. Addressing this ambiguity requires a firmer labeling convention to ensure consistency, as even gold-standard labels can exhibit conflicting categorizations.
+
+### Implementation Challenges and Solutions
+
+Throughout the implementation process, we encountered several technical challenges, particularly related to dependency management and model compatibility. For instance, ensuring compatibility between different versions of the Hugging Face Transformers library and the PEFT (Parameter-Efficient Fine-Tuning) framework involved meticulous version control and testing. We discovered that loose version constraints in dependencies could lead to runtime errors for users with outdated libraries. This experience reinforced the importance of specifying precise version requirements to ensure a smooth installation process for end-users.
+
+### Real-World Application and Future Directions
+
+The open-source Indian address parser has been published on platforms like Hugging Face and PyPI, making it accessible for developers and researchers. However, the journey does not end here. Future directions include refining the field taxonomy further to reduce ambiguity, enhancing the model's performance through additional fine-tuning, and exploring alternative architectures that could offer better speed without sacrificing accuracy. Additionally, gathering user feedback will be crucial for identifying areas of improvement and ensuring the parser meets the diverse needs of its users.
+
+### Conclusion: The Path Forward in Address Parsing
+
+In conclusion, the development of a robust address parser for Indian data using LLMs illustrates the potential of combining rule-based and machine learning approaches. By incorporating detailed examples of address parsing outcomes and addressing the nuances of Indian address formats, we have laid a strong foundation for future advancements. While significant challenges remain, particularly in handling schema ambiguity and ensuring model accuracy, the results achieved thus far demonstrate a promising path forward. As the landscape of address parsing continues to evolve, ongoing research and collaboration will be essential in addressing the complexities of unstructured data and enhancing the accuracy of parsing systems.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/gagan1985/building-an-open-source-indian-address-parser-from-raw-mcabank-data-to-a-fine-tuned-llm-2n9c)
+
+---
+
+<SocialShare title="Transforming Unstructured Indian Addresses with LLMs" slug="transforming-unstructured-indian-addresses-with-llms" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
