@@ -1,0 +1,348 @@
+---
+slug: bridging-the-ai-coordination-gap-custom-slm-vs-off-the-shelf-llm-in-banking
+title: "Bridging the AI Coordination Gap: Custom SLM vs. Off-the-Shelf LLM in Banking"
+authors: [francis]
+tags: [ai, banking, slm, llm]
+date: 2026-07-05T08:39:36.860Z
+description: "Originally published at twarx.com - read the full interactive version there.
+Last Updated: July 5, 2026
+Most AI technology deployments in banking are solving the wrong problem entirely. They obsess over model size while ignoring the fact that a six-step underwriting pipeline where each step is 97% reliable is only 83% reliable end-to-end — a gap that regulators, not engineers, discover first. When it comes to AI technology in regulated finance, that compounding seam is the whole ballgame, and it is almost never on the slide deck.
+This piece is about a real deployment decision facing every operations leader in financial services right now: build a custom small language model (SLM) or license an off-the-shelf LLM like GPT-4o or Claude. The tooling — LangGraph, Anthropic's MCP, RAG, and orchestration layers — matured enough in 2026 that this AI technology choice is now a budget-line decision, not a research bet.
+By the end, you'll know exactly which to deploy, what it costs, and why the real bottleneck is coordination — not model choice.
+
+The custom SLM versus off-the-shelf LLM decision in banking hinges less on accuracy benchmarks and more on where the AI Coordination Gap opens up across regulated workflows. Source
+The trend crossing every banking CIO's desk this week — 'Five hallmarks of effective AI strategies in banking' and the flood of 'Agentic AI statistics 2026' reports — has created a dangerous shortcut in decision-making. Executives are treating model selection as the strategic decision. It isn't. The model is a component. The system is the strategy.
+Here's the honest hard truth: a custom SLM fine-tuned on your loan documentation, or a general-purpose LLM like GPT-4o, will both hit 95%+ accuracy on isolated tasks. Classification, summarization, entity extraction — modern AI technology nails all of it. Yet 2025 saw a wave of stalled banking AI pilots, and almost none failed because the model was too small or too dumb. They failed at the seams: the handoff from the document-ingestion agent to the risk-scoring agent to the compliance-logging system that no one designed as a unit. I've watched this happen repeatedly, and it's painful every time because the fix is usually obvious in retrospect.
+That's the phenomenon this article names and dissects.
+Coined Framework
+The AI Coordination Gap is the compounding reliability loss that occurs at the handoffs between AI components, tools, and human reviewers in a multi-step workflow — not inside any single model. It names why individually excellent AI parts produce collectively unreliable systems in regulated environments.
+For banking and financial services — where a single mis-routed decision can trigger a regulatory finding — the Coordination Gap is the difference between a demo and a deployment. In this article we'll cover:
+What each option actually is — custom SLM vs off-the-shelf LLM, in production terms, not marketing terms.
+
+
+The five-layer decision framework built around closing the AI Coordination Gap.
+
+
+Real ROI numbers from named financial-services deployments.
+
+
+The architecture — how RAG, fine-tuning, orchestration, and MCP fit together.
+
+
+The mistakes that kill 60–70% of banking AI pilots before they ship.
+
+
+
+The contrarian claim I'll defend throughout: for most regulated financial workflows, a smaller, cheaper, custom SLM inside a well-orchestrated system beats a frontier LLM used naively — because the win comes from coordination, not raw intelligence. This flips the instinct that bigger models are always safer. In regulated contexts, a model you can host, audit, and version deterministically often reduces risk more than a black-box frontier API. I would not ship a high-volume KYC pipeline on GPT-4o alone. Full stop.
+83%
+End-to-end reliability of a 6-step pipeline where each step is 97% accurate
+[Compounding error math, arXiv 2025](https://arxiv.org/)
+
+
+
+
+$4.4T
+Projected annual value of AI agents across enterprise workflows
+[McKinsey, 2025](https://www.mckinsey.com/capabilities/mckinsey-digital/our-insights)
+
+
+
+
+10-30x
+Inference cost reduction of a fine-tuned SLM vs frontier LLM per token
+[OpenAI pricing analysis, 2025](https://openai.com/research/)
+
+Before the framework, clear definitions — because vendor marketing has muddied both terms badly. Understanding this AI technology distinction is the foundation of every downstream cost and compliance decision.
+A large, general-purpose model accessed via API — GPT-4o from OpenAI, Claude from Anthropic, or Gemini from Google DeepMind. You send a prompt, you get a response. You pay per token. You control nothing about the weights, and the model may be deprecated or updated underneath you without warning. In banking, that last point matters enormously: a silent model update can shift underwriting behaviour without a change-control record. I've seen compliance teams go pale when they realize this.
+A smaller model — typically 1B to 15B parameters (Llama 3.1 8B, Mistral 7B, Phi-3) — that you fine-tune on your own domain data and host yourself, on-prem or in a private VPC. Narrower but yours: auditable, versioned, and cheap to run at scale. It won't write poetry. But it will classify a mortgage exception with 98% precision after fine-tuning on 5,000 labelled examples, and it'll do it without sending a single SSN to a third-party API. See the Hugging Face fine-tuning docs for the practical path.
+In regulated finance, the model you can audit, version, and freeze beats the model that's marginally smarter but changes under you without a change-control ticket.
+DimensionCustom SLM (self-hosted)Off-the-Shelf LLM (API)
+Per-task inference costVery low ($0.0001–0.001)10–30x higher
+Data residency / privacyFull control, on-prem possibleData leaves your perimeter
+Auditability & versioningDeterministic, frozen weightsVendor may update silently
+Reasoning breadthNarrow, task-specificBroad, general-purpose
+Time to first valueWeeks (data + fine-tune)Days (prompt only)
+Best forHigh-volume, repeatable, regulated tasksLow-volume, varied, exploratory tasks
+Regulatory defensibilityHighModerate (depends on vendor SOC2/contract)
+A fine-tuned Mistral 7B running on a single A100 can process ~40,000 loan-document classifications per hour at roughly 1/20th the cost of GPT-4o — and never sends a customer's SSN outside your VPC. For high-volume repeatable tasks, that's not a close call.
+
+The two deployment paths diverge sharply on data residency and cost — but converge on the same failure point: the coordination layer between AI components. Source
+Choosing SLM vs LLM is only step one. The framework below is what separates a banking AI pilot that ships from one that dies in security review. Each layer names a place where the AI Coordination Gap opens — and how to close it.
+Coined Framework
+The AI Coordination Gap is the compounding reliability loss at the seams of a multi-agent workflow. The framework's five layers each target a specific seam where accuracy leaks in production banking systems.
+The 5-Layer Coordination Framework for Banking AI
+  1
+
+
+    **Layer 1 — Model Selection (SLM vs LLM)**
+
+Route each task to the right model. High-volume repeatable tasks (classification, extraction) → fine-tuned SLM. Low-volume reasoning tasks (exception review, customer nuance) → frontier LLM. Inputs: task volume, sensitivity, latency budget.
+↓
+
+
+  2
+
+
+    **Layer 2 — Grounding (RAG + Vector DB)**
+
+Ground every model call in your policy documents, product terms, and regulatory rules using RAG over a vector database like Pinecone. Prevents hallucinated rates and non-compliant advice. Latency: ~100–300ms retrieval.
+↓
+
+
+  3
+
+
+    **Layer 3 — Orchestration (LangGraph / AutoGen)**
+
+Define the state machine: which agent runs when, what triggers a handoff, and where state persists. This is where the Coordination Gap is closed — explicit edges, not implicit hope.
+↓
+
+
+  4
+
+
+    **Layer 4 — Tool & Data Access (MCP)**
+
+Standardize how agents call core banking systems, CRM, and ledgers via Model Context Protocol. One auditable interface instead of bespoke glue per integration.
+↓
+
+
+  5
+
+
+    **Layer 5 — Verification & Human-in-Loop**
+
+Every decision above a risk threshold routes to a verification agent or human reviewer, with a full audit log. This layer converts 83% raw reliability into 99%+ defensible reliability.
+The sequence matters: model choice is Layer 1, but Layers 3–5 are where regulated banking deployments actually succeed or fail.
+Don't pick one model for the whole workflow. The winning pattern in 2026 is heterogeneous routing: a cheap fine-tuned SLM handles 80% of the volume (document classification, KYC field extraction), and a frontier LLM is reserved for the 20% of cases requiring genuine reasoning — an ambiguous exception, a nuanced complaint. This routing alone cuts inference spend by 60–75% versus running everything through GPT-4o. We learned this the expensive way on an early pilot before we put the routing logic in place. Explore practical routing patterns in our guide to multi-agent systems.
+No banking model should answer from parametric memory. Ever. Every rate, fee, and eligibility rule must be retrieved live from an authoritative source via RAG. A hallucinated APR isn't a bug — it's a compliance incident. Pair a Pinecone or pgvector store with citation-required prompting so every output links to the source clause. Non-negotiable.
+This is the heart of the framework. LangGraph lets you model your workflow as an explicit graph — nodes for each agent, edges for each handoff, with persistent state and conditional routing. Compared to letting agents freely 'talk' (the AutoGen conversational pattern), a LangGraph state machine gives you deterministic, auditable transitions. Regulators don't want to hear that your agents figured it out through conversation. They want to see the graph. Learn more in our breakdown of orchestration layers.
+The companies winning with banking AI aren't the ones with the biggest models. They're the ones who drew the graph — every handoff explicit, every state persisted, every decision logged.
+The Model Context Protocol, open-sourced by Anthropic in late 2024 and now broadly adopted, replaces the tangle of bespoke API glue between agents and core systems. Instead of writing a custom connector for your loan-origination system, your CRM, and your ledger, you expose each as an MCP server. Agents discover and call them through one standard interface. One auditable surface for security review, instead of a rat's nest of one-off integrations that no one fully understands six months later.
+This is the layer most pilots skip and most regulators demand. Any decision above a defined risk threshold — a loan denial, a fraud flag, a rate quote — routes to a verification agent (a second model checking the first) and, above a higher threshold, a human. This is how you recover the reliability lost across the pipeline. To assemble these layers faster, explore our AI agent library for pre-built verification and routing agents.
+
+A LangGraph state machine makes every handoff in the workflow explicit and auditable — the practical mechanism for closing the AI Coordination Gap in production. Source
+Here's the pragmatic implementation path, drawn from real financial-services deployments. Start narrow, prove ROI on one workflow, then expand. Teams that try to boil the ocean on the first deployment fail consistently — not because the tech doesn't work, but because the change management doesn't.
+Python — LangGraph banking workflow skeleton
+from langgraph.graph import StateGraph, END
+def classify_document(state):
+def assess_risk(state):
+def route_decision(state):
+graph = StateGraph(dict)
+The step sequence for a first deployment:
+Pick one high-volume, low-ambiguity workflow. KYC document extraction or loan-exception triage are ideal first targets — repeatable, measurable, and painful enough that stakeholders actually care about fixing them.
+
+
+Fine-tune an SLM on 3,000–8,000 labelled examples. Llama 3.1 8B or Mistral 7B on a single GPU gets you to 96%+ precision. See Hugging Face fine-tuning docs.
+
+
+Stand up RAG over your policy corpus in a vector database with citation-required prompting.
+
+
+Draw the LangGraph. Explicit nodes, explicit edges, persisted state. This is the anti-Coordination-Gap step — don't skip it.
+
+
+Expose systems via MCP. Wrap your core banking, CRM, and ledger as MCP servers.
+
+
+Add verification and human-in-loop above your risk thresholds, with full audit logging.
+
+
+Measure end-to-end reliability, not per-step accuracy. This is the metric regulators and your board actually care about, and it's almost always worse than teams expect the first time they look.
+
+
+
+For teams standardizing on low-code orchestration alongside code, n8n pairs well for the connector and human-approval steps — see the n8n docs. Compare orchestration options in our enterprise AI guide, and browse ready-made components in our AI agent library.
+The single highest-ROI change in most banking AI pilots isn't a better model — it's replacing free-form agent conversation with a deterministic LangGraph state machine. One mid-size lender cut error-driven rework by 47% with zero model changes.
+Klarna reported its AI assistant handled the equivalent of 700 full-time agents' workload, resolving customer queries in under 2 minutes on average — a documented operational shift, not a lab result. JPMorgan's COIN system reduced hundreds of thousands of hours of contract-review labour to seconds. Numerous mid-market banks running fine-tuned SLMs for document processing report 50–65% reductions in manual processing time, with inference costs an order of magnitude below frontier-API alternatives. These aren't anomalies. They're what happens when the coordination layer is actually engineered.
+Klarna's AI didn't replace 700 agents because the model was smart. It replaced them because the workflow around the model was designed as a system — grounded, orchestrated, and verified end to end.
+700
+Full-time-agent workload handled by Klarna's AI assistant
+[Klarna, 2024](https://www.klarna.com/international/press/klarna-ai-assistant-handles-two-thirds-of-customer-service-chats-in-its-first-month/)
+
+
+
+
+50-65%
+Manual processing time cut in SLM document-workflow deployments
+[Financial-services pilot data, 2025](https://arxiv.org/)
+
+
+
+
+360K+
+Annual lawyer-hours automated by JPMorgan's COIN contract system
+[Industry reporting, 2023](https://www.jpmorgan.com/technology)
+
+After watching dozens of financial-services pilots stall or fail, the patterns are remarkably consistent. None of them are about model quality. Not one.
+  ❌
+  Mistake: Optimizing per-step accuracy, ignoring end-to-end
+
+Teams celebrate a 97%-accurate classifier while the six-step pipeline it lives in delivers 83% end-to-end. The AI Coordination Gap eats the gains at every handoff, and no one measures the compound number. This is how you ship something that looks great in a demo and fails its first compliance audit.
+  ✅
+
+Fix: Instrument end-to-end reliability from day one. Add a LangGraph verification node (Layer 5) that logs pass/fail across the full chain, not per component.
+  ❌
+  Mistake: Defaulting to a frontier LLM for everything
+
+Running high-volume KYC extraction through GPT-4o burns 10–30x the necessary cost and ships customer PII outside the perimeter — a data-residency headache that will stop your security review cold.
+  ✅
+
+Fix: Fine-tune a self-hosted SLM (Mistral 7B / Llama 3.1 8B) for repeatable tasks; reserve the frontier LLM for the ambiguous 20% via conditional routing.
+  ❌
+  Mistake: Free-form agent conversation in production
+
+Letting AutoGen-style agents 'chat their way' to an answer feels magical in a demo. In production it produces non-deterministic, unauditable decision paths. That's an instant regulatory red flag, and I've seen it kill pilots that were otherwise technically solid.
+  ✅
+
+Fix: Model the workflow as an explicit LangGraph state machine with defined edges. Keep conversational agents for exploration only, never production decisions.
+  ❌
+  Mistake: Skipping RAG grounding on regulated outputs
+
+Relying on the model's parametric memory for rates, fees, and eligibility rules guarantees eventual hallucination. A hallucinated APR isn't a bug your team fixes quietly — it's a compliance incident with a paper trail.
+  ✅
+
+Fix: Ground every regulated output in a live RAG retrieval over your policy corpus with citation-required prompting, so every answer links to its source clause.
+According to multiple 2025 enterprise surveys, a large share of AI pilots never reach production — and the through-line is coordination and governance, not model capability. Andrew Ng, founder of DeepLearning.AI, has repeatedly made this point: the value increasingly lives in the agentic workflow, not the raw model. Anthropic's applied research teams say the same thing differently — reliability in production comes from constraining and verifying model behaviour, not from scale alone. And Harrison Chase, CEO of LangChain, built LangGraph explicitly to make agent workflows controllable and auditable. That's the Coordination Gap problem, named by the people closest to it.
+
+Layer 5 verification and human-in-the-loop review convert an 83% raw pipeline into a 99%+ defensible one — the difference between a demo and a regulated deployment. Source
+[
+  ▶
+Watch on YouTube
+Building auditable multi-agent workflows with LangGraph
+LangChain • Orchestration for regulated industries
+
+](https://www.youtube.com/results?search_query=langgraph+multi+agent+banking+workflow+tutorial)
+2026 H2
+
+
+  **SLM routing becomes the default banking pattern**
+
+As inference-cost pressure mounts and fine-tuning tooling matures, heterogeneous SLM+LLM routing replaces single-frontier-model deployments in cost-sensitive, high-volume financial workflows.
+2027 H1
+
+
+  **MCP becomes a procurement requirement**
+
+With broad adoption following Anthropic's open-sourcing, expect banking security teams to require MCP-standardized tool interfaces for auditability — bespoke connectors become a red flag in vendor review.
+2027 H2
+
+
+  **Regulators codify end-to-end reliability standards**
+
+As agentic AI enters credit and fraud decisions, expect supervisory guidance to demand documented end-to-end reliability and audit trails — formalizing the Coordination Gap as a compliance concept.
+By 2027, 'what model did you use?' will be the least interesting question in a banking AI audit. 'Show me your workflow graph and your end-to-end reliability logs' will be the whole conversation.
+Coined Framework
+The AI Coordination Gap is why banks with world-class models still fail in production: reliability leaks at the seams. The winning strategy engineers the seams — routing, grounding, orchestration, tool access, and verification — as deliberately as the models themselves.
+So, custom SLM or off-the-shelf LLM? For most banking workflows, the honest answer is: a fine-tuned SLM for the high-volume core, a frontier LLM for the reasoning edge, and a LangGraph-orchestrated system that closes the Coordination Gap around both. The right AI technology strategy treats the model as a component and the system as the strategy. Get the coordination right, and model choice becomes what it should've been all along — a cost-and-control optimization, not a bet-the-quarter decision. Dig deeper into the build patterns in our AI agents guide.
+Coined Framework
+Name it in your next AI strategy deck. Once your leadership sees that reliability lives at the handoffs — not inside any single model — the entire build/buy conversation reorganizes around the right problem.
+Agentic AI technology refers to systems where language models don't just respond to prompts but take actions — calling tools, querying databases, making decisions, and coordinating multiple steps toward a goal. Instead of a single request-response, an agent plans, executes, observes results, and adjusts. In banking, an agentic KYC workflow might extract fields from a document, retrieve relevant policy via RAG, score risk, and route exceptions to a human — autonomously. Tools like LangGraph, AutoGen, and CrewAI provide the frameworks. The key production insight: agentic systems fail at handoffs, not at reasoning, which is why orchestration and verification layers matter more than raw model intelligence. Start with a single narrow, high-volume workflow before attempting broad autonomy.
+Multi-agent orchestration coordinates several specialized AI agents — each handling one task — through a defined control structure. In LangGraph, you model this as a state graph: nodes are agents or functions, edges are handoffs, and shared state persists across steps. A classifier agent passes to a risk-scoring agent, which conditionally routes to either an auto-approve node or a human-review node. This deterministic approach beats free-form agent 'conversation' (the AutoGen pattern) for regulated use because every transition is explicit and auditable. Orchestration is precisely where the AI Coordination Gap is closed — by making handoffs deliberate rather than implicit. Add persistence, retry logic, and a verification node above risk thresholds. For low-code connector and approval steps, n8n complements code-based orchestration well.
+Across financial services and beyond, adoption is broad. Klarna's AI assistant publicly handled the workload equivalent of 700 customer-service agents. JPMorgan's COIN system automated hundreds of thousands of hours of contract review. Morgan Stanley deployed an OpenAI-powered assistant for its financial advisors. Beyond banking, companies like Salesforce (Agentforce), Shopify, and numerous mid-market lenders run fine-tuned SLM workflows for document processing and support triage. The common thread among successful deployments isn't model size — it's disciplined orchestration, RAG grounding, and human-in-the-loop verification. Companies that treated the model as the whole solution largely stalled in pilot; those that engineered the surrounding system shipped. Explore patterns in our AI agents guide.
+They solve different problems and are usually combined. Fine-tuning adjusts a model's weights on your domain data, teaching it a task or style — ideal for making a small model excel at, say, classifying loan exceptions with 98% precision. RAG (Retrieval-Augmented Generation) keeps weights frozen but injects live, retrieved information into the prompt at query time via a vector database like Pinecone. In banking, fine-tune an SLM to learn how to perform a task, and use RAG to ground it in current rates, policies, and rules — because those change and must be cited. Fine-tuning for behaviour, RAG for facts. Using RAG for volatile regulatory data avoids the compliance risk of a model 'remembering' an outdated APR. See our full RAG breakdown.
+Install it with pip install langgraph and start by sketching your workflow as a graph before writing code — nodes for each task, edges for each handoff. Define a shared state object (a Python dict or Pydantic model), add nodes with graph.add_node(), connect them with add_edge() or add_conditional_edges() for branching logic, set an entry point, and compile. Begin with a two-node graph (classify → verify) and expand incrementally. Add persistence early so state survives failures, and instrument logging for auditability from day one. The official LangChain docs have production examples. LangGraph is production-ready and widely deployed. For banking, prioritize deterministic conditional routing over free-form agent loops. See our step-by-step LangGraph guide and browse pre-built nodes in our agent library.
+The most instructive failures in regulated AI share a theme: coordination and grounding, not model quality. A widely-reported case saw an airline's support chatbot invent a refund policy the company was then held to — a grounding failure fixable with RAG and citation-required prompting. Numerous banking pilots stalled because free-form agent workflows produced non-deterministic, unauditable decision paths that failed security review. Others shipped models with 97% per-step accuracy but never measured the 83% end-to-end reality of their pipelines — the AI Coordination Gap in action. The lesson: measure end-to-end reliability, ground every regulated output in retrieved sources, make every handoff explicit and logged, and always add human-in-the-loop above risk thresholds. Model quality is rarely the root cause of production failure.
+MCP (Model Context Protocol) is an open standard, introduced by Anthropic in late 2024, for connecting AI models and agents to external tools and data sources through a consistent interface. Instead of writing bespoke integration code for every system — your core banking platform, CRM, ledger, document store — you expose each as an MCP server, and any MCP-compatible agent can discover and call it. For banking, the value is auditability and security: one standardized, reviewable interface instead of a tangle of custom connectors. MCP has seen rapid adoption across the ecosystem and is increasingly expected in enterprise procurement. It sits at Layer 4 of the coordination framework, standardizing tool access so orchestration and verification layers can rely on predictable, logged system calls. Treat it as production-relevant infrastructure, not experimental.
+
+Rushil Shah
+AI Systems Builder & Founder, Twarx
+Rushil Shah is the founder of Twarx and an AI systems builder who has spent years designing autonomous workflows, multi-agent architectures, and AI-powered business tools. He writes from real implementation experience — covering what actually works in production, what fails at scale, and where the industry is heading next. His work focuses on making agentic AI practical for builders and businesses.
+LinkedIn · Full Profile
+This article was originally published on Twarx. Follow for daily deep dives on AI agents and automation...."
+image: /img/blog/generated/bridging-the-ai-coordination-gap-custom-slm-vs-off-the-shelf-llm-in-banking-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Bridging the AI Coordination Gap: Custom SLM vs. Off-the-Shelf LLM in Banking](/img/blog/generated/bridging-the-ai-coordination-gap-custom-slm-vs-off-the-shelf-llm-in-banking-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### Understanding the AI Coordination Gap in Banking
+
+In the banking sector, the AI Coordination Gap is a critical challenge that arises during the integration of multiple AI components within complex workflows. This gap manifests as a cumulative reliability loss at the transitions between various AI models, tools, and human reviewers. For example, consider a six-step underwriting process where each step achieves 97% accuracy. When assessed end-to-end, the overall reliability plummets to approximately 83%. This stark discrepancy underscores the necessity of not only selecting the appropriate AI model but also effectively orchestrating the entire system to close the coordination gap.
+
+### The Distinction Between Custom SLM and Off-the-Shelf LLM
+
+When evaluating AI deployment strategies, banking operations leaders often grapple with the decision of choosing between a custom small language model (SLM) and an off-the-shelf large language model (LLM). While both types of models can achieve high accuracy on isolated tasks, their operational implications differ significantly. A custom SLM, typically fine-tuned on domain-specific data, offers advantages such as lower inference costs, enhanced data residency, and improved auditability. For instance, a fine-tuned Mistral 7B model can efficiently process around 40,000 loan-document classifications per hour at a fraction of the cost associated with using a GPT-4o API, which can be 10 to 30 times more expensive per token. In regulated environments, the ability to host and audit a custom model often outweighs the marginal intelligence gains provided by a large, general-purpose LLM.
+
+### The Five-Layer Decision Framework for AI Deployment
+
+To effectively address the AI Coordination Gap, a structured approach is essential. The five-layer decision framework provides a systematic method to navigate the intricacies of AI deployment in banking:
+
+1. **Model Selection**: Identify the appropriate model for each task based on volume, sensitivity, and latency requirements. High-volume tasks such as classification should leverage a fine-tuned SLM, while lower-volume, nuanced tasks may benefit from an off-the-shelf LLM.
+
+2. **Grounding**: Implement Retrieval-Augmented Generation (RAG) techniques to ensure that model outputs are grounded in current policy documents and regulatory requirements. This prevents the generation of non-compliant advice and enhances the reliability of outputs.
+
+3. **Orchestration**: Design a state machine that explicitly defines the workflow, including agent interactions and handoffs. This orchestration layer is crucial for closing the coordination gap, as it ensures that transitions between agents are deterministic and auditable.
+
+4. **Tool and Data Access**: Utilize the Model Context Protocol (MCP) to standardize how agents interact with core banking systems and data sources. This reduces the complexity of integrations and enhances security through a single, auditable interface.
+
+5. **Verification and Human-in-the-Loop**: Establish a verification layer that routes decisions above a defined risk threshold to a secondary model or human reviewer. This layer is vital for converting raw reliability into a defensible, compliant output.
+
+### Real-World Case Studies: Successes and Failures
+
+Examining real-world implementations provides valuable insights into the practical application of these principles. For instance, Klarna's AI assistant successfully handled the workload equivalent of 700 full-time customer service agents by leveraging a well-orchestrated workflow. The AI system not only improved response times but also significantly reduced operational costs.
+
+Conversely, many banking AI pilots have stalled or failed due to a lack of attention to the coordination layer. For example, a financial institution that deployed a high-accuracy classifier without measuring end-to-end reliability faced compliance issues when the overall system only achieved 83% reliability. This case underscores the importance of focusing on the entire workflow rather than individual model performance.
+
+### Common Pitfalls in AI Deployments
+
+Despite the potential benefits of AI in banking, several common pitfalls can derail projects. One major mistake is optimizing for per-step accuracy while neglecting end-to-end reliability. Teams often celebrate high accuracy in isolated tasks without recognizing that the cumulative impact of errors at each handoff can lead to significant reliability losses.
+
+Another frequent error is defaulting to a frontier LLM for all tasks, which can result in excessive costs and data residency challenges. Instead, a more effective strategy is to reserve LLMs for low-volume, complex reasoning tasks while utilizing fine-tuned SLMs for high-volume, repeatable processes.
+
+### Best Practices for Implementing AI Workflows
+
+To mitigate these risks and ensure successful AI deployments, several best practices should be followed:
+
+- **Measure End-to-End Reliability**: From the outset, teams should focus on tracking the overall reliability of the entire workflow rather than individual components. This approach provides a clearer picture of system performance and compliance.
+
+- **Utilize RAG for Grounding**: Implement RAG techniques to ensure that all outputs are grounded in authoritative sources, thus reducing the risk of compliance incidents arising from hallucinated information.
+
+- **Design Explicit Workflows**: Use tools like LangGraph to create explicit state machines that define the workflow, including agent interactions and decision paths. This clarity helps to close the coordination gap effectively.
+
+- **Incorporate Human Oversight**: Establish verification mechanisms that involve human reviewers for high-risk decisions. This adds an additional layer of reliability and compliance assurance.
+
+### Conclusion: The Future of AI in Banking
+
+As the banking industry continues to embrace AI, the focus must shift from merely selecting the right model to designing robust systems that effectively orchestrate AI components. The AI Coordination Gap serves as a reminder that even the most advanced models can falter if not integrated within a well-structured workflow. By adopting a systems-centric approach and implementing the five-layer decision framework, banking operations leaders can navigate the complexities of AI deployment, enhance operational efficiency, and ensure compliance in an increasingly regulated environment.
+
+Through disciplined orchestration and a focus on end-to-end reliability, the future of AI in banking promises to unlock significant value while mitigating the risks associated with AI technology.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/aarhamforensics_eb3c024eb/ai-technology-in-banking-custom-slm-vs-off-the-shelf-llm-2026-m2c)
+
+---
+
+<SocialShare title="Bridging the AI Coordination Gap: Custom SLM vs. Off-the-Shelf LLM in Banking" slug="bridging-the-ai-coordination-gap-custom-slm-vs-off-the-shelf-llm-in-banking" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
