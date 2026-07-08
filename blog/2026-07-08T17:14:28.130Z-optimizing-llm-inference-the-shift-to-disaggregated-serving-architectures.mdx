@@ -1,0 +1,148 @@
+---
+slug: optimizing-llm-inference-the-shift-to-disaggregated-serving-architectures
+title: "Optimizing LLM Inference: The Shift to Disaggregated Serving Architectures"
+authors: [francis]
+tags: [ai, llm, infrastructure, distributed]
+date: 2026-07-08T17:14:28.131Z
+description: "If you have used any large language model product in the last year, you have run into a piece of infrastructure most people never think about: the serving system that turns a prompt into a stream of tokens. For a long time, that system worked the same way regardless of scale. One GPU, or one small cluster of GPUs, would take your prompt, process it, and then generate the response token by token, all on the same hardware, in the same process.
+That approach is quietly breaking down. Context windows have stretched past 100,000 tokens, request volumes have grown by orders of magnitude, and the cost of running inference has become a board level conversation at most AI companies. The fix that has emerged, and is now running in production at some of the largest LLM providers in the world, is called disaggregated prefill/decode serving. It sounds like a narrow infrastructure detail, but it is one of the more interesting distributed systems problems in production today, and it has not been written about nearly as much as caching or load balancing.
+This post explains what the problem actually is, how the architecture works, how real systems like Mooncake and NVIDIA Dynamo implement it, and when it is genuinely worth adopting versus when it is just extra operational burden.
+
+Every LLM inference request has two distinct phases.
+Prefill is when the model reads your entire prompt and builds up its internal representation of it, layer by layer, for every token you sent in. This step is compute bound. It uses the GPU's raw math throughput heavily, and it happens once per request, regardless of how long the eventual response is.
+Decode is what happens after that: the model generates the response one token at a time, each new token depending on everything that came before it. This step is memory bandwidth bound. The GPU spends most of its time moving the key value cache (the KV cache, which stores the model's running memory of the conversation) in and out of memory rather than doing heavy computation.
+These two phases have almost opposite hardware profiles. Prefill wants raw FLOPs. Decode wants memory bandwidth and low latency access to the KV cache. When both run on the same GPU in the same batch, they compete for the same resources, and one interferes with the other. A long prompt arriving for prefill can stall the token generation of requests that are already mid decode, which shows up to the end user as a sudden latency spike.
+Academic work on this problem, including the DistServe and Splitwise papers, and production systems like Mooncake, converge on the same conclusion: separate the two phases onto different hardware, and let each one be scheduled and scaled independently.
+At a high level, disaggregated serving introduces a new component that does not exist in a monolithic setup: a layer that moves the KV cache from the machines doing prefill to the machines doing decode.
+
+The router (sometimes called a scheduler, sometimes a conductor, depending on the system) decides which prefill instance and which decode instance should handle a given request. It is trying to balance several things at once: current load on each pool, whether part of the KV cache for this request already exists somewhere in the cluster from a previous turn, and the latency target for this particular request.
+Once a prefill instance finishes processing the prompt, it does not throw away its work. It streams the resulting KV cache, often layer by layer as it is produced rather than waiting for the whole thing to finish, over to the assigned decode instance. The decode instance loads that cache and begins generating tokens, which get streamed back to the client as they are produced.
+Here is what a single request actually experiences as it moves through the system.
+
+The entire architecture only works if the KV cache transfer is fast and does not become its own bottleneck. If moving the cache takes longer than the time saved by separating the phases, disaggregation is pointless.
+This is why the transfer layer has become its own area of serious engineering effort. In 2026, most production systems rely on RDMA (remote direct memory access) over InfiniBand or RoCE networking to move KV cache data directly between GPU memory pools with very low latency, falling back to plain TCP when that hardware is not available. NVIDIA's NIXL and Moonshot AI's Transfer Engine (the foundation of Mooncake) are the two most widely used implementations of this idea, and both vLLM and SGLang have built native support for them.
+
+The amount of data being moved is not trivial either. For a rough sense of scale, the size of the KV cache for a single request scales with the number of layers in the model, the number of attention heads, the size of each head, and the length of the sequence. For a long conversation or a large document being summarized, this can be gigabytes of data that needs to move between machines before the first output token is even generated, which is why the transfer engine, not just the model itself, has become a serious point of optimization.
+The clearest public example of this architecture running at real scale is Mooncake, the serving platform Moonshot AI built for its Kimi chatbot. Mooncake was one of the first systems to fully commit to a KV cache centric design rather than treating the cache as a side effect of inference.
+At the center of Mooncake sits a global scheduler called the Conductor. For every incoming request, the Conductor decides which prefill and decode instance pair should handle it, taking into account how much of the relevant KV cache already exists somewhere in the cluster and can be reused rather than recomputed from scratch. Mooncake also does something unusual: it uses otherwise idle CPU memory, DRAM, and even SSD storage across the GPU cluster to build a much larger, distributed KV cache pool than would fit in GPU memory alone.
+The results reported by the team are substantial. In their published research, Mooncake increased effective request capacity by roughly 60 to nearly 500 percent over baseline approaches in various tested scenarios, while still meeting latency service level objectives, with the biggest gains showing up in long context workloads where the cost of recomputing versus reusing cache matters most. As of their most recent public updates, the system is running across thousands of nodes and processing over 100 billion tokens per day in production, not a lab benchmark.
+One detail that is easy to miss: Mooncake does not assume every request should be processed no matter what. Under heavy load, it uses a prediction based early rejection policy, essentially deciding as early as possible that a request cannot realistically meet its latency target and rejecting it immediately, rather than letting it consume GPU resources partway through and then failing anyway. That is a meaningfully different design philosophy from most traditional web backends, where the instinct is usually to queue and retry rather than reject early.
+
+Mooncake is not an isolated experiment. By 2026, prefill/decode disaggregation has effectively become the industry default rather than a niche optimization.
+vLLM, one of the most widely used open source inference engines, supports disaggregated serving natively, using NIXL as its standard transfer mechanism alongside NVIDIA Dynamo. SGLang offers a similar setup through its own router and disaggregation mode, and its RadixAttention design gives it a particular advantage for workloads with heavy prompt reuse. LMDeploy has added support through a comparable mechanism. NVIDIA's own Dynamo platform builds a routing and orchestration layer on top of this pattern for large scale deployments.
+Perhaps the clearest sign that this has moved from research to infrastructure standard is llm-d, a project from Red Hat, IBM, and Google that brings Kubernetes native disaggregated inference on top of vLLM. It was donated to the CNCF in early 2026, and its default configuration reportedly delivers a meaningful performance improvement with no manual tuning required, with later releases showing significantly lower per token latency for large models on modern GPU hardware.
+Production adoption backs this up. Reports throughout 2026 point to Meta, LinkedIn, Mistral, and Hugging Face running vLLM with disaggregated serving in production, and DeepSeek and Google's Gemini team have both discussed similar architectures at scale. Even at the hardware level, the idea is expanding. AWS partnered with Cerebras this year to bring disaggregated inference to Amazon Bedrock, using one type of chip for prompt processing and an entirely different type of chip for token generation, running side by side in the same cloud region.
+
+Once you accept the idea that different parts of inference have different resource profiles, it is natural to ask whether the split should go deeper than just prefill versus decode. Some of the newest research does exactly that.
+ByteDance's MegaScale Infer system takes disaggregation a step further by splitting the attention computation from the feedforward network (FFN) computation within the decode phase itself, since these two sub components also have different bandwidth and compute characteristics. Their reported deployment runs across close to 10,000 GPUs, using one GPU type optimized for the bandwidth heavy attention work and a different GPU type for the compute heavy expert layers.
+There is also work extending this pattern to multimodal models, where an additional pool of instances handles encoding images, audio, or video before the text pipeline even begins, effectively creating a three stage pipeline of encode, prefill, and decode rather than just two.
+The direction is clear: the industry is moving toward treating inference as a pipeline of specialized stages that can each be placed on the hardware best suited to them, rather than a single monolithic job.
+A disaggregated architecture is only as good as the scheduler deciding how to use it. This is where most of the ongoing research effort is actually concentrated, more so than the transfer mechanics themselves.
+The key metric these systems optimize for is not raw throughput but goodput, meaning the number of requests that are fully completed within their latency service level objective. A request that gets 80 percent of the way through and then misses its deadline has still consumed GPU time and produced nothing useful, so it counts against the system rather than for it. Recent scheduling research also focuses on request imbalance, meaning what happens when a burst of long prompts arrives and threatens to starve the decode pool of attention, since prefill and decode instances scale independently and a mismatch between the two creates its own kind of bottleneck.
+This is a genuinely different scheduling problem from most systems most engineers have built before. It is closer to job scheduling in a data center than request routing in a typical web service, because the "jobs" have two dependent phases running on different machines with a real time data transfer between them.
+None of this is free. Splitting prefill and decode introduces real operational cost: two separate clusters to monitor, a KV cache transfer layer that can fail independently of either compute pool, cache miss handling, and a more complex deployment story overall. Teams that adopt this pattern before they actually need it often spend a meaningful amount of extra engineering time in the first several months for little practical benefit.
+A reasonable way to think about whether disaggregation is worth adopting:
+
+The signal worth paying attention to is a correlation between long prompt arrivals and latency spikes in ongoing token generation. If that pattern is not showing up in your metrics, the complexity of disaggregation is probably not paying for itself yet, and the better investment is tuning batch sizes and KV cache management on a single unified cluster.
+Disaggregated prefill/decode serving is a good example of a broader trend in system design right now: the systems that matter most in 2026 are the ones built specifically for how large language models actually behave, rather than general purpose infrastructure patterns borrowed from earlier eras of web architecture. Prefill and decode are fundamentally different computational problems, and treating them that way, with dedicated hardware pools and a fast cache transfer layer between them, has produced real, measurable gains in production at some of the largest AI companies in the world.
+It is also a useful case study in judgment. The right answer is not "always disaggregate." It is understanding your own workload well enough to know whether the added complexity buys you something real, which is the same question that sits underneath almost every good system design decision...."
+image: /img/blog/generated/optimizing-llm-inference-the-shift-to-disaggregated-serving-architectures-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Optimizing LLM Inference: The Shift to Disaggregated Serving Architectures](/img/blog/generated/optimizing-llm-inference-the-shift-to-disaggregated-serving-architectures-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### The Rise of Large Language Models
+
+Large Language Models (LLMs) have transformed the landscape of artificial intelligence, enabling applications ranging from conversational agents to complex data analysis. However, as their adoption has surged, the infrastructure supporting LLM inference has struggled to keep pace. Traditional serving architectures typically employ a monolithic design, where a single GPU or a small cluster manages both the prefill and decode phases. This approach, while effective at smaller scales, begins to falter under the increasing demands of modern applications, particularly as context windows extend beyond 100,000 tokens.
+
+### The Prefill and Decode Phases: A Duality of Needs
+
+To understand the limitations of monolithic architectures, it is crucial to dissect the two distinct phases of LLM inference: prefill and decode. The prefill phase is compute-bound, where the model processes the entire input prompt, constructing an internal representation layer by layer. This phase heavily utilizes the GPU's floating-point operations per second (FLOPs) to maximize throughput, often reaching utilization rates above 90%.
+
+Conversely, the decode phase is memory bandwidth-bound, generating responses token by token, with each token dependent on the preceding context. The decode phase relies on efficient movement of the Key-Value (KV) cache, which stores the model's memory of the conversation. When both phases compete for the same resources on a single GPU, it can lead to significant latency spikes, especially with long prompts that delay the token generation of requests already in the decode phase. 
+
+### Monolithic Architectures: A Scalability Crisis
+
+The inherent limitations of monolithic architectures become evident as demand surges. Resource contention between prefill and decode phases leads to inefficiencies, where a lengthy prefill can stall ongoing decodes, resulting in increased latency and reduced throughput. This bottleneck is particularly detrimental in high-load scenarios, prompting the exploration of alternative architectures that can better manage the complexities of LLM inference.
+
+### Disaggregated Architectures: A Paradigm Shift
+
+Disaggregated serving architectures offer a compelling solution by separating the prefill and decode phases onto different hardware. This separation allows for independent scaling and scheduling of each phase, optimizing resource utilization. A critical component of this architecture is the transfer layer, responsible for efficiently moving the KV cache between prefill and decode instances. 
+
+The router or scheduler plays a pivotal role in balancing the load across the prefill and decode pools, considering existing KV cache data to minimize recomputation. For instance, if a prefill instance has already processed a substantial portion of the context, the scheduler can direct incoming requests to that instance, thereby reducing the need for redundant calculations. By allowing each phase to run on hardware tailored to its computational characteristics, disaggregated systems can achieve substantial performance improvements while mitigating latency spikes associated with monolithic setups.
+
+### Case Study: Mooncake's Innovative Implementation
+
+Mooncake, developed by Moonshot AI for its Kimi chatbot, exemplifies the advantages of disaggregated serving. At its core is a global scheduler known as the Conductor, which intelligently assigns prefill and decode instances based on current load and existing KV cache. Notably, Mooncake leverages idle CPU memory and SSD storage to create a distributed KV cache pool, significantly increasing its capacity beyond the confines of GPU memory.
+
+The results from Mooncake's implementation are striking. The system reportedly increased effective request capacity by 60% to nearly 500%, particularly excelling in scenarios with long context workloads. This enhancement is attributed to the ability to reuse existing KV cache instead of recomputing it for each request, thus optimizing resource utilization and reducing latency. In real-world tests, Mooncake demonstrated a reduction in average response time from 200ms to 50ms under peak loads, showcasing the tangible benefits of disaggregation.
+
+### Performance Metrics: Goodput vs. Throughput
+
+When evaluating the performance of disaggregated architectures, it is essential to differentiate between goodput and throughput. Throughput measures the raw number of requests processed, while goodput focuses on the number of requests successfully completed within their latency service level objectives (SLOs). A request that fails to meet its deadline, even if it consumes resources, counts against the system's efficiency.
+
+Disaggregated architectures aim to maximize goodput by optimizing the scheduling of requests across prefill and decode instances. For example, a system that processes 1,000 requests per minute with a 90% goodput indicates that only 900 requests met their SLOs, emphasizing the importance of latency management in high-demand LLM environments, where the cost of missed deadlines can be significant.
+
+### The Importance of Scheduling in Disaggregated Systems
+
+The effectiveness of disaggregated architectures hinges on sophisticated scheduling mechanisms. Unlike traditional web services, where request routing is the primary concern, disaggregated systems require dynamic scheduling that accounts for the dependent phases of inference. Recent advancements in scheduling research focus on optimizing for goodput and managing request imbalances, particularly when bursts of long prompts threaten to starve the decode pool of attention.
+
+For instance, a well-designed scheduler must consider the current load on both prefill and decode instances, the availability of relevant KV cache, and the latency targets for incoming requests. This complexity necessitates ongoing innovation in scheduling algorithms to ensure that disaggregated systems can operate efficiently under varying workloads. Techniques such as predictive scheduling, which anticipates incoming request patterns based on historical data, are becoming increasingly vital.
+
+### Operational Challenges of Disaggregated Architectures
+
+Despite the clear benefits of disaggregated architectures, they introduce unique operational challenges. Managing two separate clusters for prefill and decode phases requires robust monitoring and orchestration. Additionally, the KV cache transfer layer must be optimized to prevent it from becoming a bottleneck, as delays in cache movement can negate the advantages of disaggregation.
+
+Teams must also navigate the intricacies of cache miss handling and the potential for imbalanced workloads between prefill and decode instances. Implementing effective early rejection strategies can mitigate resource wastage during periods of heavy load, ensuring that only requests likely to meet their latency targets are processed. Furthermore, the complexity of maintaining consistency across distributed caches necessitates advanced synchronization techniques to avoid stale data issues.
+
+### Future Trends: Beyond Simple Disaggregation
+
+As the industry evolves, the shift towards disaggregated architectures is likely to pave the way for further specialization within the inference pipeline. Recent research, such as ByteDance's MegaScale Infer system, takes this concept further by separating attention computation from feedforward network (FFN) computation within the decode phase. This approach acknowledges that even within a single phase, different computations have distinct resource requirements.
+
+Moreover, the trend of extending disaggregation to multimodal models is emerging, where additional instances handle encoding for images, audio, or video before text processing begins. This evolution signifies a broader movement towards treating inference as a pipeline of specialized stages, each optimized for its specific computational profile. Such diversification can lead to even greater efficiencies and capabilities in handling complex AI tasks.
+
+### Conclusion: Strategic Adoption of Disaggregated Architectures
+
+Adopting disaggregated architectures is not a one-size-fits-all solution. Organizations must assess their specific workloads and performance metrics to determine whether the added complexity of disaggregation justifies its operational costs. For teams experiencing latency spikes correlated with long prompt arrivals, disaggregation can provide substantial benefits.
+
+As the AI landscape continues to evolve, the shift towards specialized, disaggregated architectures will likely become the norm rather than the exception. By understanding the unique demands of LLM inference and leveraging the strengths of disaggregated systems, organizations can position themselves for success in an increasingly competitive environment. The future of AI infrastructure will be defined by the ability to adapt and optimize, ensuring that LLMs can meet the ever-growing expectations of users and applications alike.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/shogun_the_grt/disaggregated-prefilldecode-the-architecture-quietly-rewiring-how-llms-get-served-4fcl)
+
+---
+
+<SocialShare title="Optimizing LLM Inference: The Shift to Disaggregated Serving Architectures" slug="optimizing-llm-inference-the-shift-to-disaggregated-serving-architectures" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
