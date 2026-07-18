@@ -1,0 +1,182 @@
+---
+slug: streamlining-observability-for-indie-developers-a-practical-guide
+title: "Streamlining Observability for Indie Developers: A Practical Guide"
+authors: [francis]
+tags: [observability, indie-dev, docker, backend]
+date: 2026-07-18T17:21:10.584Z
+description: "The question gets asked on r/node every few months, on r/selfhosted every few weeks, and on Hacker News whenever a Datadog invoice goes viral. Some variant of: "What are you actually using for observability on small or side projects?"
+The answers always go the same way. Someone confesses to Datadog and feels bad about it. Someone defends a Grafana + Prometheus stack they spent a weekend wiring up. Someone pitches their YC-funded unified-observability tool. Eventually a quieter voice admits they're using Sentry for errors and UptimeRobot for uptime and not much else. The quieter voice gets upvoted but rarely defended.
+The quieter voice is right. Observability for an indie app on a single host isn't a stack you build, it's a small set of pillars you can mostly skip. This is the case for skipping.
+The mistake the unified-observability vendors want you to make is treating observability as one category. It isn't. It's four to seven separate concerns, ranked here by how often a one-person team genuinely needs them:
+Errors — when your code blows up, what was the stack trace and what request triggered it?
+Uptime — is the site responding to the outside world right now?
+Host metrics — is the VPS hot, full, or running out of disk?
+Logs — what was the app doing in the seconds before something went wrong?
+Cron / dead-man-switch — did the backup job actually run last night?
+Traces — when a request fans out across services, which step was slow?
+Session replay — what did the user click before they hit the bug?
+These are different problems. They have different data shapes. They have different storage requirements. The unified-observability pitch is that you save effort by handling them in one tool. That's true at the scale where you have enough of each problem to justify the joint cost. On a single host with one developer and a few hundred users a day, most of these pillars don't fire often enough to need a tool at all.
+Three of the seven pillars are handled by tools that have been on your Linux box for thirty years.
+Logs. docker logs -f containername shows you the live tail of any container. journalctl -fu servicename does the same for systemd units. tail -F /var/log/app.log for anything writing to disk. For "find me every 500 in the last hour," grep -E "5[0-9]{2}" app.log | tail -100 is fine. This stops scaling when you have multiple hosts, multiple services, or log volume that breaks grep — none of which describes a single-host indie app.
+Host metrics. htop for CPU and memory. df -h for disk. iostat 1 for I/O patterns. iftop if you genuinely care about per-connection bandwidth. These are enough to answer "is the box hot, full, or starved?" — which is the question an indie monitoring dashboard would be asking on your behalf, just with a graph in front of it. The graph is nice. It is not load-bearing.
+Cron failures. Crontab supports MAILTO= at the top of the file. Any cron job that exits non-zero or produces output gets emailed to that address. This catches the failure mode that observability dashboards are worst at: the job didn't run, so there's nothing to alert on. The cheapest dead-man-switch in existence is one line of configuration that's already on every Linux box. Use it.
+Logs, metrics, and cron failures on one host are three commands and one line of config away from solved. The reason most observability writeups don't tell you this is that it doesn't sell tools. The reason indie writeups don't tell you this is that the people writing them have already passed the scale where this stops working, and they're remembering the world they're in now, not the world the reader is asking about.
+There's a real inflection where these tools stop being enough. Until you hit it, the four-figure Datadog bill and the weekend-long Grafana setup are both solving the same problem you don't have yet.
+Two of the seven pillars genuinely can't be handled by SSH and grep. They need a dedicated tool from day one.
+Errors. An unhandled exception usually lands in docker logs too — but the log line is a tombstone, not an autopsy. By definition you weren't watching when it fired, so what you actually want is the request that triggered it, the user and session state at that moment, the release version, and the 400 other occurrences grouped into one issue with a regression flag. Grep gives you none of that. And the errors that never touch your server logs at all — frontend JS exceptions, failed background jobs — don't even leave a tombstone. There's no SSH-and-grep substitute for this pillar.
+Uptime. By definition, the box can't monitor itself. When the VPS hangs, an uptime check running on the same VPS hangs with it. The monitor has to live in a different failure domain from the thing it watches. For a single-host indie app, that means an external SaaS, not Uptime Kuma on the same box.
+The reader's actual decision is among three configurations:
+Disclosure: the UptimeRobot and BetterStack links below are PI affiliate links — we earn a commission if you sign up for a paid plan, on top of what you'd pay anyway. The free tiers don't pay anything; we recommend them because they're genuinely what most indie apps need. Bugsink and Sentry aren't affiliates.
+1. BetterStack alone. BetterStack bundles error tracking, uptime monitoring, logs, status pages, and on-call into one product. Free tier covers 100k exceptions/month, 10 uptime monitors at 30-second intervals, 3 GB logs, a status page, and 5,000 session replays per month. The error tracking is Sentry-SDK compatible — point your existing Sentry SDK at BetterStack's endpoint and it works. Marketing copy is "Sentry-compatible at 1/6th the price" on paid tiers. Simplest path: one SaaS, one signup, both can't-grep pillars covered, plus a few extras.
+2. Bugsink + UptimeRobot. Two focused tools, one self-host option. Bugsink for errors — hosted free at 15k events/month, or self-host in a single container. Their install docs are direct: "SQLite is used by default when running Bugsink in Docker and not specifying a DATABASE_URL." UptimeRobot for uptime — 50 monitors at 5-minute intervals on the free tier. Bugsink is also Sentry-SDK compatible, so the switching cost between any of these error trackers is near zero.
+3. Sentry + UptimeRobot. Sentry covers errors hard — 5k errors plus 5M spans plus 50 replays per month on the free plan, with full traces and the deepest SDK ecosystem of any of the three. The catch on the free plan is that uptime is limited to one monitor, which is too tight for most indie apps; pair with UptimeRobot for the uptime pillar. Best if you specifically want traces and replays, not just errors and uptime.
+A few notes on these configurations:
+Lock-in is low across this category. All three error-tracking tools — Sentry, BetterStack, Bugsink — accept the same Sentry SDK, so changing tools is changing a DSN, not rewriting code. More broadly, observability data isn't sticky the way data in a notes app or an ebook library is: your last month of error reports matters; your last three years almost never does. That makes "pick whichever one you like and switch later if you outgrow it" a defensible plan, not just a technical possibility — which is also why a sustainability hiccup in a monitoring tool carries milder consequences than the same hiccup in a tool where years of user data accumulate.
+The errors pillar has a self-host option (Bugsink); the uptime pillar doesn't. Not for any technical reason — Uptime Kuma is good software — but because of the failure-domain rule: a monitor on the same box can't tell you the box is down. Uptime has to live external.
+The recurring r/node question "Anyone using sentry in self hosted mode? How much of a pain is it?" gets a real answer here. Sentry's self-host project is actively maintained, but the documented minimum specs are 4 CPU cores, 16 GB RAM, and 16 GB swap. That's a $40+/month VPS dedicated to your error tracker before you've started monitoring anything. Bugsink runs in one container on the same VPS as your app.
+For session replay specifically: Sentry (50/month free) and BetterStack (5,000/month free) both offer it; Bugsink doesn't. If replay matters, that narrows the choice.
+All four tools have durable funding mechanisms as of 2026-05-12 — Sentry is public-company scale, BetterStack is well-funded private commercial, UptimeRobot is mature commercial, Bugsink is a small project with a clear hosted-tier revenue path (€16–158/month paid tiers). That matters more than the free tier itself. Free monitoring SaaS from operators with no revenue mechanism have a tendency to disappear when the operator loses interest, and you find out the way you usually find out: by realizing the dashboard hasn't updated in three weeks.
+The day-one stack covers errors and uptime, plus grep and SSH for everything else. The next four pillars each have a specific moment when they start earning their place. None of them is "you'll need this eventually, set it up now."
+Second host enters the picture → centralized logs. Once you have more than one box producing logs, ssh box1; docker logs followed by ssh box2; docker logs stops being acceptable. This is where a logs backend earns its container — Loki in monolithic mode, Vector with a sink to object storage, or a single-binary tool like VictoriaLogs. The threshold isn't about volume; it's about how many places you SSH into to debug one incident.
+Three or more services with internal HTTP calls → traces. A request fans out across services. One step is slow. You don't know which. Tracing is the only tool that answers this; the others are workarounds. OTLP-native backends like OpenObserve, Quickwit, or Jaeger v2 run as single binaries. You can also pick up the trace pillar by adopting a unified tool like Traceway, which runs on SQLite in a single Alpine container and bundles errors, spans, logs, and replay together — a different graduation path than adding a dedicated tracer to an existing stack.
+Consumer-facing UI where reproducing a bug matters → session replay. This pillar earns its weight only when your support workflow involves "what did the user click before this broke?" If that's not how you debug, replay is extra storage you don't need. When it is, it's the moment a unified-observability tool starts genuinely paying back.
+Sustained host-metrics need on a single VPS → a dedicated metrics tool. Beszel is the lightest option — a Go hub plus a tiny agent, MIT-licensed, SQLite-backed, designed for small-VPS use. Solo-maintained without a commercial mechanism, but switching agents is cheap if it ever comes to that.
+Team of two or more → status page becomes external-facing. A status page only your team can see is a debug tool, not a status page. The moment customers exist, you want something at status.yourapp.com so they don't email you to ask whether the API is down.
+Multi-host with a real ops team is a different problem. At that point the question stops being "what's the minimum?" and starts being "what does our team need long-term?" — and the answer to that one isn't a stack for indies, it's an ops practice for teams.
+The case against an observability stack on day one is also the case for one later. Unified observability is genuinely useful — it just earns its place at a specific inflection, not at the start.
+That inflection looks roughly like: a second or third host, three or more services with internal traffic, a consumer-facing UI where session replay actually helps, and a team large enough that ad-hoc SSH stops being how anyone debugs. By the time you're there, the savings from one tool instead of four start to pay for themselves. By the time you're there, you also have enough scale that the question stops being whether anything's free and starts being which paid tier costs less.
+Until you hit that inflection: BetterStack alone, or Bugsink + UptimeRobot, or Sentry + UptimeRobot. SSH and grep for the rest. The bill is small. The setup is short. What it covers is what you actually need...."
+image: /img/blog/generated/streamlining-observability-for-indie-developers-a-practical-guide-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Streamlining Observability for Indie Developers: A Practical Guide](/img/blog/generated/streamlining-observability-for-indie-developers-a-practical-guide-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### The Complexity of Observability in Indie Development
+
+Observability is often perceived as a complex, multi-faceted challenge that requires a full-stack solution. This misconception can deter indie developers, who may feel overwhelmed by the prospect of implementing a comprehensive observability stack. However, the reality is that observability can be effectively managed with a minimal set of tools and configurations, particularly in the early stages of a project. By focusing on the essential pillars of observability, indie developers can avoid unnecessary complexity and costs while ensuring their applications remain robust and reliable.
+
+### The Four Key Pillars of Observability
+
+The foundation of observability can be distilled into four key pillars: Errors, Uptime, Host Metrics, and Logs. Each pillar addresses distinct concerns that are critical for maintaining application health. 
+
+1. **Errors**: This pillar focuses on tracking application errors and exceptions. Effective error tracking provides insights into what went wrong, including stack traces and request contexts, which are essential for debugging.
+
+2. **Uptime**: Uptime monitoring ensures that the application is accessible and responsive to users. This pillar is crucial for maintaining user trust and satisfaction, as downtime can lead to lost opportunities.
+
+3. **Host Metrics**: Monitoring host metrics involves keeping track of resource utilization, such as CPU, memory, and disk space. This information is vital for understanding the performance of the underlying infrastructure.
+
+4. **Logs**: Logs provide a historical record of application behavior, which can be invaluable for troubleshooting issues. They capture what the application was doing at any given moment, including any anomalies that may have occurred.
+
+By focusing on these four pillars, indie developers can cover the essential aspects of observability without the need for an elaborate stack.
+
+### Debunking the Unified Observability Stack Myth
+
+A common misconception in the observability space is the idea that a unified observability stack is necessary for effective monitoring. This belief is often propagated by vendors who offer integrated solutions. However, for indie developers managing small-scale applications, this approach can lead to unnecessary complexity and cost. The reality is that the different pillars of observability address separate concerns, each requiring tailored solutions. 
+
+For instance, while a unified tool may offer error tracking, uptime monitoring, and logging, it may not provide the depth of insight needed for each pillar. By treating observability as a collection of distinct concerns, developers can select the most appropriate tools for their specific needs, rather than being locked into a one-size-fits-all solution.
+
+### Leveraging Existing Linux Tools for Basic Observability
+
+Indie developers often overlook the powerful tools already available in their Linux environment. Basic observability can be achieved using simple command-line tools, which are often sufficient for small projects. 
+
+For example, to monitor logs, developers can use:
+
+```bash
+docker logs -f containername
+```
+
+This command allows real-time monitoring of container logs. Similarly, for systemd services, the following command provides logs:
+
+```bash
+journalctl -fu servicename
+```
+
+For general log file monitoring, the `tail` command can be used:
+
+```bash
+tail -F /var/log/app.log
+```
+
+These commands allow developers to monitor their applications effectively without the need for complex setups.
+
+### Choosing the Right Tools: A Comparative Analysis
+
+When it comes to selecting observability tools, indie developers have several options that cater to their specific needs. Three popular choices are BetterStack, Bugsink, and UptimeRobot. 
+
+- **BetterStack**: This tool offers an all-in-one solution that includes error tracking, uptime monitoring, logs, and status pages. Its free tier covers 100,000 exceptions per month and 10 uptime monitors, making it an attractive option for indie developers looking for a comprehensive solution without upfront costs.
+
+- **Bugsink**: Focused on error tracking, Bugsink offers a free tier for up to 15,000 events per month and can be self-hosted. This tool is particularly appealing for developers who prefer to maintain control over their data while still benefiting from robust error tracking.
+
+- **UptimeRobot**: This tool specializes in uptime monitoring, providing 50 monitors at 5-minute intervals on its free tier. UptimeRobot is an excellent choice for indie developers who want to ensure their applications are always accessible.
+
+By comparing these tools, developers can make informed decisions based on their specific observability needs.
+
+### Recognizing the Inflection Point for Upgrading Observability
+
+As projects scale, the observability needs of indie developers will inevitably evolve. Recognizing the inflection point at which more sophisticated observability solutions become necessary is crucial for maintaining application health. 
+
+For instance, a developer may start with basic tools for error tracking and uptime monitoring. However, as the application grows and begins to serve more users, the need for centralized logging and more detailed metrics will arise. 
+
+Indicators that it may be time to upgrade include:
+
+- Increased traffic leading to more frequent errors.
+- The need for cross-service tracing as the application architecture becomes more complex.
+- A growing team that requires a more structured approach to monitoring and incident response.
+
+By being aware of these indicators, developers can proactively adapt their observability strategies to meet changing needs.
+
+### Real-World Case Studies: Indie Apps with Efficient Observability
+
+Several successful indie applications have managed to maintain effective observability without resorting to complex stacks. One notable example is a small e-commerce platform that utilized BetterStack for error tracking and uptime monitoring. By leveraging the free tier, the developers could focus on building their application without incurring additional costs.
+
+Another example is a personal finance app that started with simple Linux commands for monitoring logs and host metrics. As user adoption grew, they integrated UptimeRobot for uptime monitoring and Bugsink for error tracking. This gradual evolution allowed them to scale their observability strategy in line with their growth.
+
+### Building a Sustainable Observability Strategy for Growth
+
+For indie developers, the key to a sustainable observability strategy lies in balancing simplicity with the need for insight. By focusing on the essential pillars of observability and leveraging existing tools, developers can effectively monitor their applications without being overwhelmed by complexity.
+
+As projects scale, it’s important to remain flexible and adapt observability strategies to meet new challenges. This may involve integrating new tools or upgrading existing ones, but the core principles of monitoring errors, uptime, host metrics, and logs should always guide these decisions.
+
+### Conclusion: Embracing a Minimalist Approach to Observability
+
+In conclusion, indie developers do not need to be intimidated by the concept of observability. By focusing on the four key pillars and leveraging existing tools, they can effectively manage observability without the complexity of a full stack. As their projects grow, they can gradually adopt more sophisticated solutions, ensuring that their observability strategy remains aligned with their evolving needs. This minimalist approach not only saves time and resources but also empowers developers to maintain robust and reliable applications.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/productimpossible/you-dont-need-an-observability-stack-yet-n0)
+
+---
+
+<SocialShare title="Streamlining Observability for Indie Developers: A Practical Guide" slug="streamlining-observability-for-indie-developers-a-practical-guide" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
