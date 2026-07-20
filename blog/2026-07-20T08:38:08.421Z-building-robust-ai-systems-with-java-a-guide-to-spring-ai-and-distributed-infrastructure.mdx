@@ -1,0 +1,456 @@
+---
+slug: building-robust-ai-systems-with-java-a-guide-to-spring-ai-and-distributed-infrastructure
+title: "Building Robust AI Systems with Java: A Guide to Spring AI and Distributed Infrastructure"
+authors: [francis]
+tags: [java, spring, ai, distributed]
+date: 2026-07-20T08:38:08.422Z
+description: "Let's skip the philosophical debate. This isn't about whether Java is better than Python for AI, Python owns model research and that's not changing. This is about what happens after you have a model endpoint and need to build a reliable system around it: retrieval, tool calling, multi-agent orchestration, observability, and enough throughput to not fall over on launch day.
+This guide walks through building a production-grade RAG + agent service in Java 21, using Spring Boot 3.x, Spring AI, virtual threads, and structured concurrency — with real code, real tradeoffs, and a couple of diagrams so you're not just taking my word for it.
+AI products in 2026 aren't model calls. They're distributed systems: retrieval pipelines, tool-calling agents, multi-model routing for cost and reliability, semantic caching, and observability stacks that need to trace a request across five different services. That's backend engineering with an LLM bolted onto one node of the graph.
+flowchart LR
+    U[User Request] --> GW[AI Gateway]
+    GW --> RT[Model Router]
+    RT --> M1[GPT / Claude / Gemini]
+    RT --> M2[Local vLLM Cluster]
+    GW --> RAG[RAG Pipeline]
+    RAG --> VDB[(Vector DB: pgvector / Qdrant)]
+    GW --> TOOLS[MCP Tool Layer]
+    TOOLS --> EXT[External APIs]
+    GW --> CACHE[(Redis Semantic Cache)]
+    GW --> OTEL[OpenTelemetry Collector]
+
+Every box in that diagram except "GPT / Claude / Gemini" is a job for backend infrastructure — and it's where Java's ecosystem (Spring Boot, resilience libraries, mature observability tooling) genuinely earns its keep.
+curl https://start.spring.io/starter.zip \
+  -d dependencies=web,spring-ai-openai,spring-ai-vectorstore-pgvector,actuator \
+  -d javaVersion=21 \
+  -d bootVersion=3.4.0 \
+  -o ai-service.zip
+
+build.gradle.kts dependencies:
+dependencies {
+    implementation("org.springframework.boot:spring-boot-starter-web")
+    implementation("org.springframework.ai:spring-ai-openai-spring-boot-starter")
+    implementation("org.springframework.ai:spring-ai-pgvector-store-spring-boot-starter")
+    implementation("org.springframework.boot:spring-boot-starter-actuator")
+    implementation("io.micrometer:micrometer-registry-prometheus")
+    runtimeOnly("org.postgresql:postgresql")
+}
+
+Enable virtual threads in application.yml — this one property changes your entire concurrency model:
+spring:
+  threads:
+    virtual:
+      enabled: true
+  ai:
+    openai:
+      api-key: ${OPENAI_API_KEY}
+      chat:
+        options:
+          model: gpt-4.1
+
+AI request handling is almost entirely I/O wait: call the model, call the vector store, call a tool, call the model again. Platform threads made this expensive — each blocked thread held an OS thread hostage, so you'd tune thread pools and hope. Virtual threads decouple the two. You write normal, blocking, readable code, and the JVM schedules thousands of them onto a small number of carrier threads.
+@RestController
+@RequestMapping("/api/chat")
+public class ChatController {
+
+    private final ChatClient chatClient;
+    private final VectorStore vectorStore;
+
+    public ChatController(ChatClient.Builder builder, VectorStore vectorStore) {
+        this.chatClient = builder.build();
+        this.vectorStore = vectorStore;
+    }
+
+    @PostMapping(produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public Flux<String> chat(@RequestBody ChatRequest request) {
+        List<Document> relevant = vectorStore.similaritySearch(
+            SearchRequest.query(request.message()).withTopK(5)
+        );
+
+        String context = relevant.stream()
+            .map(Document::getContent)
+            .collect(Collectors.joining("\n---\n"));
+
+        return chatClient.prompt()
+            .system("Answer using only this context:\n" + context)
+            .user(request.message())
+            .stream()
+            .content();
+    }
+}
+
+No manual thread pool tuning. No reactive boilerplate required to get high concurrency — though WebFlux remains a valid choice when you need true backpressure control over streaming pipelines, not just high thread counts. Virtual threads and reactive streams solve overlapping but distinct problems: virtual threads give you cheap concurrency with imperative code; WebFlux gives you backpressure and non-blocking composition. Pick reactive when you're streaming large volumes with flow control requirements; pick virtual threads when you want blocking-style simplicity at scale. Many production systems use both.
+Agents frequently need to fan out to multiple tools or retrieval sources in parallel and combine results. Java's structured concurrency (finalized as of JDK 21+ preview, stabilized in later releases) gives you a clean way to do this without leaking threads on partial failure:
+public AgentResult gatherContext(String query) throws Exception {
+    try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
+        var vectorResults = scope.fork(() -> vectorStore.similaritySearch(query));
+        var toolResults = scope.fork(() -> mcpToolClient.callTool("search_invoices", query));
+        var cacheCheck = scope.fork(() -> semanticCache.lookup(query));
+
+        scope.join();
+        scope.throwIfFailed();
+
+        return new AgentResult(
+            vectorResults.get(),
+            toolResults.get(),
+            cacheCheck.get()
+        );
+    }
+}
+
+If any subtask fails, the scope cancels the others automatically. No orphaned threads, no manual CompletableFuture cleanup, no silent leaks — a real problem in long-running agent services where a forgotten future eventually shows up as a memory profile nobody wants to explain.
+A quick, honest comparison for teams choosing a vector store for a Java-based RAG pipeline:
+
+
+
+Store
+Best fit
+Tradeoff
+
+
+
+
+PostgreSQL + pgvector
+You already run Postgres; want transactional consistency between metadata and vectors
+Slower at very high dimensional scale (10M+ vectors) without careful indexing (HNSW tuning)
+
+
+Qdrant
+Dedicated vector workloads, filtering-heavy queries, strong Rust-based performance
+One more system to operate and monitor
+
+
+Milvus
+Very large scale (100M+ vectors), distributed deployments
+Higher operational complexity, heavier resource footprint
+
+
+
+For most mid-scale production systems, pgvector wins on simplicity: one less database to run, one less failure domain, and Spring AI's PgVectorStore integrates directly with Spring's transaction management, which matters when you need vector writes to stay consistent with the rest of your data model.
+@Bean
+public VectorStore vectorStore(JdbcTemplate jdbcTemplate, EmbeddingModel embeddingModel) {
+    return PgVectorStore.builder(jdbcTemplate, embeddingModel)
+        .withDimensions(1536)
+        .withDistanceType(PgDistanceType.COSINE_DISTANCE)
+        .withIndexType(PgIndexType.HNSW)
+        .build();
+}
+
+Production systems rarely call a single model for every request. Cheap, fast models handle simple queries; larger models handle complex reasoning; local models via Ollama or vLLM handle anything sensitive enough to keep off third-party infrastructure. LiteLLM or a custom Spring AI ChatModel router can sit in front of all of them:
+@Component
+public class ModelRouter {
+
+    private final Map<String, ChatModel> models;
+
+    public ChatResponse route(String query, ComplexityScore score) {
+        ChatModel selected = switch (score) {
+            case SIMPLE -> models.get("gpt-4o-mini");
+            case MODERATE -> models.get("claude-sonnet");
+            case COMPLEX -> models.get("gpt-4.1");
+            case SENSITIVE -> models.get("local-vllm-llama3");
+        };
+        return selected.call(new Prompt(query));
+    }
+}
+
+This is where the "backend engineering" framing pays off directly: routing logic, cost attribution per customer, and failover between providers are ordinary service-layer concerns, not AI-specific magic. You're applying the same patterns you'd use for any multi-vendor integration — circuit breakers, retries with backoff, health checks — just pointed at model APIs instead of payment processors.
+Re-answering identical or near-identical questions is pure waste. A semantic cache checks embedding similarity before hitting the model:
+@Service
+public class SemanticCacheService {
+
+    private final RedisTemplate<String, String> redis;
+    private final EmbeddingModel embeddingModel;
+    private static final double SIMILARITY_THRESHOLD = 0.95;
+
+    public Optional<String> lookup(String query) {
+        float[] queryEmbedding = embeddingModel.embed(query);
+        // Redis with a vector-capable index (RediSearch) performs the ANN lookup
+        return redis.opsForValue()
+            .get(hashKeyIfCloseEnough(queryEmbedding, SIMILARITY_THRESHOLD));
+    }
+}
+
+In practice this cuts model spend meaningfully on high-traffic, low-variance query patterns — support bots, FAQ-style assistants, internal tooling — where the same question shows up in a dozen phrasings.
+Model Context Protocol standardizes how agents discover and invoke tools, instead of every team hand-rolling a bespoke function-calling schema. Spring AI's MCP support lets you register a Java service as an MCP server that any compliant agent — regardless of what language or framework built it — can call:
+@McpServer(name = "invoice-tools")
+public class InvoiceToolServer {
+
+    @McpTool(description = "Fetch the last N invoices for a customer")
+    public List<Invoice> getRecentInvoices(String customerId, int count) {
+        return invoiceRepository.findRecentByCustomer(customerId, count);
+    }
+}
+
+For multi-step agent workflows with branching logic, teams often pair Spring AI's tool-calling primitives with graph-based orchestration patterns similar to LangGraph — modeling the agent as an explicit state machine rather than an implicit chain, which makes debugging failed runs dramatically easier:
+stateDiagram-v2
+    [*] --> Retrieve
+    Retrieve --> Decide
+    Decide --> ToolCall: needs external data
+    Decide --> Synthesize: has enough context
+    ToolCall --> Decide
+    Synthesize --> [*]
+
+Downstream systems need structured data, not prose. Spring AI's structured output converters map model responses directly to Java records, with schema validation baked in:
+public record InvoiceSummary(
+    String customerId,
+    double totalAmount,
+    List<String> flaggedItems
+) {}
+
+InvoiceSummary summary = chatClient.prompt()
+    .user("Summarize these invoices: " + invoiceData)
+    .call()
+    .entity(InvoiceSummary.class);
+
+This eliminates an entire category of bugs — hand-parsed JSON from free-text model output — that plagues early-stage AI integrations.
+AI systems fail in unusual ways: silent hallucination, slow degradation under load, cost spikes from a prompt template change nobody reviewed. Standard observability tooling still applies, and Java's ecosystem here is mature:
+@Bean
+public ObservationRegistry observationRegistry(MeterRegistry meterRegistry) {
+    return ObservationRegistry.create()
+        .observationConfig()
+        .observationHandler(new DefaultMeterObservationHandler(meterRegistry))
+        .observationRegistry();
+}
+
+Spring AI auto-instruments chat calls, embedding calls, and vector store operations through Micrometer, which flows into Prometheus and OpenTelemetry with no extra glue code. In production, track at minimum: token usage per request, latency percentiles per model, cache hit rate, and tool-call failure rate. That last one catches problems weeks before users notice.
+A common objection to Java in latency-sensitive or serverless-adjacent AI deployments is JVM startup time. Two mitigations worth knowing:
+CDS (Class Data Sharing) / AppCDS — reduces cold start meaningfully for containerized deployments by caching class metadata.
+GraalVM native image for services where cold start truly matters (scale-to-zero Kubernetes deployments), compiling to a native binary can bring startup from seconds to milliseconds, at the cost of longer build times and some reflection-heavy library incompatibilities (check Spring AI's native support status for your specific starters before committing).
+
+
+
+
+FROM eclipse-temurin:21-jre-alpine
+COPY target/ai-service.jar app.jar
+ENTRYPOINT ["java", "-XX:+UseZGC", "-jar", "app.jar"]
+
+ZGC (Z Garbage Collector) is worth defaulting to for AI services specifically, sub-millisecond pause times matter when you're streaming tokens over SSE and a GC pause shows up as a visible stutter in the response.
+None of this replaces Python for model development, evaluation, or research, that's not the goal. What it gives you is a production-grade layer for everything a model needs around it: retrieval, tool orchestration, multi-model routing, caching, structured outputs, and observability, built on a runtime with decades of tuning for exactly this class of problem high-concurrency, long-running, I/O-bound services that need to not fall over.
+If you're currently running your AI orchestration layer as a Python script that grew into a service by accident, the migration path here doesn't require throwing anything away. Keep your model layer in Python. Put a Java service in front of it for routing, caching, and orchestration. Measure the difference in your p99 latency and your on-call load after a month...."
+image: /img/blog/generated/building-robust-ai-systems-with-java-a-guide-to-spring-ai-and-distributed-infrastructure-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Building Robust AI Systems with Java: A Guide to Spring AI and Distributed Infrastructure](/img/blog/generated/building-robust-ai-systems-with-java-a-guide-to-spring-ai-and-distributed-infrastructure-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### The Imperative of Distributed AI Architectures
+
+As we transition towards 2026, the demand for robust distributed architectures in artificial intelligence (AI) systems is becoming increasingly evident. The shift from isolated model calls to interconnected systems is not merely a trend; it is a fundamental necessity for creating resilient AI products. These architectures must seamlessly integrate components such as retrieval pipelines, multi-agent orchestration, and observability stacks to handle the complexities of real-world applications. This evolution emphasizes the importance of building systems that are not only capable of processing requests but also resilient under load, ensuring that they can scale effectively.
+
+### Java's Strategic Advantage in AI Infrastructure
+
+Java has long been a cornerstone of enterprise development, and with the introduction of Spring AI, it is uniquely positioned to support the infrastructure required for robust AI systems. Spring AI provides a comprehensive ecosystem that allows developers to construct production-grade AI agents capable of managing multiple models, integrating with diverse data sources, and orchestrating complex workflows. This capability is essential for organizations aiming to build scalable and maintainable AI solutions that can adapt to evolving requirements.
+
+### Rapid Project Setup with Spring Boot
+
+To initiate the development of a Java-based AI service, Spring Boot is an ideal starting point. Utilizing Spring Initializr, developers can quickly scaffold a project with essential dependencies. For example, the following command generates a service equipped with Spring AI and PostgreSQL support:
+
+```bash
+curl https://start.spring.io/starter.zip \
+  -d dependencies=web,spring-ai-openai,spring-ai-vectorstore-pgvector,actuator \
+  -d javaVersion=21 \
+  -d bootVersion=3.4.0 \
+  -o ai-service.zip
+```
+
+This setup provides a solid foundation, enabling developers to focus on implementing business logic rather than wrestling with configuration details.
+
+### Virtual Threads: A Paradigm Shift in Concurrency Management
+
+One of the most significant advancements in Java 21 is the introduction of virtual threads, which fundamentally changes concurrency management. Traditional thread models can lead to inefficiencies, particularly in I/O-bound applications like AI services. Virtual threads allow developers to write blocking, readable code while the Java Virtual Machine (JVM) efficiently schedules these threads across a limited number of carrier threads. This decoupling of application logic from the underlying threading model significantly reduces resource consumption and enhances throughput, crucial for handling numerous concurrent AI requests.
+
+```yaml
+spring:
+  threads:
+    virtual:
+      enabled: true
+  ai:
+    openai:
+      api-key: ${OPENAI_API_KEY}
+      chat:
+        options:
+          model: gpt-4.1
+```
+
+By enabling virtual threads, developers can achieve high concurrency without the complexity of manual thread pool management, streamlining the development process.
+
+### Structured Concurrency for Reliable Multi-Agent Systems
+
+As AI agents often require interactions with multiple services, structured concurrency becomes essential. Java's structured concurrency model, introduced in JDK 21, enables developers to manage tasks cleanly and effectively. This model ensures that if one task fails, others are canceled, preventing orphaned threads and resource leaks. This approach is particularly beneficial in multi-agent systems where tasks frequently depend on one another.
+
+```java
+public AgentResult gatherContext(String query) throws Exception {
+    try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
+        var vectorResults = scope.fork(() -> vectorStore.similaritySearch(query));
+        var toolResults = scope.fork(() -> mcpToolClient.callTool("search_invoices", query));
+        var cacheCheck = scope.fork(() -> semanticCache.lookup(query));
+
+        scope.join();
+        scope.throwIfFailed();
+
+        return new AgentResult(
+            vectorResults.get(),
+            toolResults.get(),
+            cacheCheck.get()
+        );
+    }
+}
+```
+
+This structured approach simplifies error handling and enhances the overall reliability of AI workflows, which is critical for maintaining system integrity in production environments.
+
+### Optimizing Performance with Semantic Caching
+
+In high-traffic environments, repetitive model calls can lead to significant costs. Implementing a semantic caching layer can dramatically reduce unnecessary requests to AI models. By checking for embedding similarity before invoking the model, systems can avoid redundant processing, thus optimizing resource usage and improving response times.
+
+```java
+@Service
+public class SemanticCacheService {
+
+    private final RedisTemplate<String, String> redis;
+    private final EmbeddingModel embeddingModel;
+    private static final double SIMILARITY_THRESHOLD = 0.95;
+
+    public Optional<String> lookup(String query) {
+        float[] queryEmbedding = embeddingModel.embed(query);
+        return redis.opsForValue()
+            .get(hashKeyIfCloseEnough(queryEmbedding, SIMILARITY_THRESHOLD));
+    }
+}
+```
+
+This caching mechanism not only reduces operational costs but also enhances user experience by providing quicker responses to frequently asked questions.
+
+### Ensuring Observability in AI Systems
+
+In production environments, observability is crucial for monitoring system performance and detecting anomalies. Java's ecosystem offers robust tools for observability, such as Micrometer and Prometheus, which can be seamlessly integrated into Spring applications. By tracking metrics such as latency, token usage, and cache hit rates, teams can identify potential issues before they escalate.
+
+```java
+@Bean
+public ObservationRegistry observationRegistry(MeterRegistry meterRegistry) {
+    return ObservationRegistry.create()
+        .observationConfig()
+        .observationHandler(new DefaultMeterObservationHandler(meterRegistry))
+        .observationRegistry();
+}
+```
+
+Implementing these observability tools enables teams to maintain high service reliability and performance, ultimately leading to better user experiences.
+
+### Addressing Common Pitfalls in Java AI Implementations
+
+While Java and Spring AI provide robust frameworks for building AI systems, developers must be aware of common pitfalls that can hinder performance and reliability. One prevalent issue is the improper handling of exceptions, which can lead to cascading failures in multi-agent systems. To mitigate this, developers should implement comprehensive error handling strategies and utilize structured concurrency to ensure that failures are contained and do not propagate through the system.
+
+Another critical consideration is the management of dependencies. Over-reliance on third-party libraries can introduce vulnerabilities and complicate upgrades. Developers should regularly review and audit dependencies to minimize risks.
+
+Finally, inadequate testing can lead to undetected issues in production environments. Implementing rigorous unit and integration tests, along with performance benchmarks, is essential to ensure that AI agents function as intended under various conditions.
+
+### Comparative Analysis of Vector Stores for RAG Pipelines
+
+Selecting the right vector store is critical for the performance of retrieval-augmented generation (RAG) pipelines. A comparison of popular options reveals distinct trade-offs that can impact system performance:
+
+| Store                   | Best Fit                                                          | Tradeoff                                                                                     |
+|------------------------|------------------------------------------------------------------|----------------------------------------------------------------------------------------------|
+| PostgreSQL + pgvector  | Ideal for existing Postgres users; ensures transactional consistency | Slower performance at high dimensional scales without careful indexing (e.g., HNSW tuning)  |
+| Qdrant                 | Excellent for dedicated vector workloads and filtering queries    | Requires additional operational overhead for managing another system                         |
+| Milvus                 | Scalable for large datasets (100M+ vectors)                      | Increased complexity and resource requirements for distributed deployments                   |
+
+For many mid-scale applications, PostgreSQL with pgvector offers a balance of simplicity and performance, especially when integrated with Spring's transaction management.
+
+### Routing Logic for Multi-Model Architectures
+
+In modern AI systems, requests may need to be routed to different models based on complexity. A well-architected routing logic allows developers to dynamically select the appropriate model for each incoming request, optimizing resource usage and ensuring that the system remains responsive.
+
+```java
+@Component
+public class ModelRouter {
+
+    private final Map<String, ChatModel> models;
+
+    public ChatResponse route(String query, ComplexityScore score) {
+        ChatModel selected = switch (score) {
+            case SIMPLE -> models.get("gpt-4o-mini");
+            case MODERATE -> models.get("claude-sonnet");
+            case COMPLEX -> models.get("gpt-4.1");
+            case SENSITIVE -> models.get("local-vllm-llama3");
+        };
+        return selected.call(new Prompt(query));
+    }
+}
+```
+
+This routing mechanism incorporates best practices in backend engineering, such as circuit breakers and retries, ensuring resilience across the system.
+
+### The Role of Structured Output in AI Workflows
+
+AI systems frequently generate unstructured outputs that require parsing and validation before they can be utilized. By leveraging structured output converters, developers can map model responses directly to Java records, ensuring type safety and reducing the likelihood of runtime errors.
+
+```java
+public record InvoiceSummary(
+    String customerId,
+    double totalAmount,
+    List<String> flaggedItems
+) {}
+
+InvoiceSummary summary = chatClient.prompt()
+    .user("Summarize these invoices: " + invoiceData)
+    .call()
+    .entity(InvoiceSummary.class);
+```
+
+This structured approach minimizes parsing errors and enhances the reliability of data handling within AI workflows, ultimately leading to more robust systems.
+
+### Mitigating JVM Cold Start Issues
+
+One common concern when deploying Java-based AI services is the startup time of the Java Virtual Machine (JVM). Techniques such as Class Data Sharing (CDS) and GraalVM native images can significantly reduce cold start times, making Java a viable option for latency-sensitive applications.
+
+```dockerfile
+FROM eclipse-temurin:21-jre-alpine
+COPY target/ai-service.jar app.jar
+ENTRYPOINT ["java", "-XX:+UseZGC", "-jar", "app.jar"]
+```
+
+Utilizing Z Garbage Collector (ZGC) can further improve performance by minimizing pause times, which is particularly beneficial when streaming responses in real-time applications.
+
+### Conclusion: The Future of AI Systems with Java and Spring AI
+
+As AI systems continue to evolve, the integration of robust distributed architectures becomes increasingly critical. Java and Spring AI provide a powerful foundation for building these systems, enabling developers to create scalable, efficient, and observable AI agents. By addressing common pitfalls and leveraging best practices, organizations can position themselves to thrive in the competitive landscape of AI-driven solutions, ensuring that they are well-prepared for the challenges and opportunities that lie ahead.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/hrsvd/building-production-ai-agents-on-the-jvm-a-practical-guide-to-java-spring-ai-in-2026-4997)
+
+---
+
+<SocialShare title="Building Robust AI Systems with Java: A Guide to Spring AI and Distributed Infrastructure" slug="building-robust-ai-systems-with-java-a-guide-to-spring-ai-and-distributed-infrastructure" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
