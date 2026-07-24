@@ -1,0 +1,115 @@
+---
+slug: maximizing-inference-performance-with-nvme-of-and-rocev2
+title: "Maximizing Inference Performance with NVMe-oF and RoCEv2"
+authors: [francis]
+tags: [ai, inference, nvme, rocev2]
+date: 2026-07-24T08:07:20.217Z
+description: "NVMe-oF combined with RoCEv2 is a key architecture for achieving low-latency, high-bandwidth acceleration in large model inference storage scenarios, especially in KV Cache tiered acceleration and cold recovery scenarios, where its performance advantages have been validated through measurements. This article, based on the KV Cache performance test results of Mingxin FX100 on an 8×AMD MI308X platform (source: measured, report R2/R3), outlines the engineering practice essentials of NVMe-oF + RoCEv2, including network protocol selection, parallel read optimization, cold recovery speedup ratio, and comparison with traditional NFS, providing reproducible references for technical decision-makers in computing centers.
+The core challenge of inference storage lies in the fast read/write of KV Cache and low-latency loading of model weights. Traditional NFS (Network File System) has high software overhead in its protocol stack, such as file locks, metadata operations, and latency accumulation from the TCP protocol stack, which is particularly evident in long-context cold recovery scenarios. Measured data shows that on the Huawei Atlas 910B platform, loading the DeepSeek-70B model weights via NFS took 1399 seconds, while Mingxin FX100 (based on NVMe-oF + RoCEv2) required only 150 seconds, achieving a speedup ratio of 9.3x (source: measured, report R9).
+NVMe-oF encapsulates NVMe commands directly over RDMA (RoCEv2), avoiding the overhead of traditional file system protocols. RoCEv2 provides single-hop latency as low as 1-2 microseconds and bandwidth of 100 GbE, bringing KV Cache read/write latency close to that of local NVMe SSDs. In FX100 tests, the difference in KV Cache throughput between a local NVMe single-disk baseline (PCIe Gen4, 2 TB) and an FX100 array (4-disk RAID0, RoCEv2, single-port 100 GbE) has been reduced to an acceptable range, while FX100's throughput improvement in cold recovery scenarios (from 4.1 tok/s to 74.9 tok/s, an 18.3x speedup) further highlights the potential of networked storage (source: measured, report R2).
+In inference scenarios, KV Cache reads are often performed concurrently by multiple threads. In traditional NVMe-oF implementations, single-queue serialized reads can become a bottleneck. In Mingxin FX100 tests, applying the LMCache parallel read patch under a single-GPU concurrent 16 cold read disk load reduced TTFT from 37.97 seconds to 9.30 seconds, a 4.1x improvement; bandwidth increased from 0.98 GB/s to 5.23 GB/s, a 5.3x improvement (source: measured, report R1). This optimization relies on two engineering essentials:
+Multi-Queue Parallelism: NVMe-oF natively supports multiple queues (up to 64K I/O queues), but requires correct configuration by the driver and applications (such as vLLM and LMCache). The LMCache patch achieves parallelization of read/write operations by sharding KV Cache across different queues, avoiding queuing delays of a single queue.
+RoCEv2 Flow Control: In 100 GbE networks, proper configuration of PFC (Priority Flow Control) and ECN (Explicit Congestion Notification) is critical. Unoptimized flow control can lead to packet loss and retransmission, negating the benefits of parallel reads. The FX100 test environment used default RoCEv2 configuration without significant packet loss, indicating that hardware-offloaded RDMA is sufficiently stable in controlled network environments.
+For technical decision-makers, it is recommended to verify whether the LMCache parallel read patch has been integrated into the vLLM version before deployment (tests based on vLLM 0.20.1+rocm721), and ensure that network switches support RoCEv2 ECN marking.
+Cold recovery refers to scenarios where, after a model has not been accessed for a long time, the KV Cache needs to be reloaded from the storage layer. The traditional approach is to use no external recalculation (i.e., completely recalculating the KV Cache from model weights), but this is extremely time-consuming under long contexts (e.g., a 480B parameter model). FX100 tests show that under a 480B model, TP8 concurrent 16 load, the TTFT p50 without external recalculation was 149.5 seconds, while using FX100's KV Cache storage acceleration reduced TTFT to 11.85 seconds, a 12.6x speedup; throughput increased from 4.1 tok/s to 74.9 tok/s, an 18.3x speedup (source: measured, report R2). The speedup ratio range of 8.6-20x depends on concurrency and context length.
+The engineering foundation of this acceleration lies in the low-latency characteristics of NVMe-oF + RoCEv2. In cold recovery, KV Cache reads are sequential large-block I/O (each token's KV vector is about 2-4 KB, but batch reads can reach MB levels). NVMe-oF's RDMA read operations can bypass CPU interrupts, directly DMA from the NIC to GPU memory, reducing data copy times. In contrast, NFS's TCP protocol stack and file lock mechanism increase each I/O latency by 10-100 microseconds, accumulating to second-level differences under high concurrency.
+For investment decision-makers, the frequency of cold recovery scenarios should be considered. If models are frequently switched in production environments (e.g., multi-tenant inference services), the benefits of cold recovery acceleration directly translate into reduced user-perceived first token latency (TTFT reduction of 26-32%, source: measured, report R2) and throughput improvement (29-40%, source: measured, report R2/R3).
+The engineering practice of NVMe-oF + RoCEv2 in inference storage has been validated through Mingxin FX100 measurements, with its core value lying in low-latency, high-concurrency KV Cache acceleration, significantly outperforming traditional NFS, especially in cold recovery and model loading scenarios. For technical teams in computing centers, it is recommended to conduct joint testing from three dimensions: network configuration (RoCEv2 flow control), parallel read optimization (LMCache patch), and workload model (long-context cold recovery). Mingxin offers a joint testing process of approximately 10 weeks (from G1 arrival acceptance to G4 stability testing), helping teams verify in-band metrics such as TTFT reduction ≥25% and throughput +29-40% in their own environments. Please contact us through official channels.
+Q: What is the core advantage of NVMe-oF + RoCEv2 over NFS in inference storage?
+Q: How to optimize parallel read performance of KV Cache?
+Q: What factors affect the speedup ratio in cold recovery scenarios?
+Originally published at mingxinstorage.xyz. Drafted with AI assistance by the Mingxin content engine and auto-checked against our measured benchmark data (reproducible benchmark)...."
+image: /img/blog/generated/maximizing-inference-performance-with-nvme-of-and-rocev2-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Maximizing Inference Performance with NVMe-oF and RoCEv2](/img/blog/generated/maximizing-inference-performance-with-nvme-of-and-rocev2-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### The Inference Storage Challenge in AI Workloads
+
+In the realm of artificial intelligence (AI), particularly with large language models (LLMs), the efficiency of inference storage is paramount. The primary bottleneck arises from the need for rapid read and write operations to the key-value (KV) cache, which is essential for storing model weights and intermediate data. Traditional storage solutions, such as Network File System (NFS), introduce significant overhead due to their complex protocol stack, including file locks and metadata operations. This overhead becomes especially pronounced during cold recovery scenarios, where the system must reload data that has not been accessed for an extended period. As AI applications scale, these challenges can hinder performance and increase latency, necessitating a more efficient approach.
+
+### Transformative Technologies: NVMe-oF and RoCEv2
+
+The integration of Non-Volatile Memory Express over Fabrics (NVMe-oF) with RDMA over Converged Ethernet version 2 (RoCEv2) offers a paradigm shift in addressing these challenges. NVMe-oF enables NVMe commands to be transmitted over a network, effectively bypassing the overhead associated with traditional file systems. This results in lower latency and higher throughput, which are critical for the demands of AI inference workloads. RoCEv2 complements NVMe-oF by providing low-latency, high-bandwidth networking capabilities, achieving latencies as low as 1-2 microseconds. Together, these technologies facilitate KV cache read/write operations that approach the performance of local NVMe SSDs, significantly enhancing overall system efficiency.
+
+### Comparative Performance Metrics: NVMe-oF + RoCEv2 vs. NFS
+
+Performance metrics from the Mingxin FX100 system starkly illustrate the advantages of NVMe-oF + RoCEv2 over traditional NFS solutions. For example, loading the DeepSeek-70B model weights via NFS took 1399 seconds, while the FX100 achieved this in just 150 seconds, yielding a remarkable speedup ratio of 9.3x. Such performance improvements are not merely theoretical; they have been validated through rigorous testing, demonstrating the tangible benefits of adopting NVMe-oF and RoCEv2 in production environments. The implications of these results are profound, particularly for organizations seeking to optimize their AI infrastructure.
+
+### Step-by-Step Configuration Guide for NVMe-oF and RoCEv2
+
+Implementing NVMe-oF and RoCEv2 requires meticulous configuration to maximize performance. Below is a comprehensive step-by-step guide to setting up these technologies effectively:
+
+1. **Network Configuration**: Ensure that your network infrastructure supports RoCEv2. This includes enabling Priority Flow Control (PFC) and Explicit Congestion Notification (ECN) on all relevant switches. These configurations are critical for minimizing packet loss and ensuring stable performance during high-throughput operations.
+
+2. **NVMe-oF Setup**: Install and configure the NVMe-oF target on your storage server. This involves setting up the NVMe-oF subsystem and ensuring that the NVMe devices are correctly mapped. Use tools like `nvme-cli` to verify device visibility and configuration.
+
+3. **Driver Configuration**: Ensure that you are using compatible drivers that support multi-queue operations. For example, the vLLM and LMCache libraries should be configured to utilize multiple I/O queues to prevent bottlenecks. This configuration is vital for achieving the full performance potential of NVMe-oF.
+
+4. **Testing and Validation**: After configuration, conduct thorough testing to validate the setup. Monitor latency and throughput metrics using benchmarking tools such as `fio` or `ioping` to ensure that the system meets performance expectations. Adjust configurations based on the observed metrics to fine-tune performance.
+
+### Optimizing KV Cache Performance with Parallel Reads
+
+One of the critical areas for enhancing KV cache performance is through implementing parallel read techniques. In the Mingxin FX100 tests, applying the LMCache parallel read patch demonstrated significant improvements. By enabling multi-queue parallelism, the system reduced total token fetch time (TTFT) from 37.97 seconds to 9.30 seconds, achieving a 4.1x improvement in read efficiency. This optimization relies on sharding KV cache entries across multiple queues, allowing concurrent access and reducing queuing delays. The ability to leverage multiple I/O queues is a fundamental advantage of NVMe-oF that can be harnessed to improve overall system throughput.
+
+### The Importance of Flow Control in RoCEv2 Networks
+
+Effective flow control is paramount in maximizing the benefits of RoCEv2. In a 100 GbE environment, proper configuration of PFC and ECN can prevent packet loss and ensure stable performance. In the FX100 testing environment, the default RoCEv2 settings resulted in minimal packet loss, demonstrating that with appropriate configurations, RDMA can operate reliably in high-throughput scenarios. This stability is crucial for maintaining the performance gains achieved through parallel read optimizations and is a key consideration for engineers when deploying RoCEv2 in production environments.
+
+### Accelerating Cold Recovery: Techniques and Strategies
+
+Cold recovery scenarios present unique challenges, particularly for large models with extensive parameter sets. The traditional approach of recalculating the KV cache can be prohibitively time-consuming. The Mingxin FX100 tests revealed that using NVMe-oF significantly accelerated cold recovery. For a 480 billion parameter model, TTFT without external recalculation was 149.5 seconds, while leveraging the FX100's capabilities reduced this to just 11.85 seconds, achieving a 12.6x speedup. This acceleration is largely due to the efficient handling of large-block I/O operations, which NVMe-oF facilitates through direct memory access (DMA) from the network interface card (NIC) to GPU memory. Understanding these dynamics is essential for optimizing cold recovery processes in AI applications.
+
+### Evaluating Cold Recovery Frequency and Its Impact
+
+For technical decision-makers, understanding the frequency of cold recovery scenarios is vital for evaluating the benefits of NVMe-oF and RoCEv2. In environments where models are frequently switched, the advantages of accelerated cold recovery translate directly into improved user experiences. The Mingxin FX100 tests indicated that the first token latency could be reduced by 26-32%, with throughput improvements of 29-40%. These metrics underscore the importance of investing in infrastructure that supports low-latency, high-concurrency operations, particularly in high-demand AI environments.
+
+### Common Implementation Pitfalls and Mitigation Strategies
+
+While transitioning to NVMe-oF and RoCEv2 offers substantial benefits, several pitfalls must be navigated during implementation. One common issue is the misconfiguration of network settings, which can lead to performance degradation. To mitigate this, ensure that all components of the network are optimized for RDMA, including validating switch firmware and settings. Additionally, neglecting to integrate parallel read optimizations can result in missed performance gains. It is advisable to conduct joint testing across network configuration, workload models, and read optimization strategies to validate performance improvements before full deployment. Engaging with experienced teams for collaborative testing can also mitigate risks associated with new technology adoption. 
+
+Furthermore, consider implementing a phased rollout of NVMe-oF and RoCEv2, starting with less critical workloads to identify and resolve issues before scaling to production-level applications. This strategy allows for iterative improvements and minimizes the risk of widespread performance issues.
+
+### Strategic Recommendations for Successful Implementation
+
+In conclusion, the integration of NVMe-oF and RoCEv2 into inference storage systems represents a significant advancement in overcoming the limitations of traditional NFS solutions. The performance metrics from the Mingxin FX100 case study provide compelling evidence of the benefits, particularly in KV cache performance and cold recovery scenarios. For organizations looking to enhance their AI infrastructure, it is recommended to prioritize the adoption of these technologies, ensuring that proper configurations and optimizations are in place to fully leverage their capabilities. Engaging in comprehensive testing and validation will further ensure that the transition yields the desired performance improvements, ultimately providing a competitive edge in the rapidly evolving landscape of AI and machine learning.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/mingxintech/engineering-practice-essentials-of-nvme-of-rocev2-in-inference-storage-scenarios-a-case-study-4eoc)
+
+---
+
+<SocialShare title="Maximizing Inference Performance with NVMe-oF and RoCEv2" slug="maximizing-inference-performance-with-nvme-of-and-rocev2" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
