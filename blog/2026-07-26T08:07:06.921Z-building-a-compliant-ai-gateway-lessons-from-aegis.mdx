@@ -1,0 +1,207 @@
+---
+slug: building-a-compliant-ai-gateway-lessons-from-aegis
+title: "Building a Compliant AI Gateway: Lessons from Aegis"
+authors: [francis]
+tags: [ai, compliance, infrastructure, llm]
+date: 2026-07-26T08:07:06.921Z
+description: ""Why did this request go to that model?"
+If your company uses LLMs across more than one team, someone will eventually ask you this question. If you work in financial services, healthcare, or anywhere else with a regulator, someone will ask it under oath-adjacent conditions.
+Most organizations can't answer it. Teams integrate directly with whatever provider they like, sensitive data handling varies by team, regional restrictions are applied inconsistently, and there's no record of why a model was selected — or, more importantly, why the alternatives weren't.
+I recently built Aegis Gateway to explore what a proper answer looks like: a single front door for AI requests that decides which model may serve each request — and can prove why. This article is about the three design decisions that matter, and the one failure mode that I organized the entire architecture around preventing.
+Here's the scenario that keeps compliance officers up at night.
+Your gateway is well-behaved on the happy path: restricted client data goes to the on-prem model, everything's fine. Then one Tuesday the on-prem cluster goes down. Your fallback logic kicks in, does what fallback logic does — finds something that works — and quietly routes restricted data to an external provider. The request succeeds. Everyone's happy. Nobody notices.
+That's a silent governance downgrade: a system that's compliant until it's inconvenient. And the insidious part is that it usually isn't a bug — it's a reasonable-looking design where availability and compliance compete in the same decision, and availability wins because that's what gets paged about.
+My design goal was to make this failure mode structurally impossible — not discouraged by code review, not caught by an alert, but unreachable by construction.
+The routing core has three stages with a strict, non-negotiable order:
+catalogue ──► Policy Engine ──► Ranking ──► Fallback Executor
+              (hard gate)       (eligible    (eligible list
+                                 models       only)
+                                 only)
+
+Stage 1 — Policy filtering. Every model in the catalogue is checked against governance rules: Does it have the capability for this task type? Is its provider approved for this business unit? Is it certified for this data classification? Does restricted data stay on private infrastructure? Is it served in this region? Every model that fails records the specific rule it failed.
+def evaluate(self, model: ModelSpec, ctx: RequestContext) -> list[str]:
+    """Return the list of violated rules (empty list = eligible)."""
+    reasons = []
+    if ctx.task_type not in model.capabilities:
+        reasons.append(f"model does not support task '{ctx.task_type.value}'")
+    if model.provider not in unit["approved_providers"]:
+        reasons.append(f"provider '{model.provider}' is not approved "
+                       f"for business unit '{ctx.business_unit}'")
+    if req_level > CLASSIFICATION_LEVEL[model.max_classification]:
+        reasons.append(f"model is certified only up to "
+                       f"{model.max_classification.value} data")
+    # ... region residency, restricted→private, availability
+    return reasons
+
+Stage 2 — Ranking. A weighted score over normalized cost, quality, and latency, with weights driven by the request's declared priority (Cost / Balanced / Quality). Plain arithmetic. The crucial property: the ranker's input is the output of the policy gate. It cannot see, and therefore cannot resurrect, a non-compliant model.
+Stage 3 — Fallback. If the selected model fails at call time, walk down the ranked list. Which list? The eligible list. When it's exhausted:
+if trace.status != "ROUTED":
+    trace.rationale = (
+        "No model satisfies current policy for this request context. "
+        "Request refused rather than downgrading governance."
+    )
+
+NO_COMPLIANT_ROUTE. The gateway refuses — even if healthy external models are one function call away.
+This is the whole trick, and it's almost embarrassingly simple: the compliance guarantee doesn't live in a rule that says "don't fall back to non-compliant models." It lives in the data flow. Fallback iterates a list that non-compliant models were never in. There is no code path where the trade-off can even be expressed.
+An outage is recoverable. A compliance breach is not. The architecture should not be able to make that trade, and in this design, it can't.
+Most systems treat decision rationale as something you grep for after the incident. Aegis treats it as part of the API contract. Every response carries a decision trace:
+{
+  "request_id": "f188db34-…",
+  "policy_version": "2026.07-r4",
+  "status": "ROUTED",
+  "selected_model": "llama-3-onprem-70b",
+  "fallback_model": "llama-3-onprem-8b",
+  "rejected_models": [
+    { "model_id": "chatgpt",
+      "reasons": ["Restricted data may only route to private providers"] },
+    { "model_id": "gemini-nano-banana",
+      "reasons": ["model does not support task 'text-generation'"] }
+  ],
+  "eligible_ranked": [
+    { "model_id": "llama-3-onprem-70b", "score": 0.7,
+      "breakdown": { "cost": 0.0, "quality": 0.7, "latency": 0.0 } }
+  ]
+}
+
+Notice two things.
+First, the trace distinguishes "not allowed" from "not needed." When a public, cost-priority request routes to a cheap model, the premium models appear in eligible_ranked — they were permitted, just out-scored. When a restricted request rejects an external model, it appears in rejected_models with the exact rule it broke. Those are different answers to "why not GPT?", and auditors care about the difference.
+Second, the trace carries the policy version. Policies change; six months later, the audit question is "was this decision correct under the rules in force at the time?" Without versioning, that question is unanswerable.
+The audit copy of the trace has one deliberate omission: the prompt. It stores a SHA-256 fingerprint and a character count — enough to prove which request a decision belongs to, without the audit log becoming a second, less-protected copy of your most sensitive data. Your audit trail should never be the leak.
+The killer question for any multi-tenant governance system: a second business unit wants different provider approvals, different regional restrictions, and different routing weights. How do you support that without business-unit-specific code paths?
+If your answer involves if business_unit == "wealth-mgmt", you've already lost — every new tenant is a code change, a release, and a new place for governance bugs to hide.
+In Aegis, a tenant is a policy entry:
+business_units:
+  retail-banking:
+    approved_providers: [InHouseAI, OpenAI, Anthropic, Google]
+
+  wealth-mgmt:
+    approved_providers: [InHouseAI, Anthropic]
+    weight_overrides:
+      Balanced: {cost: 0.20, quality: 0.60, latency: 0.20}
+
+Same for models — a new model is one YAML entry declaring its provider, capabilities, regions, certification ceiling, and cost/quality/latency profile. The routing core never mentions a tenant or a model by name. Onboarding either one is a config change with policy review, not a deployment.
+(Confession: the first version of my demo UI hardcoded the business-unit dropdown. The routing core was clean, but the presentation layer had grown exactly the tenant-specific code path the architecture forbids. It's a good reminder that governance invariants erode from the edges — the UI, the batch job, the "temporary" script — not the core.)
+It's 2026, so the reflexive design is "use an LLM to pick the best model." I think that's exactly wrong for this layer, and it's worth being precise about why.
+A governance gateway's routing decision must be:
+Deterministic — same request, same config, same decision, every time;
+Explainable rule-by-rule — "the model felt this route was compliant" is not something you can tell a regulator;
+Fast and cheap — it's on the critical path of every request.
+Rules and arithmetic give you all three. An LLM judge gives you none of them. In this architecture, LLMs are the workload, never the judge.
+There's one legitimately hard sub-problem here: classifying the request itself (is this a text task or an image task? is this data really "Internal"?). My position: classification is an upstream contract, not a gateway guess. Applications declare task type and data classification when they integrate — it's validated, versioned, and auditable. Inferring it from prompt content would mean reading the prompt before deciding who's allowed to read the prompt, which is a privacy paradox you want no part of. If you must infer, do it inside the trust boundary, record the confidence in the trace, and never let the inference touch the governance rules — only the capability match. Bound the blast radius of a wrong guess to "suboptimal route," never "compliance breach."
+Full disclosure: the provider calls in the repo are simulated — execute() returns canned text, and outages are injected via a test hook. That's deliberate. The simulation boundary is exactly one function; everything the project actually demonstrates — the hard gate, the ranking, the fail-closed fallback, the trace — is real, deterministic, and covered by tests, and the whole thing runs anywhere in seconds with zero API keys.
+The production hardening path is the predictable one: YAML files become registry and policy services with approval workflows, the availability flag becomes health checks and circuit breakers feeding the eligibility gate, the JSONL audit file becomes an append-only store, and the business unit comes from the caller's authenticated identity instead of the request body. None of it changes the routing core — which is the point of getting the seams right.
+Put policy before optimization, structurally — the ranker and the fallback should be physically unable to see non-compliant options, so the trade-off can't be expressed, let alone taken.
+Fail closed — a refusal with reasons is a feature; a silent downgrade is an incident you'll find out about from a regulator.
+Make explainability the contract — if "why this model?" isn't answerable from the response itself, with a policy version attached, you don't have governance; you have vibes.
+The full implementation — routing core, Streamlit UI, FastAPI endpoint, CLI demo, and the test suite that pins the invariants — is at github.com/abhijatchaturvedi/aegis-gateway. The scenario I'd point you at first: mark every compliant model as down and watch it refuse to route while healthy external models sit right there. That refusal is the entire architecture in one response.
+What's your organization's answer to "why did this request go to that model?" I'd genuinely like to hear how others are handling this — especially the task-classification contract, which I think is the least-settled part of this space...."
+image: /img/blog/generated/building-a-compliant-ai-gateway-lessons-from-aegis-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Building a Compliant AI Gateway: Lessons from Aegis](/img/blog/generated/building-a-compliant-ai-gateway-lessons-from-aegis-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### The Compliance Challenge in AI Deployment
+
+In regulated industries such as finance and healthcare, the deployment of artificial intelligence (AI) systems faces significant compliance challenges. Organizations must navigate a complex landscape of regulations that dictate how sensitive data is handled, which AI models can be used, and under what circumstances. The inherent tension between operational availability and regulatory compliance often leads to governance downgrades, where systems that are compliant under normal conditions may inadvertently breach regulations during failures or outages. The Aegis Gateway architecture addresses these challenges by prioritizing compliance over availability, fundamentally altering how AI systems interact with regulatory requirements.
+
+### The Imperative for Compliance in AI Systems
+
+AI systems must integrate compliance at their core rather than treating it as an ancillary concern. Traditional architectures often prioritize availability, allowing operational pressures to dictate model selection, which can lead to routing sensitive data to non-compliant models. This can happen during system failures when fallback mechanisms kick in, potentially exposing organizations to regulatory scrutiny and penalties. A compliance-centric architecture like Aegis ensures that all AI interactions adhere to a strict set of governance rules, thereby minimizing risk and enhancing accountability across the enterprise.
+
+### Aegis Gateway Architecture: A Compliance-Driven Framework
+
+The Aegis Gateway is structured around a three-stage architecture designed to enforce compliance rigorously. This architecture incorporates a model catalogue, a policy engine, and a ranking mechanism, culminating in a fallback executor. Each stage is crucial in ensuring that only compliant models are considered for AI requests, effectively eliminating the risk of non-compliant routing. The fail-closed design philosophy means that if no compliant model is available, the request is explicitly refused rather than rerouted to a non-compliant alternative, fundamentally changing the decision-making process in AI deployments.
+
+### Stage 1: Policy Filtering – The Gatekeeper of Compliance
+
+The first stage of the Aegis Gateway is policy filtering, which serves as a gatekeeper for model eligibility. Each model in the system is evaluated against a comprehensive set of governance rules that assess various factors, including task capabilities, provider approvals, data classification certifications, and regional restrictions. This filtering process is implemented through a function that returns a list of violated rules for each evaluated model, ensuring transparency and accountability. For instance, if a model is not certified for a specific data classification, it will be flagged, preventing its selection.
+
+```python
+def evaluate(self, model: ModelSpec, ctx: RequestContext) -> list[str]:
+    """Return the list of violated rules (empty list = eligible)."""
+    reasons = []
+    if ctx.task_type not in model.capabilities:
+        reasons.append(f"model does not support task '{ctx.task_type.value}'")
+    if model.provider not in unit["approved_providers"]:
+        reasons.append(f"provider '{model.provider}' is not approved "
+                       f"for business unit '{ctx.business_unit}'")
+    if req_level > CLASSIFICATION_LEVEL[model.max_classification]:
+        reasons.append(f"model is certified only up to "
+                       f"{model.max_classification.value} data")
+    # Additional checks for region residency and data handling
+    return reasons
+```
+
+### Stage 2: Ranking – Optimizing for Compliance and Performance
+
+After passing the policy filtering stage, eligible models move on to the ranking stage. Here, a weighted score is calculated based on normalized metrics such as cost, quality, and latency. The weights are determined by the request's declared priority, whether it be cost-effective, balanced, or quality-focused. This stage is critical because it ensures that only models deemed eligible by the policy engine are considered for ranking, thus maintaining the integrity of the compliance framework. For example, if a model is eligible but has a high cost, it may receive a lower ranking compared to a more cost-effective model that meets the same compliance criteria. 
+
+Moreover, compliance officers can leverage this ranking system to make informed decisions about model selection, ensuring that the chosen model aligns with both regulatory requirements and organizational objectives. This dual focus on compliance and performance enhances the overall effectiveness of AI deployments in regulated environments.
+
+### Stage 3: Fallback Mechanism – Ensuring Compliance Integrity
+
+The final stage of the Aegis Gateway is the fallback mechanism, designed to prevent compliance breaches during model execution failures. If the selected model fails, the system iterates through the ranked list of eligible models to find an alternative. Importantly, if the list is exhausted without a compliant option, the gateway explicitly refuses the request instead of routing it to a non-compliant model. This design choice reinforces the fail-closed philosophy, ensuring compliance is never compromised for the sake of availability. For instance, if a compliant model fails during execution, the system will return an error message indicating that no compliant model is available, thereby maintaining governance integrity.
+
+### Real-World Implications of a Fail-Closed Architecture
+
+Implementing a fail-closed design has profound implications for organizations operating in regulated environments. By structuring the architecture to refuse requests rather than reroute them to non-compliant options, the Aegis Gateway minimizes the risk of governance downgrades. This structural approach not only protects sensitive data but also enhances the organization's accountability in the eyes of regulators. Organizations with a fail-closed design can demonstrate a commitment to compliance, providing a robust defense against potential regulatory inquiries. 
+
+### Explainability as a Cornerstone of AI Governance
+
+In the realm of AI, explainability is not merely a desirable feature; it is a fundamental requirement for compliance. The Aegis Gateway ensures that every decision made by the system is accompanied by a detailed rationale, which is crucial during audits. Each response from the gateway includes a decision trace that outlines the selected model, any rejected models, and the specific reasons for their rejection. This transparency allows organizations to provide clear answers to regulatory inquiries, reinforcing their commitment to compliance. For example, if a model is rejected due to a lack of provider approval, the audit trail will include this information, allowing compliance officers to explain the decision process clearly.
+
+### Multi-Tenant Governance Without Code Changes
+
+One significant challenge in designing compliant AI systems is accommodating multiple business units with varying governance requirements. The Aegis Gateway addresses this by treating each tenant as a policy entry rather than requiring code changes. This means that different business units can have distinct provider approvals, regional restrictions, and routing weights without necessitating modifications to the underlying codebase. Such flexibility is essential for scaling AI governance across diverse organizational structures while maintaining compliance. For instance, a new business unit can be onboarded simply by adding a new policy entry, ensuring that governance remains consistent and manageable.
+
+### Lessons Learned from Implementing Aegis Gateway
+
+The implementation of the Aegis Gateway has revealed critical lessons about the intersection of AI and compliance. First, it underscores the importance of embedding governance into the architectural design rather than relying on post-hoc checks. Second, it highlights the need for clear, deterministic decision-making processes that can withstand regulatory scrutiny. Finally, it emphasizes the necessity of maintaining a comprehensive audit trail that captures not only the decisions made but also the context in which they were made. These lessons are invaluable for organizations looking to enhance their AI governance frameworks.
+
+### Future Directions for AI Compliance Frameworks
+
+As organizations continue to integrate AI into their operations, the landscape of compliance will evolve. Future considerations should include the need for adaptive governance frameworks that can respond to changing regulations and technological advancements. Organizations must prioritize continuous monitoring and auditing of their AI systems to ensure ongoing compliance. By adopting a proactive approach to AI governance, enterprises can navigate the complexities of regulation while leveraging the transformative potential of AI technologies.
+
+### Conclusion: A Compliance-First Approach to AI Governance
+
+The Aegis Gateway exemplifies a forward-thinking approach to AI governance that prioritizes compliance above all else. By rigorously filtering models, maintaining a clear ranking system, and implementing a fail-closed design, organizations can safeguard against compliance breaches while harnessing the power of AI. The lessons learned from Aegis provide actionable insights for compliance officers and technical architects alike, serving as a blueprint for building compliant AI systems that withstand scrutiny and foster trust in their AI deployments. As the regulatory landscape continues to evolve, embracing such architectures will be crucial for organizations striving to maintain both innovation and compliance in their AI initiatives.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/abhijat_chaturvedi/fail-closed-not-open-designing-an-ai-gateway-for-regulated-enterprises-3ife)
+
+---
+
+<SocialShare title="Building a Compliant AI Gateway: Lessons from Aegis" slug="building-a-compliant-ai-gateway-lessons-from-aegis" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
