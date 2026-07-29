@@ -1,0 +1,287 @@
+---
+slug: enhancing-development-workflows-with-a-local-ai-memory-system
+title: "Enhancing Development Workflows with a Local AI Memory System"
+authors: [francis]
+tags: [ai, local, memory, productivity]
+date: 2026-07-29T08:17:53.069Z
+description: "I Gave My AI a Memory. It Changed Everything.
+
+
+I got tired of explaining my own codebase to an AI every single session.
+"Here's the architecture. Here's the README. Here's what I tried last time and why it didn't work." Every. Single. Time.
+Six months in, I realized I wasn't chatting with an assistant — I was onboarding a new intern who quit after every conversation and came back with total amnesia.
+So I built a memory system. Local. Free. And honestly, it's the single most useful AI upgrade I've made.
+LLMs don't remember you. They don't remember your projects. They don't remember that you tried asyncio.gather last week and it deadlocked, or that your Garmin watch face has a hard 64KB memory limit, or that you always forget how your Telegram bot handles rate limits.
+What they have is a context window — a temporary scratchpad that gets wiped when the conversation ends. For coding workflows, this is broken by design. You're not having a chat. You're doing ongoing work on a codebase that spans months.
+I tried the obvious fixes:
+Pasting huge chunks of context every time. Burned through token limits, got truncated responses.
+Keeping "project briefs" in a text file and pasting them in. Worked until I had ten projects.
+Using cloud memory features. Worked until I hit another subscription and another privacy question.
+None of it felt right. What I wanted was simple: ask a question about my stuff, get an answer based on my docs, with zero setup friction.
+RAG (Retrieval-Augmented Generation) isn't new. What's new is that you can run the entire stack — embedding model, vector database, and LLM — on a Mac Mini without touching a single cloud API.
+Here's what I ended up with:
+My Documents (markdown, code, notes, PDFs)
+  → Chunked into ~400-token pieces
+  → Embedded with nomic-embed-text (Ollama)
+  → Stored in Chroma (local vector DB, no server needed)
+
+Question
+  → Embedded with the same model
+  → Top-5 relevant chunks pulled from Chroma
+  → Fed into Qwen 3.5 9B with a prompt template
+  → Answer
+
+Total stack: Ollama + Chroma + a 40-line Python script. No Docker. No cloud. No API keys.
+Not the whole internet. Just the stuff I actually need:
+Project docs — READMEs, architecture decisions, API specs
+My notes — Obsidian vault, scratchpads, debugging logs
+Code snippets — Functions I keep reusing, config templates
+Bookmarked solutions — Stack Overflow answers I always forget
+Deployment notes — "How did I set up the VPS again?"
+About 4,800 chunks total. Query time: under 2 seconds on the Mac Mini, under 500ms if I route it through the Windows PC's RTX 3060.
+Indexing:
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_community.document_loaders import DirectoryLoader
+from langchain_community.embeddings import OllamaEmbeddings
+from langchain_community.vectorstores import Chroma
+
+loader = DirectoryLoader("~/projects/", glob="**/*.md", recursive=True)
+docs = loader.load()
+
+splitter = RecursiveCharacterTextSplitter(chunk_size=400, chunk_overlap=50)
+chunks = splitter.split_documents(docs)
+
+embeddings = OllamaEmbeddings(model="nomic-embed-text")
+db = Chroma.from_documents(chunks, embeddings, persist_directory="./knowledge-base")
+db.persist()
+
+Querying:
+import ollama
+
+def ask(question: str) -> str:
+    results = db.similarity_search(question, k=5)
+    context = "\n\n".join([r.page_content for r in results])
+
+    response = ollama.chat(
+        model="qwen3.5:9b",
+        messages=[{
+            "role": "user",
+            "content": f"Context:\n{context}\n\nQuestion: {question}"
+        }]
+    )
+    return response['message']['content']
+
+That's it. No LangChain chains. No agents. No frameworks that require a PhD to configure.
+Before: "How does my Garmin watch face fetch stock data?" → paste 200 lines of code → wait → hope the model doesn't hallucinate.
+After: ask("How does my Garmin watch face fetch stock data?") → "It uses Background.exit() to pass a dictionary with the ticker and price to the app-side view, because the background service has a 64KB memory limit." — in 1.8 seconds. Correct. Specific. Zero hallucination.
+Before: "What's the rate limit for the crypto bot?" → dig through files → find nothing → guess.
+After: "3 requests per second with a 1.5-second cooldown between calls, enforced in the throttle() decorator in bot/utils.py." — pulled straight from my own code comments.
+The AI stopped being a generalist that needed onboarding. It became a specialist that already knew my stuff.
+Indexing is slow. Embedding 4,800 chunks on a Mac Mini CPU takes ~20 minutes. On the RTX 3060 it's ~4 minutes. You don't do it often — I run incremental updates via cron every hour — but the first run is painful.
+Chunking is an art. Too small (100 tokens) and you lose context. Too big (1000 tokens) and you hit the retrieval limit too fast. I settled on 400 with 50-token overlap after way too much trial and error.
+It doesn't replace search. If you ask "what's the syntax for Python list comprehension," RAG is overkill and probably retrieves some random list-handling function from your old projects. This is for your knowledge, not general knowledge.
+Storage grows. 4,800 chunks ≈ 300MB of vector data. Manageable, but not nothing. Chroma handles it fine locally.
+I added incremental updates with file hashes instead of re-indexing everything:
+def update_index(docs_dir, db, cache_file="./index-cache.json"):
+    cache = json.loads(Path(cache_file).read_text()) if Path(cache_file).exists() else {}
+    changed = []
+
+    for f in Path(docs_dir).rglob("*.md"):
+        h = hashlib.md5(f.read_bytes()).hexdigest()
+        if cache.get(str(f)) != h:
+            changed.append(str(f))
+            cache[str(f)] = h
+
+    if changed:
+        # ... re-index only changed files
+        Path(cache_file).write_text(json.dumps(cache))
+
+Runs every hour via cron. Most of the time it does nothing. When I edit a file, it catches it. My knowledge base is never more than an hour stale.
+Do this if:
+You work on multiple long-term projects
+You keep notes/docs/code that you reference repeatedly
+You want context-aware answers without pasting walls of text
+You have a machine that can run Ollama (Mac Mini M4, any modern PC)
+Don't do this if:
+You only do one-off queries ("what's the weather")
+Your projects are small and you remember everything anyway
+You can't spare 300MB of disk space
+You expect it to replace Google (it won't)
+# 1. Install Ollama
+curl -fsSL https://ollama.com/install.sh | sh
+
+# 2. Pull models
+ollama pull qwen3.5:9b
+ollama pull nomic-embed-text
+
+# 3. Python deps
+pip install chromadb langchain ollama
+
+# 4. Index your docs (adapt the script above)
+# 5. Ask questions
+
+Total time: 15 minutes. Total cost: $0. Monthly cost: $0.
+The technical setup is neat. But the real change is mental.
+Before, every AI session started with context-building: "Here's what I'm working on, here's what I tried, here's the constraints." Now I just ask the question. The system already knows the constraints because it read my docs.
+It's the difference between calling a consultant and calling a teammate who was in the meeting.
+That gap — the gap between "AI that answers questions" and "AI that knows your work" — is bigger than I expected. And closing it costs exactly zero dollars.
+Sam Hartley is a solo dev building local AI tools on a 3-machine home lab. Writes about the infrastructure that makes AI actually useful for real work.
+→ Custom automation setups on Fiverr
+Follow CelebiBots on Telegram
+
+
+  
+  
+  ai #rag #ollama #selfhosted #productivity #buildinginpublic..."
+image: /img/blog/generated/enhancing-development-workflows-with-a-local-ai-memory-system-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Enhancing Development Workflows with a Local AI Memory System](/img/blog/generated/enhancing-development-workflows-with-a-local-ai-memory-system-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### The Inefficiencies of Traditional AI in Software Development
+
+In the realm of software development, traditional AI solutions often fall short of meeting the nuanced needs of developers. Large language models (LLMs) excel at providing general assistance but lack the capability to retain context across sessions. This limitation becomes glaringly evident when developers are forced to repeatedly onboard these models with project-specific information. Each interaction feels like starting anew, resulting in a frustrating cycle of inefficiency. Developers often waste precious time reiterating project details, architecture, and past troubleshooting efforts, which detracts from actual coding tasks.
+
+### The Concept of AI Memory: A Game Changer for Developers
+
+AI memory refers to the ability of an artificial intelligence system to retain and recall information over time, enhancing its relevance and utility. In software development, a robust AI memory system can significantly improve the AI's ability to provide context-aware responses. By maintaining persistent knowledge of project specifics—such as architecture decisions, code snippets, and historical debugging efforts—developers can streamline their workflows. This capability transforms the AI from a generic assistant into a knowledgeable partner, capable of understanding the intricacies of ongoing projects and providing timely, relevant insights.
+
+### Implementing a Local AI Memory System: A Practical Guide
+
+Setting up a local AI memory system involves integrating several key components: an embedding model, a vector database for storage, and an LLM for querying. In this guide, we will utilize Ollama for embedding and Chroma as the vector database. The following steps outline the installation and configuration process:
+
+1. **Install Ollama**: Execute the following command to install Ollama on your system:
+
+   ```bash
+   curl -fsSL https://ollama.com/install.sh | sh
+   ```
+
+2. **Pull Required Models**: After installation, pull the necessary models for embedding and querying:
+
+   ```bash
+   ollama pull qwen3.5:9b
+   ollama pull nomic-embed-text
+   ```
+
+3. **Install Python Dependencies**: Use pip to install the required Python libraries:
+
+   ```bash
+   pip install chromadb langchain ollama
+   ```
+
+4. **Index Your Documents**: Adapt the provided Python script to index your project documentation, code, and notes. This script will chunk your documents into manageable pieces for efficient retrieval.
+
+### Optimizing Document Indexing and Chunking
+
+Effective indexing and chunking of documents are crucial for ensuring that the AI memory system retrieves relevant information quickly. The following Python code demonstrates how to index documents using LangChain's `RecursiveCharacterTextSplitter`, which allows for flexibility in chunk size:
+
+```python
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_community.document_loaders import DirectoryLoader
+from langchain_community.embeddings import OllamaEmbeddings
+from langchain_community.vectorstores import Chroma
+
+# Load documents from the specified directory
+loader = DirectoryLoader("~/projects/", glob="**/*.md", recursive=True)
+docs = loader.load()
+
+# Split documents into chunks
+splitter = RecursiveCharacterTextSplitter(chunk_size=400, chunk_overlap=50)
+chunks = splitter.split_documents(docs)
+
+# Create embeddings and store in Chroma
+embeddings = OllamaEmbeddings(model="nomic-embed-text")
+db = Chroma.from_documents(chunks, embeddings, persist_directory="./knowledge-base")
+db.persist()
+```
+
+The choice of chunk size (400 tokens in this case) strikes a balance between maintaining context and ensuring efficient retrieval. Smaller chunks may lose important context, while larger chunks can lead to inefficiencies in retrieval.
+
+### Best Practices for Querying Your AI Memory System
+
+Once your documents are indexed, querying the AI memory system becomes straightforward. The following function demonstrates how to ask questions and retrieve context-aware answers from the AI:
+
+```python
+import ollama
+
+def ask(question: str) -> str:
+    results = db.similarity_search(question, k=5)
+    context = "\n\n".join([r.page_content for r in results])
+
+    response = ollama.chat(
+        model="qwen3.5:9b",
+        messages=[{
+            "role": "user",
+            "content": f"Context:\n{context}\n\nQuestion: {question}"
+        }]
+    )
+    return response['message']['content']
+```
+
+This function retrieves the top five relevant chunks from the vector database based on the query, compiles them into a context string, and sends it to the LLM for a response. This approach minimizes the need for repetitive context-building and allows for rapid, informed queries.
+
+### Real-World Examples of Enhanced Coding Efficiency
+
+The implementation of a local AI memory system can lead to substantial improvements in coding efficiency. For instance, a developer querying their AI about a specific function can receive immediate, contextually relevant answers without needing to sift through documentation or code comments. An example query could be, "How does my Garmin watch face fetch stock data?" The AI might respond with, "It uses `Background.exit()` to pass a dictionary with the ticker and price to the app-side view, because the background service has a 64KB memory limit." This specificity is invaluable for developers working on complex projects, as it allows them to focus on problem-solving rather than context-building.
+
+### Addressing Privacy Concerns with Local Data Storage
+
+While the benefits of a local AI memory system are significant, potential privacy concerns must be addressed. Storing sensitive project data locally eliminates the risks associated with cloud-based solutions, where data breaches can expose proprietary information. However, developers must ensure that their local systems are secure and that sensitive data is not inadvertently exposed through misconfigurations. Implementing strong access controls and encryption for stored data can mitigate these risks, allowing developers to leverage the benefits of AI memory without compromising their project's confidentiality.
+
+### Acknowledging the Limitations of Local AI Memory Systems
+
+Despite their advantages, local AI memory systems are not without limitations. One major challenge is the initial setup and ongoing maintenance of the system. Indexing large volumes of documents can be time-consuming, especially on less powerful hardware. For example, embedding 4,800 chunks on a Mac Mini CPU may take around 20 minutes, while using a more powerful GPU can reduce this time to approximately 4 minutes. 
+
+Moreover, developers must manage storage effectively. With 4,800 chunks equating to around 300MB of vector data, it is essential to ensure that local storage is adequate. Incremental updates can help mitigate the burden of re-indexing everything by only updating modified files.
+
+### The Trade-offs of Local Versus Cloud-Based AI Solutions
+
+When considering the implementation of a local AI memory system, developers must weigh the trade-offs between local and cloud-based solutions. Local systems provide enhanced privacy and control over data, eliminating concerns about data breaches associated with cloud storage. Moreover, they can be more cost-effective in the long run, avoiding subscription fees for cloud services. However, local systems may require more initial setup and maintenance effort compared to the ease of deploying a cloud-based solution.
+
+### The Future of AI in Personalized Coding Assistance
+
+The evolution of AI memory systems signifies a shift towards more personalized coding assistance. As developers increasingly adopt local AI systems, we can expect to see a growing emphasis on context-aware interactions that enhance productivity. By leveraging the power of local memory, developers can transform their AI from a passive tool into an active collaborator that understands their unique workflows and challenges.
+
+### Conclusion: Embracing Local AI Memory Systems
+
+In conclusion, the implementation of a local AI memory system can revolutionize the way developers interact with AI. By providing context-aware answers and eliminating the need for repetitive onboarding, these systems can significantly enhance coding efficiency. As technology continues to evolve, embracing local AI solutions may become a standard practice, paving the way for more intelligent and responsive development environments.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/samhartley_dev/i-gave-my-ai-a-memory-it-changed-everything-il)
+
+---
+
+<SocialShare title="Enhancing Development Workflows with a Local AI Memory System" slug="enhancing-development-workflows-with-a-local-ai-memory-system" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
