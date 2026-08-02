@@ -1,0 +1,826 @@
+---
+slug: building-a-local-ai-trading-assistant-for-indian-markets
+title: "Building a Local AI Trading Assistant for Indian Markets"
+authors: [francis]
+tags: [ai, trading, nse, llm]
+date: 2026-08-02T08:05:49.592Z
+description: "AI for Stock Market: How I Built an AI Trading Assistant for NSE Using Local LLMs
+
+
+DOYR | Not financial/legal/tax advice. For educational purposes only.
+Most AI trading articles are written by people who have never placed a trade. They'll show you a fancy LSTM model with 99% backtest accuracy and promise millions. Then you try it live and lose everything.
+This article is different. It's written by someone who actually trades Indian markets, runs an open-source AI trading project on Android, and has seen what works and what doesn't.
+This is not a "get rich with AI" guide. This is a practical breakdown of how I built nse_ai_agent — an AI trading assistant that runs on my phone, uses local LLMs for sentiment analysis, and helps me make better decisions without replacing my judgment.
+Before building AI tools, I used everything available to Indian retail traders:
+
+
+
+Tool
+Problem
+
+
+
+
+Zerodha Pi
+Windows-only, closed-source, no AI integration
+
+
+Upstox Pro
+Web-based, clunky, no automation
+
+
+TradingView
+Great charts, but AI/sentiment = paid features
+
+
+Bloomberg Terminal
+₹50,000+/year. Not for retail
+
+
+Telegram tip groups
+99% are scams
+
+
+Paid algo platforms
+Black-box logic. You don't know what's happening
+
+
+
+No tool combines:
+NSE-specific data
+AI/ML analysis
+Mobile accessibility
+Open-source transparency
+Zero cost
+So I built one.
+Most "AI trading" articles recommend GPT-4 or Claude for sentiment analysis. I don't.
+
+
+
+Problem
+Why It Matters
+
+
+
+
+Latency
+API call = 500-2000ms. In trading, seconds matter.
+
+
+Cost
+GPT-4 API = ₹1-5 per 1K tokens. Daily trading = ₹100-500/month.
+
+
+Privacy
+Your trading data leaves your device.
+
+
+Dependency
+API down = no analysis.
+
+
+Rate limits
+Can't analyze 100 news articles fast enough.
+
+
+
+
+
+
+Advantage
+Explanation
+
+
+
+
+Zero latency
+Runs on device. No API call.
+
+
+Zero cost
+Ollama + Llama 3.2 = free.
+
+
+Privacy
+Data never leaves phone.
+
+
+Unlimited
+No rate limits. Analyze 1000 news articles if needed.
+
+
+Offline
+Works without internet after model download.
+
+
+
+Local LLM Options (ranked by performance):
+1. Llama 3.2 (3B) — Fast, decent quality, 2GB RAM
+2. Phi-3 Mini (3.8B) — Best quality/size ratio, 3GB RAM
+3. Gemma 2B — Very fast, lower quality, 1.5GB RAM
+4. Mistral 7B — Best quality, needs 8GB RAM (not for all phones)
+
+For Termux/Android: Llama 3.2 3B or Phi-3 Mini = sweet spot.
+┌─────────────────────────────────────────────┐
+│              Android Phone                   │
+│                                             │
+│  ┌──────────────┐      ┌───────────────┐   │
+│  │ Termux       │      │ Ollama        │   │
+│  │              │─────▶│ (Local LLM)   │   │
+│  │ - Python     │      │ Llama 3.2 3B  │   │
+│  │ - Cron       │      │ Phi-3 Mini    │   │
+│  │ - Scripts    │      └───────▲───────┘   │
+│  └──────┬───────┘              │            │
+│         │                      │            │
+│         ▼                      │            │
+│  ┌──────────────┐             │            │
+│  │ NSE Data     │             │            │
+│  │ Fetcher      │             │            │
+│  └──────┬───────┘             │            │
+│         │                     │            │
+│         ▼                     │            │
+│  ┌──────────────┐             │            │
+│  │ Strategy     │             │            │
+│  │ Engine       │             │            │
+│  └──────┬───────┘             │            │
+│         │                     │            │
+│         ▼                     │            │
+│  ┌──────────────┐             │            │
+│  │ Telegram     │◀────────────┘            │
+│  │ Bot Alerts   │   (sentiment analysis)   │
+│  └──────────────┘                          │
+│                                             │
+└─────────────────────────────────────────────┘
+
+1. Cron triggers at 9:15 AM (market open)
+2. Fetcher pulls Nifty quote + option chain + top 20 news headlines
+3. LLM analyzes headlines for bullish/bearish/neutral sentiment
+4. Strategy engine combines:
+   - Technical signals (momentum, RSI, volume)
+   - LLM sentiment score
+   - Open interest data
+5. Risk manager validates position size
+6. If confidence > 70% → Telegram alert with reasoning
+7. Trader reviews and decides manually
+
+# Install Ollama
+curl -fsSL https://ollama.com/install.sh | sh
+
+# Or via Termux
+pkg install ollama -y
+ollama serve &
+
+# For phones with 4GB RAM
+ollama pull llama3.2:3b
+
+# For phones with 6GB+ RAM
+ollama pull phi3:mini
+
+import requests
+import json
+from datetime import datetime
+
+class LLMSentimentAnalyzer:
+    def __init__(self, model="llama3.2:3b"):
+        self.model = model
+        self.ollama_url = "http://localhost:11434/api/generate"
+
+    def analyze_news(self, headlines):
+        """
+        Analyze list of news headlines for market sentiment.
+
+        Args:
+            headlines: List of strings
+
+        Returns:
+            dict with sentiment score, reasoning, and confidence
+        """
+        prompt = f"""You are a financial sentiment analyzer for Indian stock markets.
+
+Analyze these news headlines and provide:
+1. Overall sentiment: BULLISH / BEARISH / NEUTRAL
+2. Sentiment score: 1-10 (10 = extremely bullish)
+3. Key reasoning in 2 sentences
+4. Confidence: HIGH / MEDIUM / LOW
+
+Headlines:
+{chr(10).join(f"- {h}" for h in headlines)}
+
+Respond in JSON format:
+{{
+  "sentiment": "BULLISH/BEARISH/NEUTRAL",
+  "score": 1-10,
+  "reasoning": "2 sentences",
+  "confidence": "HIGH/MEDIUM/LOW"
+}}"""
+
+        payload = {
+            "model": self.model,
+            "prompt": prompt,
+            "stream": False,
+            "options": {
+                "temperature": 0.1,  # Low temp = consistent output
+                "num_predict": 200   # Short response
+            }
+        }
+
+        try:
+            response = requests.post(
+                self.ollama_url,
+                json=payload,
+                timeout=30
+            )
+            result = json.loads(response.text)
+            return json.loads(result['response'])
+        except Exception as e:
+            print(f"LLM analysis failed: {e}")
+            return {
+                "sentiment": "NEUTRAL",
+                "score": 5,
+                "reasoning": "LLM analysis unavailable",
+                "confidence": "LOW"
+            }
+
+    def analyze_with_fallback(self, headlines):
+        """
+        Run LLM analysis with keyword fallback.
+        If LLM fails, use simple keyword matching.
+        """
+        # Try LLM first
+        result = self.analyze_news(headlines)
+
+        if result['confidence'] == 'LOW':
+            # Fallback to keywords
+            bullish_words = ['surge', 'rally', 'gain', 'up', 'rise', 'positive', 'growth', 'profit']
+            bearish_words = ['fall', 'drop', 'crash', 'down', 'loss', 'negative', 'decline', 'fear']
+
+            bullish_count = sum(1 for h in headlines for w in bullish_words if w in h.lower())
+            bearish_count = sum(1 for h in headlines for w in bearish_words if w in h.lower())
+
+            if bullish_count > bearish_count:
+                result = {"sentiment": "BULLISH", "score": 6, "reasoning": "Keyword-based fallback", "confidence": "LOW"}
+            elif bearish_count > bullish_count:
+                result = {"sentiment": "BEARISH", "score": 4, "reasoning": "Keyword-based fallback", "confidence": "LOW"}
+
+        return result
+
+# Usage
+analyzer = LLMSentimentAnalyzer()
+
+headlines = [
+    "Nifty opens higher on strong FII inflows",
+    "RBI keeps repo rate unchanged at 6.5%",
+    "IT stocks drag Nifty down amid global concerns",
+    "Q2 results: TCS beats estimates, Infosys misses",
+    "Rupee strengthens against dollar"
+]
+
+result = analyzer.analyze_with_fallback(headlines)
+print(f"Sentiment: {result['sentiment']} ({result['score']}/10)")
+print(f"Reasoning: {result['reasoning']}")
+print(f"Confidence: {result['confidence']}")
+
+Don't rely on AI alone. Combine LLM sentiment with technical indicators.
+class HybridSignalGenerator:
+    def __init__(self):
+        self.sentiment_analyzer = LLMSentimentAnalyzer()
+        self.technical_weight = 0.7  # Technical = 70% weight
+        self.sentiment_weight = 0.3  # Sentiment = 30% weight
+
+    def generate_signal(self, technical_signal, headlines):
+        """
+        Combine technical and sentiment signals.
+
+        Args:
+            technical_signal: dict with 'signal' (BUY/SELL/HOLD) and 'confidence' (0-1)
+            headlines: List of news headlines
+
+        Returns:
+            Final signal with confidence
+        """
+        sentiment = self.sentiment_analyzer.analyze_with_fallback(headlines)
+
+        # Convert sentiment to score
+        sentiment_score = sentiment['score'] / 10  # 0-1
+
+        # Convert technical signal to score
+        tech_score = technical_signal['confidence']
+        if technical_signal['signal'] == 'SELL':
+            tech_score *= -1
+
+        # Weighted combination
+        final_score = (tech_score * self.technical_weight) + (sentiment_score * self.sentiment_weight)
+
+        # Generate final signal
+        if final_score > 0.6:
+            final_signal = "STRONG BUY"
+        elif final_score > 0.3:
+            final_signal = "BUY"
+        elif final_score < -0.6:
+            final_signal = "STRONG SELL"
+        elif final_score < -0.3:
+            final_signal = "SELL"
+        else:
+            final_signal = "HOLD"
+
+        return {
+            'signal': final_signal,
+            'score': round(final_score, 2),
+            'technical': technical_signal['signal'],
+            'sentiment': sentiment['sentiment'],
+            'reasoning': sentiment['reasoning']
+        }
+
+# Usage
+generator = HybridSignalGenerator()
+
+technical = {'signal': 'BUY', 'confidence': 0.8}
+headlines = ["Nifty opens higher on FII inflows", "RBI maintains status quo"]
+
+result = generator.generate_signal(technical, headlines)
+print(f"Final Signal: {result['signal']}")
+print(f"Score: {result['score']}")
+print(f"Technical: {result['technical']} | Sentiment: {result['sentiment']}")
+
+Context: Union Budget announced on Feb 1, 2026. Market expectations mixed.
+nse_ai_agent workflow:
+9:00 AM: Cron triggers pre-market analysis
+9:01 AM: Fetches top 20 news headlines about budget
+9:02 AM: LLM analyzes headlines:
+
+Headlines:
+1. "No change in long-term capital gains tax" → POSITIVE
+2. "Fiscal deficit target 5.1% vs expected 4.9%" → NEGATIVE
+3. "Customs duty hiked on electronics" → NEGATIVE
+4. "Rural allocation increased by 20%" → POSITIVE
+5. "No income tax changes for middle class" → POSITIVE
+
+LLM Output:
+{
+  "sentiment": "BULLISH",
+  "score": 7,
+  "reasoning": "No tax changes = relief for middle class. Rural spending boost. Fiscal miss offset by growth focus.",
+  "confidence": "MEDIUM"
+}
+
+9:03 AM: Technical analysis:
+- Nifty pre-market up 0.8%
+- Bank Nifty up 1.2%
+- PCR at 1.3 (bullish)
+
+9:04 AM: Hybrid signal:
+Technical: BUY (0.75 confidence)
+Sentiment: BULLISH (0.7 score)
+Final: STRONG BUY (0.73 score)
+
+9:05 AM: Telegram alert sent:
+"🚨 NIFTY SIGNAL: STRONG BUY
+Price: 21,900 (+0.8%)
+Technical: Momentum bullish
+Sentiment: Bullish (7/10) — Budget relief, no tax changes
+Confidence: 73%
+
+Action: Buy Nifty 22,000 CE near 11 AM on confirmation"
+
+12:30 PM: Manual review — signal confirmed
+Order placed: Nifty 22,000 CE @ ₹145
+Target: ₹200
+Stop loss: ₹80
+
+2:15 PM: Target hit at ₹198
+Exit: ₹198 × 50 = ₹9,900
+Profit: (198 - 145) × 50 = ₹2,650
+
+import requests
+from bs4 import BeautifulSoup
+
+class NSENewsScraper:
+    def __init__(self):
+        self.base_url = "https://www.nseindia.com"
+        self.headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+
+    def get_market_news(self, limit=20):
+        """Get latest market news from NSE"""
+        url = f"{self.base_url}/api/news"
+        try:
+            response = requests.get(url, headers=self.headers, timeout=10)
+            data = response.json()
+            headlines = [item['headline'] for item in data['data'][:limit]]
+            return headlines
+        except Exception as e:
+            print(f"NSE news fetch failed: {e}")
+            # Fallback: Moneycontrol scraper
+            return self._moneycontrol_fallback(limit)
+
+    def _moneycontrol_fallback(self, limit=20):
+        """Fallback news source"""
+        url = "https://www.moneycontrol.com/markets/indian-indices/"
+        response = requests.get(url, headers=self.headers, timeout=10)
+        soup = BeautifulSoup(response.text, 'lxml')
+        headlines = []
+        for item in soup.select('.gutter_box .grey_text')[:limit]:
+            headlines.append(item.text.strip())
+        return headlines
+
+# Usage
+scraper = NSENewsScraper()
+headlines = scraper.get_market_news(20)
+print("\n".join(headlines))
+
+
+
+
+Metric
+Value
+
+
+
+
+Total Trades
+47
+
+
+Win Rate
+68%
+
+
+Average Win
+₹3,200
+
+
+Average Loss
+₹1,800
+
+
+Net P&L
++₹42,000
+
+
+Max Drawdown
+-₹8,500
+
+
+Sharpe Ratio
+1.8
+
+
+
+
+
+
+Strategy
+Win Rate
+Why
+
+
+
+
+LLM + Momentum combo
+72%
+LLM caught market-moving news before chart reflected it
+
+
+LLM + OI analysis
+65%
+Big money flows + news sentiment = high confidence
+
+
+Technical only
+58%
+Missed news-driven gaps
+
+
+
+
+
+
+Strategy
+Win Rate
+Why
+
+
+
+
+LLM alone
+45%
+Sentiment is noisy. Needs technical filter.
+
+
+Far OTM options
+12%
+Probability math doesn't lie.
+
+
+Holding through expiry
+33%
+Theta decay kills.
+
+
+
+✅ Analyze 100 news headlines in 2 seconds
+✅ Detect sentiment patterns humans miss
+✅ Backtest strategies on historical data
+✅ Calculate position sizes based on risk
+✅ Alert you to unusual activity
+
+❌ Predict the future
+❌ Account for black swan events (war, pandemic, policy shock)
+❌ Replace human judgment
+❌ Guarantee profits
+❌ Handle illiquid markets
+❌ Factor in politician speeches, Godi media, retail panic
+
+AI Signal: "STRONG BUY"
+Your Checklist:
+[ ] Does this match my technical analysis?
+[ ] What's the max I can lose?
+[ ] Is the risk-reward ratio > 1:1?
+[ ] Am I trading with revenge money?
+[ ] What's my exit plan?
+
+IF all checks pass → Execute
+IF any check fails → Pass
+
+Instead of analyzing only today's news, search HISTORICAL news for similar patterns.
+from chromadb import Client
+from chromadb.utils import embedding_functions
+
+# Initialize ChromaDB (runs locally)
+client = Client()
+collection = client.get_or_create_collection(
+    name="nse_news",
+    embedding_function=embedding_functions.DefaultEmbeddingFunction()
+)
+
+# Add historical news
+headlines = [
+    "RBI hikes repo rate by 25 bps",
+    "Nifty falls 2% on rate hike fears",
+    "IT stocks rally on strong earnings",
+    # ... thousands more
+]
+
+for i, headline in enumerate(headlines):
+    collection.add(
+        documents=[headline],
+        ids=[f"news_{i}"],
+        metadatas=[{"date": "2025-01-15"}]
+    )
+
+# Search for similar patterns
+current_headline = "RBI signals dovish stance on rates"
+results = collection.query(
+    query_texts=[current_headline],
+    n_results=5
+)
+
+# Find what happened last time
+for doc in results['documents'][0]:
+    print(f"Similar: {doc}")
+    print(f"What happened next: [check historical Nifty data]")
+
+This is next-level. Matching current news to historical patterns = edge.
+Hardware:
+- Android phone with 4GB+ RAM
+- 16GB+ storage
+- Stable WiFi
+
+Software:
+- Termux (F-Droid)
+- Python 3.11
+- Ollama + Llama 3.2 3B
+- nsepy, requests, pandas, beautifulsoup4
+- python-telegram-bot
+- ChromaDB (for vector search)
+
+Cron Schedule:
+- 9:00 AM: Pre-market news analysis
+- 9:15 AM: Market open + live quote fetch
+- Every 5 min (9:15-3:30): Momentum scanner
+- 3:35 PM: Post-market summary
+
+A: No. AI can identify patterns and sentiment, but markets are influenced by infinite variables. Use AI as a tool, not a crystal ball.
+A: For trading: local. Zero latency, zero cost, privacy. Cloud LLMs are better for research/analysis, not real-time.
+A: No. It generates signals + alerts. YOU decide. "AI proposes, you dispose."
+A: Fallback to keyword-based sentiment. Always have a backup.
+A: No. Termux is Android-only. For iOS, use iSH shell or cloud VPS.
+A: For customization + cost: yes. For reliability + support: no. Depends on your needs.
+A: Use nsepy (stable), add delays, rotate user agents.
+A: ₹0. All tools are free. Optional: Zerodha Kite Connect = ₹2,000/month for auto-execution.
+After 6 months of running nse_ai_agent, here's what I've learned:
+What AI actually does:
+Filters noise from news
+Identifies sentiment shifts faster than humans
+Backtests strategies consistently
+Removes emotional bias from analysis
+What AI doesn't do:
+Predict black swan events
+Guarantee profits
+Replace trading discipline
+Fix bad strategies
+My win rate went from 58% (technical only) to 68% (technical + AI). That 10% edge = ₹42,000 profit on ₹1 lakh capital in 6 months.
+Not life-changing. But significant. And it scales.
+Near term (2026-2027):
+- Local LLMs get better at financial reasoning
+- Multimodal models analyze charts + news together
+- Real-time sentiment from Twitter/X integrated
+
+Medium term (2027-2030):
+- SEBI regulates AI trading tools
+- Local models with financial fine-tuning
+- Retail traders with AI tools outperform institutional algo
+
+Long term (2030+):
+- Human-AI collaboration standard
+- Pure AI traders = regulated/licensed
+- Democratization of hedge-fund-grade tools
+
+# 1. Install Termux from F-Droid
+# 2. Install Ollama
+curl -fsSL https://ollama.com/install.sh | sh
+
+# 3. Download model
+ollama pull llama3.2:3b
+
+# 4. Clone nse_ai_agent
+git clone https://github.com/shaktitiwari715-ai/nse_ai_agent.git
+cd nse_ai_agent
+
+# 5. Install dependencies
+pip install -r requirements.txt
+
+# 6. Configure .env
+cp .env.example .env
+# Edit .env with your Telegram token, capital, etc.
+
+# 7. Test
+python scripts/llm_sentiment.py
+
+# 8. Schedule with cron
+crontab -e
+# Add: */5 9-15 * * 1-5 ~/nse_ai_agent/scripts/scheduler.sh
+
+
+
+
+Resource
+Link
+
+
+
+
+nse_ai_agent GitHub
+github.com/shaktitiwari715-ai/nse_ai_agent
+
+
+Ollama
+ollama.com
+
+
+Llama 3.2
+ollama.com/library/llama3.2
+
+
+Phi-3 Mini
+ollama.com/library/phi3
+
+
+NSEpy
+pypi.org/project/nsepy
+
+
+ChromaDB
+chromadb.io
+
+
+
+The best trading AI is not the one that predicts perfectly. It's the one that augments your decision-making without removing your agency.
+nse_ai_agent doesn't place trades for me. It analyzes news in 2 seconds, scores market sentiment, combines it with technical signals, and sends me a Telegram alert with reasoning.
+I still decide. I still manage risk. I still control my capital.
+But now I have an edge that most retail traders don't.
+That's the real power of AI in trading. Not automation. Augmentation.
+Website: optiontradingwithai.in
+
+
+Dev.to: @shaktitiwari715-ai
+
+
+GitHub: @shaktitiwari715-ai
+
+
+X/Twitter: @shaktitiwari
+
+
+Telegram: @shaktitrade
+
+
+
+
+
+
+Published on Dev.to | Tags: #ai #trading #nse #llm #termux #fintech #india
+Shakti Tiwari is an AI/quant trader and open-source developer from Chandigarh. He builds free trading tools for Indian retail traders and writes about the intersection of AI, trading psychology, and NSE markets...."
+image: /img/blog/generated/building-a-local-ai-trading-assistant-for-indian-markets-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Building a Local AI Trading Assistant for Indian Markets](/img/blog/generated/building-a-local-ai-trading-assistant-for-indian-markets-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### The Need for Local AI Solutions in Trading
+
+The integration of Artificial Intelligence (AI) into stock trading has revolutionized the landscape, yet retail traders in India continue to face significant challenges. My personal trading journey revealed a critical gap in the availability of AI-driven tools tailored specifically for the Indian market. Most existing solutions are either cloud-based—introducing latency and privacy concerns—or prohibitively expensive, as seen with platforms like Bloomberg Terminal. This realization led to the development of the nse_ai_agent, an AI trading assistant that utilizes local Large Language Models (LLMs) for real-time sentiment analysis, thus enhancing trading decisions while maintaining user control.
+
+### Understanding Local LLMs: Advantages Over Cloud-Based Solutions
+
+Local LLMs, such as Llama 3.2 and Phi-3 Mini, present several advantages over their cloud-based counterparts. The most significant benefit is the elimination of latency; local models operate directly on the device, avoiding the delays associated with API calls, which can range from 500 to 2000 milliseconds—critical in trading scenarios where timing is paramount. Furthermore, local LLMs incur no costs for API usage, a considerable advantage for retail traders who often work within tight budgets. Privacy is another crucial aspect; local models ensure that sensitive trading data remains on the device, thereby reducing risks associated with data breaches. Additionally, local models are free from rate limits, allowing traders to analyze extensive datasets without constraints, making them ideal for high-frequency trading scenarios. This autonomy empowers traders to make decisions in real-time without reliance on external servers.
+
+### Challenges Faced by Retail Traders in India
+
+Retail traders in India encounter numerous obstacles that hinder their trading effectiveness. Many available tools lack the integration of AI and machine learning capabilities, rendering them either too simplistic or overly complex. For instance, platforms like Zerodha Pi and Upstox Pro do not incorporate AI features, while TradingView's AI functionalities are locked behind a paywall. Consequently, many traders resort to Telegram tip groups, which are often riddled with scams. This lack of comprehensive, accessible tools that merge NSE-specific data with AI-driven analysis creates significant barriers for retail traders aiming to enhance their decision-making processes.
+
+### Introducing the nse_ai_agent: Features and Functionalities
+
+The nse_ai_agent was meticulously designed to address these challenges by amalgamating multiple functionalities into a single, user-friendly application. At its core, the agent employs local LLMs to conduct sentiment analysis on the latest news headlines impacting the Indian stock market. The workflow initiates with a cron job that triggers at market open, fetching real-time data and news. The LLM processes this information to generate sentiment scores, which are subsequently integrated with traditional technical indicators such as momentum and the Relative Strength Index (RSI). This hybrid approach empowers traders to make informed decisions based on a comprehensive analysis of both market sentiment and technical data. For example, if a recent news article highlights positive earnings reports from a major company, the sentiment score generated could indicate bullish sentiment, which can then be cross-referenced with technical indicators for a more robust trading signal.
+
+### Technical Setup: Running Local LLMs on Android
+
+Setting up the nse_ai_agent on an Android device involves several straightforward steps. First, install Termux from F-Droid, which provides a Linux-like environment on Android. Next, install Ollama, a tool that facilitates the execution of local LLMs:
+
+```bash
+curl -fsSL https://ollama.com/install.sh | sh
+```
+
+For devices equipped with 4GB of RAM, retrieve the Llama 3.2 model with the following command:
+
+```bash
+ollama pull llama3.2:3b
+```
+
+For devices with 6GB or more, download the Phi-3 Mini model instead. After establishing the environment, users can clone the nse_ai_agent repository from GitHub and install the requisite dependencies using pip. Modify the configuration file to include personal settings, such as Telegram tokens for alerts. Once set up, the agent can fetch market data, analyze sentiment, and send alerts directly to the trader's phone.
+
+### Step-by-Step Workflow of the AI Trading Assistant
+
+The workflow of the nse_ai_agent is crafted to maximize efficiency and effectiveness. At 9:00 AM, the cron job triggers the pre-market analysis, fetching the top 20 news headlines relevant to the market. The LLM then analyzes these headlines for sentiment, providing a score and reasoning. This sentiment analysis is integrated with technical signals generated from market data, such as the Nifty index and open interest data.
+
+For example, if sentiment analysis indicates a bullish outlook based on recent news about increased foreign institutional investment, and technical indicators show upward momentum, the agent generates a "STRONG BUY" signal. This signal, along with detailed reasoning, is dispatched to the trader via Telegram, facilitating timely decision-making.
+
+### Integrating Sentiment Analysis with Technical Indicators
+
+The integration of sentiment analysis with technical indicators is a pivotal feature of the nse_ai_agent. By amalgamating these two data sources, traders can achieve a more nuanced understanding of market movements. For instance, if the sentiment analysis indicates bullish sentiment due to favorable news regarding a major company, but the technical indicators suggest overbought conditions, the trader can exercise caution. This hybrid approach fosters more informed trading decisions, mitigating the risk of impulsive actions based solely on sentiment or technical data. The ability to synthesize these signals is crucial, as it allows traders to validate their strategies against both qualitative and quantitative data.
+
+### Real-World Results: Metrics and Performance of the AI Trading Assistant
+
+The efficacy of the nse_ai_agent can be quantified through real-world trading metrics. Over a six-month period, the agent facilitated 47 trades, achieving a win rate of 68%. The average profit per winning trade amounted to ₹3,200, while the average loss per losing trade was ₹1,800, culminating in a net profit of ₹42,000. The maximum drawdown was limited to ₹8,500, and the Sharpe ratio stood at 1.8, indicating a favorable risk-adjusted return. These results underscore the practical value of the nse_ai_agent in enhancing trading performance. Such metrics not only validate the effectiveness of the tool but also provide traders with tangible benchmarks for evaluating their strategies.
+
+### The Importance of Human Oversight in AI Trading
+
+While the nse_ai_agent provides valuable insights and enhances trading decisions, it is imperative to underscore the importance of human oversight. AI tools should augment, not supplant, human judgment. The ultimate decision to execute trades must reside with the trader, who should consider their risk tolerance, prevailing market conditions, and personal strategies. The AI serves as an invaluable assistant, filtering noise and identifying patterns, but the trader retains control over their capital. This balance between AI-driven insights and human judgment is essential, as it ensures that traders remain engaged and accountable for their decisions.
+
+### Future Outlook: The Evolution of AI in Trading
+
+Looking forward, the role of AI in trading is poised for significant evolution. As local LLMs enhance their capabilities in comprehending financial language and sentiment, we can anticipate the emergence of more sophisticated trading tools. Moreover, the integration of multimodal models that can simultaneously analyze news and charts will provide traders with even deeper insights. Regulatory bodies like SEBI may also begin to establish guidelines for the use of AI in trading, ensuring that retail traders can leverage these tools safely and effectively. This evolution promises to democratize access to advanced trading strategies, allowing a broader range of traders to benefit from AI innovations.
+
+### Conclusion: Embracing AI as an Augmentation Tool
+
+In conclusion, the nse_ai_agent exemplifies how local AI solutions can significantly enhance trading decisions for retail traders in India. By leveraging local LLMs for sentiment analysis and integrating this with technical indicators, traders can gain a substantial edge in their decision-making processes. However, it is crucial to recognize that AI should be viewed as an augmentation tool, empowering traders to make informed choices while maintaining control over their strategies. As the landscape of AI in trading continues to evolve, those who embrace these technologies will likely find themselves better equipped to navigate the complexities of the stock market, ultimately leading to more successful trading outcomes.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/shaktitiwari715-ai/ai-for-stock-market-how-i-built-an-ai-trading-assistant-for-nse-using-local-llms-23dm)
+
+---
+
+<SocialShare title="Building a Local AI Trading Assistant for Indian Markets" slug="building-a-local-ai-trading-assistant-for-indian-markets" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
