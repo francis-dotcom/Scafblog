@@ -1,0 +1,346 @@
+---
+slug: ensuring-high-availability-of-kubernetes-services-with-vigilmon-monitoring
+title: "Ensuring High Availability of Kubernetes Services with Vigilmon Monitoring"
+authors: [francis]
+tags: [kubernetes, devops, monitoring, vigilmon]
+date: 2026-08-03T17:21:59.617Z
+description: "How to Monitor Kubernetes Ingress Controllers with Vigilmon
+
+
+Kubernetes Ingress controllers are the traffic gateway for your cluster — they route external HTTP/HTTPS traffic to your services. When an Ingress controller fails, every service behind it goes down simultaneously. This guide covers monitoring your Kubernetes Ingress setup with Vigilmon.
+The Ingress controller sits in front of all your services. A failure here means:
+All services are unreachable from the internet
+Internal service-to-service traffic via ingress breaks
+SSL termination stops working (certificates aren't served)
+Health probes from load balancers start failing
+Kubernetes internal probes (liveness/readiness) don't catch Ingress failures from the outside — only external monitoring does.
+For each service exposed via Ingress, add a monitor in Vigilmon:
+Log in to vigilmon.online
+
+Click Add Monitor → HTTP(S)
+
+Enter your service URL: https://api.yourapp.com
+
+Set interval: 60 seconds
+
+Enable alerts for your on-call team
+Repeat for each critical service exposed via Ingress rules.
+Monitor a dedicated health endpoint per service:
+# kubernetes/ingress.yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: app-ingress
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: api.yourapp.com
+      http:
+        paths:
+          - path: /health
+            pathType: Prefix
+            backend:
+              service:
+                name: api-service
+                port:
+                  number: 8080
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: api-service
+                port:
+                  number: 8080
+  tls:
+    - hosts:
+        - api.yourapp.com
+      secretName: api-tls-secret
+
+Monitor https://api.yourapp.com/health in Vigilmon — this proves both the Ingress and the downstream service are functioning.
+Nginx Ingress exposes its own metrics endpoint:
+# Check Nginx Ingress controller is running
+kubectl get pods -n ingress-nginx
+
+# Get the external IP
+kubectl get svc -n ingress-nginx ingress-nginx-controller
+
+You can also monitor the Nginx controller's health endpoint directly if it's exposed:
+# Expose controller metrics via a separate service if needed
+apiVersion: v1
+kind: Service
+metadata:
+  name: ingress-nginx-metrics
+  namespace: ingress-nginx
+spec:
+  ports:
+    - name: metrics
+      port: 10254
+      targetPort: 10254
+  selector:
+    app.kubernetes.io/name: ingress-nginx
+
+Kubernetes often uses cert-manager to provision Let's Encrypt certificates. These can fail to renew if:
+ACME challenge routes are broken
+DNS01 challenges fail
+cert-manager pods restart during renewal
+Vigilmon's SSL monitoring catches cert expiry regardless of the underlying provisioner:
+Add an SSL Monitor in Vigilmon for each domain
+Set alert threshold: 14 days before expiry
+
+This catches cert-manager renewal failures before they cause user-visible errors
+For Kubernetes CronJobs (batch workloads), use Vigilmon's heartbeat monitor:
+# kubernetes/cronjob.yaml
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: data-processor
+spec:
+  schedule: "*/10 * * * *"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+            - name: processor
+              image: yourapp/processor:latest
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  ./process-data && \n                  curl -s https://push.vigilmon.online/YOUR_HEARTBEAT_KEY
+          restartPolicy: OnFailure
+
+If the CronJob stops running (scheduler issue, image pull failure, or resource constraints), Vigilmon alerts you.
+For a typical microservices deployment on Kubernetes:
+Vigilmon Monitors:
+├── api.yourapp.com (HTTP)
+│   ├── /health → checks Ingress + API pod
+│   └── SSL certificate
+├── auth.yourapp.com (HTTP)  
+│   └── /health → checks Ingress + auth service
+├── dashboard.yourapp.com (HTTP)
+│   └── / → checks Ingress + frontend
+└── Heartbeats
+    ├── Data pipeline CronJob (every 15m)
+    └── Report generator CronJob (hourly)
+
+In Vigilmon, create a Status Page
+
+Group monitors by service tier:
+
+
+
+API — api.yourapp.com health check
+Auth — auth.yourapp.com health check
+
+
+Dashboard — dashboard uptime
+Publish at status.yourapp.com
+
+Add to your Ingress:
+
+
+
+
+  - host: status.yourapp.com
+    http:
+      paths:
+        - path: /
+          pathType: Prefix
+          backend:
+            service:
+              name: vigilmon-status-proxy
+              port:
+                number: 80
+
+
+
+
+Scenario
+Signal
+Alert Channel
+
+
+
+
+API health check fails
+HTTP 503 from /health
+
+PagerDuty
+
+
+SSL expiry approaching
+< 14 days
+Email
+
+
+CronJob heartbeat missed
+No ping in 20 min
+Slack
+
+
+Multiple services down
+2+ monitors failing
+PagerDuty + phone
+
+
+
+Kubernetes Ingress controllers are a single point of failure for all external traffic. Vigilmon gives you external visibility that Kubernetes' internal probes can't provide:
+HTTP monitors for each ingress-exposed service
+Health endpoints that test Ingress + downstream service together
+SSL monitors to catch cert-manager renewal failures
+Heartbeat monitors for CronJobs and batch workloads
+Status page for transparency with users
+Vigilmon — external uptime monitoring for Kubernetes applications...."
+image: /img/blog/generated/ensuring-high-availability-of-kubernetes-services-with-vigilmon-monitoring-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Ensuring High Availability of Kubernetes Services with Vigilmon Monitoring](/img/blog/generated/ensuring-high-availability-of-kubernetes-services-with-vigilmon-monitoring-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### The Essential Role of Ingress Controllers in Kubernetes
+
+Ingress controllers act as the gateway for external traffic in Kubernetes, directing HTTP and HTTPS requests to the appropriate services within a cluster. Their importance cannot be overstated: any failure at this layer can lead to a complete service outage, affecting all microservices reliant on the Ingress for external communication. This central role necessitates robust monitoring strategies to ensure high availability and reliability in microservices architectures.
+
+### Consequences of Ingress Controller Failures
+
+The ramifications of an Ingress controller failure are severe. When such a failure occurs, external access to all services behind the Ingress is disrupted, halting not just user interactions but also internal service communications. Additionally, failures can lead to SSL termination issues, where secure connections may be compromised, exposing sensitive data. Kubernetes' internal health checks, including liveness and readiness probes, do not account for these external failures, underscoring the need for external monitoring solutions like Vigilmon to maintain operational integrity.
+
+### Introducing Vigilmon for Comprehensive Monitoring
+
+Vigilmon offers a specialized external monitoring solution tailored for Kubernetes environments. By implementing Vigilmon, organizations can gain critical insights into the health of their Ingress controllers and the services they manage. This proactive monitoring approach enables timely alerts for potential failures, allowing teams to respond swiftly before issues escalate into significant outages. The integration of Vigilmon is a vital step in ensuring service reliability within a Kubernetes ecosystem.
+
+### Step-by-Step Setup of Vigilmon for Kubernetes Ingress Monitoring
+
+To effectively monitor Kubernetes Ingress controllers using Vigilmon, follow these detailed steps:
+
+1. **Log into Vigilmon**: Navigate to [vigilmon.online](https://vigilmon.online) to create an account or log in.
+
+2. **Add HTTP Monitor**: Click on "Add Monitor" and select the "HTTP(S)" option.
+
+3. **Enter Service URL**: Input the URL of your service, for example, `https://api.yourapp.com`.
+
+4. **Set Monitoring Interval**: Configure the monitoring interval (e.g., 60 seconds) to define how often Vigilmon checks the service.
+
+5. **Enable Alerts**: Activate alerts for your on-call team to ensure they are notified of any issues promptly.
+
+6. **Repeat for Each Service**: Follow the same steps for each critical service exposed via Ingress rules.
+
+By adhering to these steps, teams can ensure comprehensive monitoring of their Ingress controllers and the services they route traffic to.
+
+### Configuring Health Monitors for Service Endpoints
+
+For effective monitoring, it is crucial to configure dedicated health endpoints for each service exposed via the Ingress. This can be accomplished by defining a health check route within your Ingress resource. Below is an example of a YAML configuration for an Ingress resource:
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: app-ingress
+spec:
+  rules:
+    - host: api.yourapp.com
+      http:
+        paths:
+          - path: /health
+            pathType: Prefix
+            backend:
+              service:
+                name: api-service
+                port:
+                  number: 8080
+```
+
+By monitoring the `/health` endpoint, Vigilmon can validate both the functionality of the Ingress controller and the health of the downstream service, providing a comprehensive view of service availability. It is also important to ensure that the health check endpoint is designed to return a `200 OK` status only when the service is fully operational. This can be achieved by implementing logic that checks the readiness of dependent services.
+
+### SSL Monitoring to Prevent Certificate Renewal Failures
+
+SSL certificate renewal is a critical aspect of maintaining service availability, especially when utilizing tools like cert-manager for automation. Failures can occur due to broken ACME challenge routes or DNS issues, which may lead to expired certificates and service inaccessibility. Vigilmon's SSL monitoring feature allows teams to set alerts for certificate expiry thresholds, such as 14 days before expiration. This proactive measure ensures that teams are alerted in advance of potential issues, allowing for timely remediation. Additionally, it is advisable to regularly test the SSL configuration using tools like SSL Labs to identify potential vulnerabilities or misconfigurations.
+
+### Heartbeat Monitoring for Kubernetes CronJobs
+
+Kubernetes CronJobs are vital for managing batch workloads, but they can also become a point of failure if not monitored effectively. Vigilmon's heartbeat monitor can be integrated into CronJobs to ensure they execute as expected. For instance, within the CronJob specification, a command can be added to ping Vigilmon upon successful execution:
+
+```yaml
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: data-processor
+spec:
+  schedule: "*/10 * * * *"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+            - name: processor
+              image: yourapp/processor:latest
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  ./process-data && \
+                  curl -s https://push.vigilmon.online/YOUR_HEARTBEAT_KEY
+          restartPolicy: OnFailure
+```
+
+This configuration ensures that if the CronJob fails to execute or encounters issues, Vigilmon will alert the team, enabling quick resolution of potential problems. It is also advisable to implement retry logic within the CronJob to handle transient failures gracefully.
+
+### Creating a Status Page for User Transparency
+
+In addition to monitoring, establishing a status page is an effective way to communicate service health to users. Vigilmon allows teams to group monitors by service tier and publish a status page, for example, at `status.yourapp.com`. This page can display the health of various services, including API and authentication services, thereby providing transparency and building trust with users. To enhance user experience, consider including historical uptime data and incident reports to keep users informed about service reliability.
+
+### Common Pitfalls in Monitoring Ingress Controllers
+
+While implementing Vigilmon for monitoring Kubernetes Ingress controllers, teams should be aware of common pitfalls. One significant issue is failing to configure health checks accurately, which can lead to false positives or negatives in monitoring. It is crucial to ensure that health endpoints are correctly defined and accessible. Additionally, teams should monitor the performance of the Ingress controller itself, as resource constraints can lead to degraded performance and eventual failure.
+
+Another pitfall is neglecting SSL monitoring, which can result in unexpected service outages due to certificate expiration. Teams should always set alerts well in advance of expiration dates to avoid potential downtime. Furthermore, consider creating a checklist for monitoring configurations to ensure all aspects are covered, including alert thresholds and notification channels.
+
+### Best Practices for Ongoing Monitoring
+
+To maintain high availability and reliability of Kubernetes services, teams should adopt best practices for ongoing monitoring. Regularly review and update monitoring configurations to reflect changes in service architecture or deployment strategies. Additionally, conduct periodic drills to ensure that alerting mechanisms are functioning as intended and that the on-call team is prepared to respond to incidents. Incorporating feedback from incident postmortems can also enhance monitoring strategies and reduce the likelihood of future failures.
+
+### Conclusion: The Imperative of External Monitoring
+
+In conclusion, implementing Vigilmon for monitoring Kubernetes Ingress controllers is not just a best practice; it is essential for maintaining service availability. By leveraging Vigilmon's capabilities, teams can gain critical insights into service health, catch potential failures early, and communicate transparently with users. The proactive approach to monitoring that Vigilmon enables is a fundamental component of a resilient Kubernetes architecture, ensuring that services remain accessible and performant in a microservices environment. Embracing these strategies not only enhances service reliability but also fosters a culture of accountability and continuous improvement within the team.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/vigilmon/how-to-monitor-kubernetes-ingress-controllers-with-vigilmon-2dj5)
+
+---
+
+<SocialShare title="Ensuring High Availability of Kubernetes Services with Vigilmon Monitoring" slug="ensuring-high-availability-of-kubernetes-services-with-vigilmon-monitoring" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
