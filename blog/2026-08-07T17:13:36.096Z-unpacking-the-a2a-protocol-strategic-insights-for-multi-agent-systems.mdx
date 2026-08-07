@@ -1,0 +1,213 @@
+---
+slug: unpacking-the-a2a-protocol-strategic-insights-for-multi-agent-systems
+title: "Unpacking the A2A Protocol: Strategic Insights for Multi-Agent Systems"
+authors: [francis]
+tags: [a2a, ai, agents, cloud]
+date: 2026-08-07T17:13:36.096Z
+description: "Agent2Agent turned one year old under the Linux Foundation in April 2026 with numbers that are genuinely impressive: more than 150 supporting organizations, up from roughly 50 twelve months earlier, over 22,000 stars on the core repository, and SDKs in Python, JavaScript, Java, Go and .NET. Azure AI Foundry, Amazon Bedrock AgentCore and Google Cloud's Agent Development Kit all ship it.
+None of that tells you whether you should use it. "150 companies signed a support letter" and "engineers pick this over an HTTP call" are separate claims, and the gap between them is where most of the confusion about A2A lives. I wrote a fuller version of this on DevToolLab, A2A Protocol Explained, with the complete working example. Short version below.
+MCP wires an agent to tools. A2A wires an agent to other agents, possibly on another vendor's stack, in another language, owned by a team you never talk to. The design goal is that agent A never learns how agent B is built, only what B can do and how to hand it work.
+An Agent Card is a JSON document at /.well-known/agent-card.json listing skills, input and output modes, and auth requirements. A Task is a unit of work with a real lifecycle: submitted, working, sometimes input-required when it needs more from the caller, then completed, failed or canceled. A Message is one turn in the exchange. An Artifact is the output, built from typed parts that can be text, a file or structured data.
+Transport is JSON-RPC 2.0 over HTTP with Server-Sent Events for streaming and push notifications for tasks that outlive one request. Version 0.3 in August 2025 added gRPC as an alternate transport and JWS-signed Agent Cards, which matters more than it first sounds: without signing, an Agent Card is an unauthenticated JSON file at a predictable URL.
+The framing that survives contact with real systems: MCP is the tool-integration layer, A2A is the agent-collaboration layer. MCP answers "give my agent a function to call." A2A answers "hand this task to an agent I do not control and get a result back." Non-trivial multi-agent systems need both.
+The differences that matter in practice are the unit of work and who owns the other side. MCP moves a tool call; A2A moves a stateful task that can span turns. MCP servers are usually yours; the agent behind an Agent Card usually is not.
+The criticism doing the rounds this year is fair. Plenty of A2A demos show three agents accomplishing what three function calls would. Standing up an Agent Card, a task store and JSON-RPC plumbing for one in-process call is pure overhead.
+It earns its keep when the other agent is actually outside your control, when the interaction is a real task rather than a function call (multiple turns, mid-flight requests for more input, long enough that you want streaming instead of a blocking response), or when you need to discover capabilities at runtime instead of hardcoding them. Skip it when a direct API call, a shared MCP server or in-process orchestration already works. And read "150 organizations" as an interoperability signal, not as proof of production load. The number that would prove that is how many teams keep it after their first authentication failure and compliance review, which is far smaller.
+The reference SDK is a2a-sdk, compatible with protocol versions 1.0 and 0.3:
+pip install "a2a-sdk[http-server]"
+
+Describe the capability, then publish it in a card:
+from a2a.types import AgentCard, AgentCapabilities, AgentSkill
+
+skill = AgentSkill(
+    id="summarize_ticket",
+    name="Summarize Support Ticket",
+    description="Reads a support ticket thread and returns a one-paragraph summary.",
+    input_modes=["text/plain"],
+    output_modes=["text/plain"],
+    tags=["support", "summarization"],
+    examples=["Summarize ticket #4021"],
+)
+
+agent_card = AgentCard(
+    name="Ticket Summarizer Agent",
+    description="Summarizes support tickets on request.",
+    url="http://localhost:9999",
+    version="1.0.0",
+    default_input_modes=["text/plain"],
+    default_output_modes=["text/plain"],
+    capabilities=AgentCapabilities(streaming=True),
+    skills=[skill],
+)
+
+The executor is where the work happens. Note the status update before the slow part, which is what gives a caller something to stream:
+from a2a.server.agent_execution import AgentExecutor, RequestContext
+from a2a.server.events import EventQueue
+from a2a.server.tasks import TaskUpdater
+from a2a.types import TaskState
+from a2a.utils import new_task_from_user_message, new_text_message, new_text_part
+
+
+class TicketSummarizerExecutor(AgentExecutor):
+    async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
+        task = context.current_task or new_task_from_user_message(context.message)
+        updater = TaskUpdater(event_queue, task_id=task.id, context_id=task.context_id)
+
+        await updater.update_status(
+            state=TaskState.working,
+            message=new_text_message("Reading ticket thread..."),
+        )
+
+        summary = summarize(context.message)  # your own logic or LLM call
+
+        await updater.add_artifact(parts=[new_text_part(text=summary)])
+        await updater.update_status(state=TaskState.completed)
+
+    async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
+        raise NotImplementedError("This agent doesn't support cancellation yet.")
+
+Then serve it:
+from a2a.server.apps import A2AStarletteApplication
+from a2a.server.request_handlers import DefaultRequestHandler
+from a2a.server.tasks import InMemoryTaskStore
+import uvicorn
+
+handler = DefaultRequestHandler(
+    agent_executor=TicketSummarizerExecutor(),
+    task_store=InMemoryTaskStore(),
+)
+app = A2AStarletteApplication(agent_card=agent_card, http_handler=handler).build()
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=9999)
+
+Before pointing a client at it, confirm the card is actually being served:
+curl -s http://localhost:9999/.well-known/agent-card.json
+
+A malformed Agent Card is a common reason a client silently discovers no skills, so it is worth running that response through a JSON Schema validator while you are iterating. The cURL command generator is also handy for the task-submission call, since hand-typing a JSON-RPC envelope every time you change one parameter gets old fast. The original post walks through each piece in more detail.
+
+Every serious writeup lands on the same hole: an Agent Card says what an agent can do, not who owns it or what it should be trusted with. Four things worth doing on day one rather than retrofitting.
+Verify signed cards, because JWS signing in v0.3 exists precisely so you can confirm a card was not swapped in transit, and HTTPS alone does not give you that. Scope what a remote agent may request instead of trusting every skill its card advertises, the same way you would scope an OAuth grant. Decode the tokens moving between agents rather than assuming an aud or sub claim means what you expect. And never forward a caller's token to a third-party agent unmodified: if agent A hands agent B its own credential, B now acts with A's authority on systems it was never meant to reach. That is the confused-deputy problem, and it does not stop being one because both parties are agents.
+A2A is not hype in the sense of not working. The spec is real, the SDKs work, the adoption is genuine. It is hype in the narrower sense that most projects reaching for it in 2026 do not need it yet. Use MCP to give your agent tools. Reach for A2A once you have a second agent you do not control that must accept a task, work across several turns and hand back a result. If your case is "agent A calls agent B once and gets a string," that is a function call wearing a protocol.
+A2A Protocol Explained: 150+ Companies Backed It in a Year - the original, with the full example and every source
+A2A protocol surpasses 150 organizations - Linux Foundation, first-year numbers
+Agent2Agent protocol is getting an upgrade - the v0.3 gRPC and signed-card release
+Best MCP Servers and Build an MCP Server in Python - the tool layer underneath
+MCP Server Authentication with OAuth 2.1 - the confused-deputy problem in detail..."
+image: /img/blog/generated/unpacking-the-a2a-protocol-strategic-insights-for-multi-agent-systems-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Unpacking the A2A Protocol: Strategic Insights for Multi-Agent Systems](/img/blog/generated/unpacking-the-a2a-protocol-strategic-insights-for-multi-agent-systems-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### Understanding the A2A Protocol's Emergence
+
+The Agent-to-Agent (A2A) protocol represents a significant advancement in the field of multi-agent systems, designed to facilitate direct communication between autonomous agents. Its adoption by over 150 organizations within a year of its introduction underscores its potential, yet it raises critical questions about when and how to implement this protocol effectively. As organizations increasingly explore A2A, software developers and system architects must discern the specific use cases that warrant its adoption, ensuring that they do not fall into the trap of overgeneralization.
+
+### The Distinction Between A2A and MCP Protocols
+
+To appreciate the value of A2A, it is essential to differentiate it from the Multi-Channel Protocol (MCP). While MCP is primarily focused on integrating an agent with specific tools, A2A enables agents to communicate across disparate systems, potentially using different programming languages and owned by different teams. This distinction is crucial: MCP addresses how to invoke functions, while A2A facilitates task delegation to agents outside one's immediate control. Such a fundamental difference shapes the architecture and operational dynamics of multi-agent systems, making it imperative to choose the right protocol based on the interaction complexity.
+
+### The Agent Card: A Critical Component of A2A
+
+At the core of the A2A protocol is the Agent Card, a JSON document that encapsulates an agent's capabilities, input and output modes, and authentication requirements. The structure of an Agent Card is pivotal for enabling seamless communication. For example, consider the following Agent Card for a ticket summarization agent:
+
+```json
+{
+  "name": "Ticket Summarizer Agent",
+  "description": "Summarizes support tickets on request.",
+  "url": "http://localhost:9999",
+  "version": "1.0.0",
+  "capabilities": {
+    "streaming": true
+  },
+  "skills": [
+    {
+      "id": "summarize_ticket",
+      "name": "Summarize Support Ticket",
+      "description": "Reads a support ticket thread and returns a one-paragraph summary.",
+      "input_modes": ["text/plain"],
+      "output_modes": ["text/plain"]
+    }
+  ]
+}
+```
+
+This format not only defines what an agent can perform but also establishes a standardized interface for interaction. It allows other agents to discover and utilize these capabilities efficiently, which is critical in a decentralized system where agents may not have prior knowledge of each other.
+
+### Concrete Use Cases for A2A Adoption
+
+Identifying scenarios where A2A is genuinely beneficial is crucial for informed adoption. A2A excels in environments characterized by complex tasks requiring multiple interactions. For instance, in a customer support system, an agent tasked with analyzing a support ticket may need to consult a knowledge base and generate a response. Here, A2A allows the ticket analysis agent to communicate with a knowledge retrieval agent, facilitating a more nuanced and efficient resolution process.
+
+Another example is in automated trading systems, where different agents may need to collaborate to analyze market trends, execute trades, and adjust strategies based on real-time data. In such scenarios, A2A allows for dynamic interactions that traditional API calls cannot accommodate, particularly when tasks span multiple turns or require real-time input from various agents.
+
+### The Growth of A2A: A Double-Edged Sword
+
+While the rapid adoption of A2A by over 150 organizations is impressive, it is essential to approach this statistic with caution. The mere presence of support does not equate to practical necessity. Many projects exploring A2A may not require its capabilities; they might be better served by existing MCP frameworks or simpler API calls. This misalignment can lead to unnecessary complexity and overhead, ultimately hindering system performance. Organizations must critically assess their needs before adopting A2A, ensuring that they are not implementing a solution in search of a problem.
+
+### Security Implications of A2A Communication
+
+Security is a paramount concern when implementing A2A protocols. The decentralized nature of agent interactions introduces vulnerabilities, particularly regarding trust and authentication. Each agent must validate the authenticity of the Agent Card it interacts with. The introduction of JSON Web Signature (JWS) in version 0.3 of the A2A protocol emphasizes the importance of verifying signed cards to prevent tampering during transit. 
+
+Moreover, developers should adopt stringent scoping measures to limit the permissions of remote agents. For example, if agent A forwards its credentials to agent B, agent B could potentially access resources that agent A should not permit. This scenario illustrates the "confused deputy" problem, which can be mitigated through careful design and implementation of security protocols. Implementing robust authentication and authorization mechanisms is critical to safeguarding against unauthorized access and data breaches.
+
+### Best Practices for A2A Implementation
+
+When integrating A2A into real-world applications, certain best practices can enhance effectiveness and reduce risks. First, ensure that Agent Cards are correctly formatted and validated against JSON Schema to prevent silent failures due to malformed documents. Implement robust error handling and logging mechanisms to track and diagnose issues that arise during agent interactions.
+
+Additionally, designing agents with modularity in mind allows for easier updates and maintenance. For example, if a knowledge retrieval agent needs an upgrade, it can be replaced without affecting the ticket analysis agent, provided the interfaces remain consistent. This modular design enhances system resilience and adaptability, crucial traits in fast-paced environments.
+
+### Common Pitfalls in A2A Adoption
+
+Despite its advantages, several pitfalls can undermine the successful adoption of A2A. One common issue is the overgeneralization of its benefits, leading teams to adopt A2A without fully understanding their specific needs. This can result in unnecessary complexity and increased latency in agent interactions. 
+
+Moreover, neglecting the security implications of agent interactions can expose systems to significant risks. It is crucial to implement robust authentication and authorization mechanisms to safeguard against unauthorized access and data breaches. Failing to do so may lead to severe vulnerabilities, undermining the trust and reliability of the entire system.
+
+### Making Informed Decisions About A2A Utilization
+
+In conclusion, while the A2A protocol presents exciting opportunities for enhancing inter-agent communication, its adoption should be approached with careful consideration of specific use cases. By understanding the distinctions between A2A and MCP, leveraging the structure of Agent Cards, and adhering to best practices, organizations can navigate the complexities of multi-agent systems effectively. As the landscape of AI and distributed systems continues to evolve, making informed decisions about A2A usage will be vital for achieving optimal performance and security in agent interactions. 
+
+### The Future of A2A in Multi-Agent Systems
+
+Looking ahead, the future of A2A will likely involve further enhancements in security protocols and interoperability standards. As more organizations adopt A2A, the focus will shift toward ensuring that these systems can communicate seamlessly across different platforms and environments. Continuous improvement in the underlying technologies will be essential to address the evolving challenges of multi-agent systems, particularly in terms of scalability and reliability. 
+
+By embracing a thoughtful approach to A2A adoption, organizations can position themselves to leverage the full potential of multi-agent systems, driving innovation and efficiency in their operations.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/moksh/a2a-hit-150-organizations-in-a-year-most-projects-reaching-for-it-do-not-need-it-yet-5f23)
+
+---
+
+<SocialShare title="Unpacking the A2A Protocol: Strategic Insights for Multi-Agent Systems" slug="unpacking-the-a2a-protocol-strategic-insights-for-multi-agent-systems" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
