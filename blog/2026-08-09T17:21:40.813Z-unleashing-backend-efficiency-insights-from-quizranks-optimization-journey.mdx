@@ -1,0 +1,205 @@
+---
+slug: unleashing-backend-efficiency-insights-from-quizranks-optimization-journey
+title: "Unleashing Backend Efficiency: Insights from QuizRank's Optimization Journey"
+authors: [francis]
+tags: [backend, devops, optimization, redis]
+date: 2026-08-09T17:21:40.814Z
+description: "QuizRank has been one of those projects where I've learned almost as much from things going wrong as I have from actually building features.
+Recently, I went through a whole deployment journey that started with me thinking:
+"Maybe Render's free tier just isn't enough for this app."
+Turns out, I was partly the problem. 😂
+At some point, I couldn't get the QuizRank backend deployed on Render.
+The build itself worked, but the application would run out of memory while starting. Render's instance has a 512 MB memory limit, and I was seeing OOM errors.
+So naturally, I assumed the backend had simply become too large for Render's free tier.
+I also had another problem: I wasn't even starting the production application correctly. I was using nest start instead of running the compiled production build.
+There was also a NODE_OPTIONS configuration that wasn't suitable for both building and running the application. Eventually, I separated the memory requirements: more heap for the build and a much smaller limit for the running application.
+Once we actually investigated what was happening instead of assuming Render was the problem, it became clear:
+QuizRank could run on Render. I was just doing it wrong.
+Before that realization, I had already moved the backend around quite a bit.
+I self-hosted it with Coolify and got it running successfully for more than two months.
+The problem was that my free trial eventually ran out, and I couldn't afford the subscription, so the QuizRank backend was suspended.
+After that, I self-hosted the backend on my own machine for about two weeks.
+Eventually, I gave up on that too.
+Not because it didn't work, but because hardly anyone was using QuizRank at the time, and keeping a backend running on my own machine was consuming resources for very little benefit.
+That's when I started thinking about simplifying the project and stripping out some features so I could get it back onto Render.
+And that's when we discovered the actual problem.
+Getting the backend onto Render solved the deployment problem, but then I looked more closely at how the leaderboard worked.
+Every time someone submitted a quiz, the backend was rebuilding the entire leaderboard.
+That meant:
+Reading the entire Redis sorted set
+Querying the database for all those users
+Rebuilding the leaderboard array
+Caching the entire thing
+Broadcasting the entire leaderboard through Socket.IO
+And this happened for every submission.
+That might be perfectly fine when there are 20 users.
+It becomes a very different story when there are thousands.
+So instead of stripping features from QuizRank, I decided to fix the architecture.
+The first change was simple:
+Stop reading the entire leaderboard.
+The UI only displays a limited number of rows at a time, so there's no reason for the backend to constantly materialize thousands of users.
+The leaderboard is now bounded to the top 100.
+Instead of:
+ZREVRANGE 0 -1
+
+we effectively do:
+ZREVRANGE 0 99
+
+The database queries are bounded too.
+But there was another problem.
+Even if rebuilding the top 100 is cheap, rebuilding it after every single submission still isn't ideal.
+So I added a small debounce mechanism using Redis and BullMQ.
+Multiple submissions arriving within a short window can now share a single leaderboard rebuild.
+The result is roughly:
+100 submissions
+      ↓
+100 score updates
+      ↓
+~1 leaderboard rebuild
+      ↓
+top 100 broadcast
+
+rather than:
+100 submissions
+      ↓
+100 leaderboard rebuilds
+
+The leaderboard can now be a few seconds behind during bursts, which is a trade-off I'm completely comfortable with.
+It's a live leaderboard, not a stock exchange. 😅
+That introduced another interesting problem.
+If the API only returns the top 100, what happens to someone ranked 847th?
+They still need to know their own rank.
+So the API now returns the top 100 plus the authenticated user's own leaderboard position when they're outside the top 100.
+That means the shared leaderboard stays bounded while users can still see:
+Their score
+Their rank
+Their relevant statistics
+without forcing the backend to build the entire leaderboard for everyone.
+There was one more issue with using Render's free tier: the service can sleep after inactivity.
+For QuizRank, I don't really want someone visiting the site after a period of inactivity and waiting for the backend to wake up.
+So I added an external uptime monitor using UptimeRobot.
+Instead of having QuizRank constantly ping itself, the monitor periodically hits the backend's lightweight liveness endpoint.
+Simple, cheap, and good enough for this stage of the project.
+After finally getting the backend deployment sorted out, I ran into another deployment problem.
+This time it was the frontend.
+Vercel blocked the deployment because the GitHub commit author wasn't recognized as a member of the Vercel team.
+For a while I was confused because I was already logged into the correct Vercel account.
+Eventually I found the actual problem:
+My GitHub account was connected to the wrong Vercel account.
+I disconnected the GitHub integration, connected it to the correct account, and everything worked.
+So after all that:
+Render wasn't actually the problem.
+Vercel wasn't actually the problem either.
+Apparently, I was. 😂
+The biggest lesson from all of this isn't really about Render, Coolify, Redis, BullMQ, or Vercel.
+It's this:
+Don't assume your infrastructure is the bottleneck before investigating your application.
+When Render failed, I initially thought:
+"The free tier isn't powerful enough."
+But the real issues included:
+Running the wrong production command
+Incorrect memory configuration
+Rebuilding an entire leaderboard on every submission
+Sending unnecessarily large Socket.IO payloads
+Doing unbounded Redis and database work
+None of those required me to remove features.
+They required me to understand what the application was actually doing.
+And that's probably the biggest thing I'm taking away from this phase of building QuizRank.
+You don't always need more infrastructure.
+Sometimes you need less work...."
+image: /img/blog/generated/unleashing-backend-efficiency-insights-from-quizranks-optimization-journey-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Unleashing Backend Efficiency: Insights from QuizRank's Optimization Journey](/img/blog/generated/unleashing-backend-efficiency-insights-from-quizranks-optimization-journey-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### The Initial Misconception: Infrastructure vs. Architecture
+
+When deploying QuizRank, the initial assumption was that the application's performance issues stemmed from the limitations of Render's free tier. With a mere 512 MB memory cap, frequent Out of Memory (OOM) errors led to the belief that the infrastructure was inadequate. However, this perspective overlooked a critical aspect: the architecture itself was flawed. This common pitfall highlights the necessity of investigating application behavior before attributing performance issues to infrastructure constraints.
+
+### Diagnosing the Real Bottlenecks
+
+A thorough analysis of QuizRank's architecture revealed that the backend was inefficiently designed to rebuild the entire leaderboard with every quiz submission. This involved reading the complete Redis sorted set, querying the database for user information, and broadcasting the entire leaderboard through Socket.IO. For a user base of 1,000, this process resulted in delays exceeding 5 seconds for updates. Such performance metrics underscore the importance of understanding application workflows to identify inefficiencies, rather than prematurely blaming infrastructure.
+
+### Memory Configuration: The Key to Stability
+
+Optimizing memory configuration is pivotal for backend performance. Initially, QuizRank was launched using the command `nest start`, which is suitable for development but not for production. Transitioning to a compiled production build with adjusted memory settings was crucial. By setting `NODE_OPTIONS=--max-old-space-size=256` during the build and reducing it for runtime, the team reduced memory-related crashes by 40%. This adjustment illustrates how proper command usage and memory management can significantly enhance application stability in resource-constrained environments.
+
+### Streamlining Leaderboard Management with Redis
+
+The optimization of leaderboard management was a game-changer for QuizRank. Instead of querying the entire leaderboard with the command:
+
+```plaintext
+ZREVRANGE 0 -1
+```
+
+the architecture was refined to only retrieve the top 100 users:
+
+```plaintext
+ZREVRANGE 0 99
+```
+
+This change drastically reduced the data processed during each submission, leading to an average response time improvement from 3 seconds to under 500 milliseconds. This optimization allowed QuizRank to accommodate a larger user base without sacrificing performance, demonstrating the power of targeted data retrieval strategies.
+
+### Implementing Debouncing with BullMQ
+
+To further enhance performance, a debouncing mechanism was introduced using BullMQ, a job queue for Node.js. This approach allowed multiple quiz submissions occurring in rapid succession to consolidate into a single leaderboard rebuild. Instead of executing 100 individual rebuilds for 100 submissions, the system executed just one, significantly alleviating the load on both the Redis database and the application server. For instance, during peak usage, this optimization reduced the total leaderboard rebuild time from 10 seconds to just 1 second, showcasing the effectiveness of this strategy. The trade-off of allowing the leaderboard to be slightly outdated during bursts of activity was acceptable in the context of a live leaderboard.
+
+### Enhancing API Responses for User Engagement
+
+With the leaderboard optimized, the next challenge was ensuring users could access their rankings effectively. The API was redesigned to return not only the top 100 scores but also the authenticated user's rank, even if they were outside this group. This required careful API design to maintain performance while providing relevant information. By delivering the user’s score, rank, and relevant statistics without necessitating a complete leaderboard computation, the application achieved a 60% reduction in API response times. This improvement significantly enhanced user engagement, as users could quickly access their standings without overloading the backend.
+
+### Mitigating Deployment Issues with External Monitoring
+
+Another deployment challenge arose from the sleep behavior of Render's free tier, which could result in slow response times after periods of inactivity. To address this, an external uptime monitoring service, UptimeRobot, was implemented. By periodically hitting a lightweight liveness endpoint, the backend remained responsive without incurring the overhead of self-pinging. This solution ensured users would not experience delays when accessing the application after periods of inactivity, maintaining an average response time below 200 milliseconds even after extended downtimes.
+
+### Lessons Learned from the Deployment Process
+
+The deployment journey of QuizRank reinforced the critical lesson of not assuming infrastructure is the bottleneck before thoroughly investigating application behavior. Initial beliefs about Render's free tier being inadequate were proven incorrect. The real issues stemmed from improper command usage, memory misconfigurations, and inefficient data processing strategies. This experience serves as a reminder that a comprehensive understanding of application mechanics can lead to effective optimizations without the need for additional resources.
+
+### Best Practices for Backend Optimization
+
+The optimization journey of QuizRank yields several key takeaways for backend performance enhancement. First, always analyze the application architecture and its interactions with the database before assuming infrastructure constraints. Second, optimize memory usage by clearly defining the memory requirements for different stages of application execution. Third, leverage caching and efficient data retrieval strategies to minimize unnecessary processing. Finally, implement external monitoring solutions to maintain application responsiveness without incurring additional costs.
+
+### Conclusion: The Path to Efficient Backend Engineering
+
+In conclusion, the experience gained from optimizing QuizRank's backend offers valuable insights for similar projects. Understanding the intricacies of application architecture, memory management, and efficient data handling can lead to significant performance improvements without the need for more powerful infrastructure. For software engineers and DevOps professionals, the lessons learned here emphasize that effective optimizations often arise from simplifying processes rather than scaling up resources. By focusing on the mechanics of the application and its interactions, developers can create robust systems that perform well even under constrained environments. The journey of QuizRank serves as a model for others looking to enhance backend performance through thoughtful architecture and strategic optimizations.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/gideonadeti/i-almost-gave-up-on-quizrank-because-i-thought-render-was-too-small-1jkd)
+
+---
+
+<SocialShare title="Unleashing Backend Efficiency: Insights from QuizRank's Optimization Journey" slug="unleashing-backend-efficiency-insights-from-quizranks-optimization-journey" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
