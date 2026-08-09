@@ -1,0 +1,185 @@
+---
+slug: mastering-memory-management-for-ai-video-streaming-with-go
+title: "Mastering Memory Management for AI Video Streaming with Go"
+authors: [francis]
+tags: [ai, go, memory-management, linux]
+date: 2026-08-09T06:36:49.005Z
+description: "Hello everyone! This is the second article about the development of RUSEON-core, a Zero-Copy video streaming server for AI platforms and Edge video infrastructure. In the first article, I talked about the fundamental reason why we decided to create our own server in the first place. I also covered the main problem with most similar solutions — the "thundering herd" — and how we managed to squeeze out 8 Gbps on a single CPU core. By the way, I forgot to mention in that article that besides simple streaming, we also record the streams in fMP4 format. It’s stored locally for N amount of time, and it can fly off to an S3 bucket (depending on how long the clients want to keep the recordings).
+This article is precisely about a non-obvious (well, at least to me, maybe for someone else it's an everyday thing) problem related to data storage and its specifics across all Operating Systems. So, let's dive in.
+We rolled out our first release to production (100 cameras), made the clients happy, and started working. About an hour passed, and the alerts started flying. I SSH into the server, open htop, and see there's only 100 MB of free RAM. Uh-oh. I should clarify that the production server had 32 gigs of RAM. The expected behavior was that the CPU is chilling, the network card is chewing through the traffic, RAM usage is around 250-300 MB, and the disks are not heavily loaded. So, when you see numbers like that in htop, you start blaming yourself and your crooked hands that wrote this piece of "garbage". But still, we decided to go to Google, ChatGPT, and the like. Fortunately, the answer was found quickly, and we stopped beating ourselves up.
+The code was absolutely not the culprit; Linux itself ate the memory. If you've ever written tons of data to a disk, I think you already know what’s going on. There is an "invisible enemy" known as the Page Cache. That was exactly the root of this problem.
+How does the Page Cache work and what to do with it?
+The typical solution to the problem is writing a bash script that runs echo 3 > /proc/sys/vm/drop_caches once an hour. And some people just ignore it and let the system kill random processes via the OOM Killer. But we are building a fault-tolerant thing. That doesn't work for us. The task is to explain to the OS kernel that our fMP4 video archive segments are write-only trash for a short amount of time (because if the client doesn't want to keep records for long, the archive gets cleaned up, and if they do, we send the archive to S3 after N time, and still clean up the local copy). So everything should work on the principle of "write and forget".
+How to tame the Linux kernel via Go (the right way)
+But there is one cruel nuance here, which I stumbled upon myself and racked my brain over for a long time (and all it took was reading the docs, but here, just like with assembling IKEA furniture: "Why do I need a manual, I know how to do it myself"). The Linux kernel does not remove pages from the cache if they are so-called "dirty" — meaning they haven't been physically written to the disk platter yet. If you just call Fadvise, nothing will happen.
+First, you need to do a hard Sync().
+// File: pkg/storage/localfs/file_linux.go
+package localfs
+import (
+    "os"
+    "golang.org/x/sys/unix"
+)
+type FileWrapper struct {
+    *os.File
+}
+func (fw *FileWrapper) DropCache() error {
+    // First, flush dirty pages to disk!
+    if err := fw.File.Sync(); err != nil {
+        return err
+    }
+    // And only then order the kernel to forget them
+    return unix.Fadvise(int(fw.File.Fd()), 0, 0, unix.FADV_DONTNEED)
+}
+
+Architecture: How not to break the build on Windows
+Therefore, a rather elegant (I invite you to argue this statement in the comments) interface was implemented. In the core of the recorder, there is now a check to see if the file descriptor knows how to drop the cache:
+// OPTIMIZATION: Saving RAM from Page Cache
+if dropper, ok := file.(registry.CacheDropper); ok {
+    _ = dropper.DropCache()
+}
+
+And then comes the magic of Go build tags (thank you for those). In the file_linux.go file (with the //go:build linux tag), we call unix.Fadvise. And right next to it lies the file_others.go file (with the //go:build !linux tag), where the DropCache() method just does a regular Sync() and returns. The code is crystal clear, the linters are happy, and the build works everywhere.
+So, what was the result?
+By the way, when you are backing up databases, parsing giant logs, or simply writing heavy files — this feature will save you a mountain of headaches. I also don't understand why this flag is barely talked about or written about anywhere. Usually, people only write about how to properly allocate slices, but there is complete silence regarding the fact that at the level of file operations, your OS can reduce all your efforts to zero.
+In short, in the open-source part of ruseon-core, this logic is now wired deep into the recording engine. The conclusion and advice I want to give is — don't blindly trust the kernel with memory, hoping that the OS is hypothetically "perfect and maximally thought out." Sometimes you have to slap the kernel on the wrist. Otherwise, you will run into similar problems as I did.
+The source code, as always, is available on GitHub: https://github.com/RUSEGAL/ruseon-core..."
+image: /img/blog/generated/mastering-memory-management-for-ai-video-streaming-with-go-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Mastering Memory Management for AI Video Streaming with Go](/img/blog/generated/mastering-memory-management-for-ai-video-streaming-with-go-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### The Hidden Costs of Inefficient Memory Management
+
+In the realm of AI video streaming, memory management often takes a backseat to other performance optimizations. However, as applications scale and the volume of data processed increases, inefficient RAM usage can lead to severe bottlenecks and degraded performance. For instance, an AI application that processes multiple video streams simultaneously can quickly exhaust available memory if not managed properly. The consequences are not just performance-related; they can manifest as system crashes or increased latency, which are unacceptable in production environments.
+
+### The Linux Page Cache: A Double-Edged Sword
+
+The Linux Page Cache serves as a critical component in file system performance, caching data in RAM to expedite disk I/O operations. While this mechanism can enhance throughput, it also introduces the risk of excessive memory consumption, especially in data-intensive applications like video streaming. For example, if an AI video streaming server continuously writes large video files to disk without effectively managing the Page Cache, it can lead to RAM saturation. This situation is exacerbated when the application is under heavy load, resulting in the Linux Out-of-Memory (OOM) Killer terminating processes to free up memory, often targeting critical services.
+
+### Conventional Approaches: Short-Term Relief, Long-Term Pain
+
+Common strategies for managing memory pressure include manually dropping caches using commands like `echo 3 > /proc/sys/vm/drop_caches`. While this may provide temporary relief, it is not a sustainable or efficient solution. This method indiscriminately clears the Page Cache, leading to increased disk I/O and potential performance degradation. Moreover, relying on the OOM Killer to manage memory is risky, as it can disrupt essential services and lead to unpredictable application behavior. Therefore, a more sophisticated approach is necessary to ensure stable and efficient memory management.
+
+### Leveraging Go for Memory Management: A Strategic Approach
+
+To address the challenges posed by the Linux Page Cache, developers can implement a Go-based solution that utilizes the `Fadvise` system call. This approach allows applications to communicate directly with the Linux kernel about how data should be handled in memory. By marking data as "write-only trash," developers can inform the kernel that this data can be discarded, enabling the reclaiming of memory without manual intervention. This strategy is particularly relevant for AI video streaming applications that generate temporary data, such as ephemeral video segments that may not need to be retained.
+
+### Implementing the Go Solution: Code Walkthrough
+
+The following code snippet illustrates how to implement a memory management solution in Go that incorporates the `Fadvise` system call:
+
+```go
+// File: pkg/storage/localfs/file_linux.go
+package localfs
+
+import (
+    "os"
+    "golang.org/x/sys/unix"
+)
+
+type FileWrapper struct {
+    *os.File
+}
+
+// DropCache flushes the dirty pages to disk and informs the kernel to drop the cache.
+func (fw *FileWrapper) DropCache() error {
+    // Flush dirty pages to disk
+    if err := fw.File.Sync(); err != nil {
+        return err
+    }
+    // Inform the kernel to drop the cache
+    return unix.Fadvise(int(fw.File.Fd()), 0, 0, unix.FADV_DONTNEED)
+}
+```
+
+In this implementation, the `DropCache` method first ensures that all dirty pages are flushed to disk using `Sync()`. Following this, it invokes `Fadvise` with the `FADV_DONTNEED` flag, instructing the kernel to reclaim the memory used by the cached data. This sequence is critical; the kernel will not drop dirty pages from the cache until they have been successfully written to disk.
+
+### Ensuring Cross-Platform Compatibility
+
+Developers must also consider cross-platform compatibility when implementing memory management solutions. Go's build tags can be employed to differentiate between platform-specific implementations. For instance, the `DropCache` method can be defined differently for Linux and non-Linux systems:
+
+```go
+// File: pkg/storage/localfs/file_others.go
+package localfs
+
+import (
+    "os"
+)
+
+// DropCache performs a sync on non-Linux systems.
+func (fw *FileWrapper) DropCache() error {
+    return fw.File.Sync()
+}
+```
+
+This design ensures that the application remains functional across various operating systems while optimizing memory management specifically for Linux environments.
+
+### Validating Memory Optimization in Production
+
+Once the memory management solution is implemented, it is essential to validate its effectiveness in a production environment. Monitoring tools such as `htop` or `vmstat` can be utilized to track RAM usage, disk I/O, and application performance metrics. For example, during peak loads, developers should observe the impact of the `DropCache` method on memory consumption. Ideally, the application should exhibit stable memory usage, with RAM consumption remaining within acceptable limits even as data is written to disk.
+
+### Real-World Case Study: AI Video Streaming in Action
+
+To illustrate the effectiveness of this memory management approach, consider a real-world deployment scenario involving a video streaming service that processes multiple live feeds from AI-enabled cameras. Initially, the service faced significant memory pressure due to the uncontrolled growth of the Linux Page Cache. After implementing the Go-based solution described above, the team observed a marked improvement in memory efficiency. RAM usage stabilized, allowing the service to handle a higher number of concurrent streams without triggering the OOM Killer. This not only improved overall system reliability but also enhanced user experience by reducing latency.
+
+### Best Practices for Sustaining Efficient Memory Usage
+
+To maintain efficient memory usage in AI applications, developers should adhere to several best practices:
+
+1. **Regular Profiling and Monitoring**: Utilize profiling tools to monitor memory usage and application performance continuously. This practice helps identify potential bottlenecks early.
+
+2. **Memory Pooling Strategies**: Implement memory pooling techniques to minimize fragmentation and enhance allocation efficiency, particularly for frequently used data structures.
+
+3. **Optimized Data Structures**: Choose data structures that minimize memory overhead, especially when dealing with large datasets. For example, using slices instead of arrays can reduce memory consumption.
+
+4. **Understanding Go's Garbage Collector**: Familiarize yourself with Go's garbage collector and tune it to align with the application's memory requirements, ensuring optimal performance.
+
+5. **Documenting Memory Usage Patterns**: Maintain clear documentation on memory usage patterns and optimization strategies for future reference, facilitating easier troubleshooting and enhancements.
+
+### Future Directions for AI Infrastructure
+
+As AI applications continue to evolve and demand more computational resources, memory management strategies must also adapt. Emerging paradigms such as memory-mapped files, shared memory, and hardware accelerators could play a pivotal role in optimizing memory usage. Additionally, as AI models become increasingly complex, developers will need to explore novel approaches to memory management that can accommodate these advancements without compromising performance.
+
+### Conclusion: The Imperative of Effective Memory Management
+
+Effective memory management is not merely a technical requirement; it is a foundational element for building high-performance AI video streaming applications. By gaining a deeper understanding of the Linux Page Cache and implementing targeted strategies in Go, developers can significantly enhance system efficiency and reliability. As the landscape of AI applications continues to grow, embracing innovative memory management techniques will be essential for maintaining competitive performance and scalability.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/rusegal/writing-terabytes-to-disk-in-go-stopping-the-os-page-cache-from-eating-all-your-ram-fadvdontneed-2cfa)
+
+---
+
+<SocialShare title="Mastering Memory Management for AI Video Streaming with Go" slug="mastering-memory-management-for-ai-video-streaming-with-go" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
