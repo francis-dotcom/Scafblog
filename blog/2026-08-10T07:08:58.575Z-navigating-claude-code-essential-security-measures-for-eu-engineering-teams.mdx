@@ -1,0 +1,193 @@
+---
+slug: navigating-claude-code-essential-security-measures-for-eu-engineering-teams
+title: "Navigating Claude Code: Essential Security Measures for EU Engineering Teams"
+authors: [francis]
+tags: [ai, security, gdpr, claude code]
+date: 2026-08-10T07:08:58.576Z
+description: "Misconfigured Claude Code permissions don't just expose your codebase—they expose your team's compliance posture. A single credential leak to Anthropic's API can trigger secret rotation, audit liability, and regulatory scrutiny. This is the security model every CTO at an EU engineering team needs to understand before rollout.
+TL;DR: Before rolling out Claude Code to your team, understand the permission tiers, data flows, and GDPR considerations for European teams.
+Before you roll out Claude Code across a 10-20 person engineering team, you need to understand exactly what the tool can read, write, and execute: and what it sends to Anthropic's servers. Getting this wrong is not a theoretical risk. A misconfigured Claude Code session can expose secrets stored in local config files, run shell commands outside the intended scope, or send file contents containing personal data to an external API. This article gives technical leads at small software companies the security model overview they need to make a confident rollout decision.
+Claude Code is an agentic coding assistant that runs inside the terminal. Unlike a chat interface, it takes actions: it reads files, writes code, runs commands, and can chain multiple steps together. That capability is what makes it powerful. It is also what makes a clear permissions understanding non-negotiable before team deployment.
+Claude Code operates on a tiered permission model that distinguishes between what the tool does automatically and what requires your explicit approval.
+Default (automatic) permissions cover actions Claude Code can take without asking: reading files in the current working directory, writing and editing files you have opened in the session, and running common shell commands like ls, cat, or grep.
+Approval-required permissions cover higher-risk actions: running scripts, executing commands that modify system state, installing packages, or accessing directories outside the current project. Claude Code will pause and ask for confirmation before proceeding.
+Blocked by design covers actions Claude Code will not take even if instructed: it will not push to remote repositories without confirmation, will not delete files without explicit approval, and will not override .gitignore rules.
+In practice, the boundary between automatic and approval-required depends on your configuration. The default settings are designed to be conservative, but a growing software team should review and tighten them before shared use.
+Claude Code uses a permission configuration system that lets you define what is allowed, what requires approval, and what is prohibited. This is set at the project level using a settings.json file (stored in .claude/settings.json) and optionally reinforced through a CLAUDE.md file at the project root.
+Key configuration options for a mid-sized company's engineering team:
+Prohibited directories: Explicitly exclude directories containing secrets or sensitive data (.env files, credentials folders, certificate stores). Use the denyPaths configuration to prevent Claude Code from reading these directories at all.
+Command allow-listing: Rather than allowing all shell commands, restrict Claude Code to a defined set. For a development team, this typically means allowing build and test commands while requiring approval for any command that touches infrastructure.
+File write scope: Limit automatic writes to the src/ and tests/ directories. Any write outside those paths requires confirmation.
+Workspace isolation: Each engineer should run Claude Code scoped to their active project directory, not from a root home directory.
+The CLAUDE.md file plays an important role here. Beyond giving Claude Code project context, it functions as a governance document. An engineering leader can specify in CLAUDE.md exactly what Claude Code is allowed to do in that repository: what files it should not modify, what external calls it should not make, and what review steps are required before any commit. See CLAUDE.md Configuration Guide for Engineering Teams for the full setup pattern.
+This is the question every CTO at a technical team should ask before deployment: what leaves the machine?
+Every interaction with Claude Code sends an API request to Anthropic. That request includes:
+The contents of files Claude Code has read in the current session
+Terminal output from commands it has run
+Your natural language instructions
+This means that if Claude Code reads a file containing a database connection string, an API key, or a patient record, that content goes to Anthropic's API. The implications for a European engineering team are significant.
+Anthropicnot train on API data by default (unlike consumer products), and data is processed under Anthropic's privacy policy. However, the transfer itself is a GDPR-relevant event if any personal data is included. European teams need to treat Claude Code API calls as a data processing activity, which means:
+Personal data (customer records, employee data, any data subject to GDPR) must not appear in files Claude Code reads during a session.
+If your codebase includes test fixtures with real personal data (a common anti-pattern), clean these before enabling Claude Code for your team.
+Review your Anthropic API agreement against your data processing obligations. For most small software companies, Anthropic's data processing addendum covers standard requirements; confirm with your legal or privacy counsel.
+The practical mitigation is straightforward: use .gitignore patterns and denyPaths configuration to prevent Claude Code from accessing any file containing personal data. Define this in your CLAUDE.md as a hard rule.
+For a founder-led company or a professional services firm serving EU clients, the GDPR posture for Claude Code comes down to three controls:
+Data minimisation at the session level. Claude Code should only read files relevant to the task at hand. Avoid opening entire project trees. Structure your workflow so that Claude Code operates on isolated modules, not on repositories that contain mixed sensitive and non-sensitive data.
+No PHI, PII, or client-confidential data in scope. This is a categorical rule, not a best-effort guideline. If your codebase processes health data, financial records, or any regulated personal data, implement directory-level exclusions before team rollout.
+Audit logging. Claude Code sessions generate logs. Establish a policy for how long these are retained and who has access, consistent with your existing data retention obligations.
+For an engineering leader at a growing software team preparing to deploy Claude Code to 10-20 engineers, this is the minimum governance baseline:
+Configure denyPaths for all directories containing secrets, credentials, environment files, and any data that could include personal information.
+Write a project-level CLAUDE.md for each active repository. Define what Claude Code is permitted to modify, what it must not touch, and what commands require human review.
+Audit your test fixtures for real personal data. Replace any real data with synthetic equivalents before Claude Code is enabled in those repositories.
+Brief your engineers on what Claude Code sends to Anthropic. This does not need to be a long session: a 15-minute team sync covering the permission model and the data minimisation rule is sufficient.
+Run a pilot with two or three engineers first. Observe which approval prompts they encounter, whether any unexpected directories are being accessed, and whether the configuration is producing the right friction level. Adjust before full rollout.
+A 20-person company that skips this checklist is not taking an acceptable risk. It is taking an avoidable one.
+Anthropicnot use API data to train its models by default. Session data is processed to generate responses and is subject to Anthropic's API data retention policy, not the consumer product retention policy. European teams should review Anthropic's data processing addendum and confirm it meets their GDPR obligations before full deployment.
+By default, Claude Code operates within the current working directory. It will ask for approval before accessing paths outside that scope. You can enforce this hard boundary using denyPaths configuration, which prevents Claude Code from reading specified directories regardless of user instruction. Always configure this before team rollout.
+The credential content will have been included in the API call to Anthropic for that session. Your immediate response should follow your standard secret rotation procedure: treat the credential as compromised, rotate it, and audit for any usage from that point forward. Prevention is the correct approach: configure denyPaths to cover all credential-bearing files and directories.
+CLAUDE.md Configuration Guide for Engineering Teams: How to structure your CLAUDE.md for permission control and team governance.
+Claude Code Team Evaluation Scorecard: A structured scorecard for evaluating Claude Code fit before committing to team-wide rollout.
+Claude Code for Non-Technical Founders: What founders without an engineering background need to understand about Claude Code before approving its use.
+AI Governance Framework for European SMEs: Building the governance layer that makes AI tools safe to deploy across your organisation.
+Written by Dr Hernani Costa | Powered by Core Ventures
+Originally published at First AI Movers.
+Technology is easy. Mapping it to P&L is hard. At First AI Movers, we don't just write code; we build the 'Executive Nervous System' for EU SMEs. Our AI governance & risk advisory and AI tool integration services help engineering teams deploy agentic tools safely—without compliance surprises.
+Is your Claude Code rollout creating technical debt or governance equity?
+👉 Get your AI Readiness Score (Free AI Governance Assessment for EU Teams)
+Security is not a feature. It's a prerequisite...."
+image: /img/blog/generated/navigating-claude-code-essential-security-measures-for-eu-engineering-teams-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Navigating Claude Code: Essential Security Measures for EU Engineering Teams](/img/blog/generated/navigating-claude-code-essential-security-measures-for-eu-engineering-teams-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### The Security Landscape of AI Tools in the EU
+
+As AI tools like Claude Code gain traction within European engineering teams, understanding the security implications of their deployment becomes critical. Claude Code operates in a sensitive environment where compliance with the General Data Protection Regulation (GDPR) is not just advisable but mandatory. Misconfigured permissions can lead to unauthorized data exposure, triggering compliance violations and hefty fines. This necessitates a thorough understanding of Claude Code's operational capabilities and a robust security framework to govern its use.
+
+### The Nuances of Claude Code's Tiered Permission Model
+
+Claude Code employs a tiered permission model that delineates between automatic permissions, approval-required actions, and actions that are blocked by design. Automatic permissions allow Claude Code to perform basic operations, such as reading files in the current working directory and executing common shell commands like `ls` or `cat`, without user intervention. Approval-required actions, on the other hand, involve higher-risk operations like executing scripts or modifying system states, which necessitate explicit user confirmation. 
+
+For instance, if a developer attempts to run a script that modifies system settings, Claude Code will prompt for approval, ensuring that only authorized users can execute potentially harmful commands. Understanding these distinctions is essential for engineering teams to configure Claude Code effectively, minimizing risks associated with unauthorized access or unintended data exposure.
+
+### Configuring DenyPaths: A Key to Data Protection
+
+One of the most effective strategies for safeguarding sensitive data is the configuration of prohibited directories using the `denyPaths` setting. This allows teams to explicitly exclude directories containing sensitive information, such as `.env` files or credential storage. A typical configuration in the `settings.json` file might look like this:
+
+```json
+{
+  "denyPaths": [
+    "/path/to/secrets",
+    "/path/to/credentials",
+    "/path/to/sensitive/data"
+  ]
+}
+```
+
+By implementing this configuration, engineering teams can significantly reduce the risk of GDPR violations stemming from unauthorized data access. It is crucial to ensure that these settings are reviewed and updated regularly to adapt to changes in the project structure or data sensitivity.
+
+### Command Allow-Listing: Enforcing Least Privilege
+
+Command allow-listing is another critical security measure that enhances Claude Code's deployment. Instead of permitting all shell commands, teams should restrict Claude Code to a predefined set of commands relevant to their development workflow. For instance, a team may allow commands for building and testing applications while requiring approval for any command that alters the infrastructure. 
+
+This approach not only limits potential misuse but also aligns with the principle of least privilege, ensuring that Claude Code operates within a controlled environment. For example, if a developer attempts to execute a command like `rm -rf /`, which could delete critical files, Claude Code would deny the action unless explicitly approved. 
+
+### Limiting File Write Scope: Protecting Code Integrity
+
+Limiting the file write scope is essential for maintaining the integrity of the codebase. By default, Claude Code may write to any file within the current directory. However, it is advisable to configure it to restrict automatic writes to specific directories, such as `src/` and `tests/`. Any attempt to write outside these designated paths should trigger a confirmation prompt. This can be implemented in the `settings.json` file as follows:
+
+```json
+{
+  "fileWriteScope": {
+    "allowed": [
+      "/path/to/src",
+      "/path/to/tests"
+    ],
+    "requiresApproval": true
+  }
+}
+```
+
+By enforcing such restrictions, teams can prevent accidental overwrites of critical files and maintain the integrity of their projects.
+
+### Establishing Governance with CLAUDE.md
+
+The `CLAUDE.md` file serves as a governance document that outlines the permissions and operational guidelines for Claude Code within a specific project. This document should explicitly define what Claude Code is allowed to modify, which directories are off-limits, and what commands require human review. 
+
+A well-structured `CLAUDE.md` might include sections on data access policies, command restrictions, and audit logging practices. For example, it could specify that all commands affecting production data must receive dual approval from both a team lead and a project manager. This governance framework not only facilitates compliance with GDPR but also fosters accountability within the engineering team.
+
+### Auditing Test Fixtures: A GDPR Compliance Necessity
+
+Conducting an audit of test fixtures for personal data is a critical step in preparing for Claude Code deployment. Many development teams inadvertently include real personal data in their test environments, which poses a significant risk when using AI tools that transmit data externally. Teams should replace any real data with synthetic equivalents before enabling Claude Code. 
+
+This practice minimizes the risk of data leaks and aligns with GDPR’s data minimization principle, which mandates that only necessary data should be processed. For instance, instead of using real customer names and addresses in test cases, teams could generate fake data that still allows for effective testing without exposing sensitive information.
+
+### Running a Pilot Program: Assessing Risks Before Full Deployment
+
+Before a full-scale rollout of Claude Code, it is advisable to conduct a pilot program with a small group of engineers. This pilot allows teams to observe the behavior of Claude Code under real-world conditions, assessing the effectiveness of configured permissions and identifying any unexpected access patterns. 
+
+For example, during a pilot, teams may discover that Claude Code attempts to access directories that were not initially considered, prompting a reevaluation of the `denyPaths` configuration. This iterative approach ensures that potential risks are addressed before wider deployment, significantly enhancing the security posture of the organization.
+
+### Understanding Data Transfers to Anthropic's API
+
+Every interaction with Claude Code results in API requests sent to Anthropic, which include the contents of files read during the session, terminal outputs, and natural language instructions. This data transfer is a GDPR-relevant event, especially if any personal data is involved. Engineering teams must ensure that no personal data, such as customer records or employee information, is included in files that Claude Code reads. 
+
+Implementing strict `denyPaths` configurations and adhering to data minimization principles are essential strategies for mitigating this risk. Additionally, teams should regularly review the types of data being processed and adjust their configurations accordingly.
+
+### Reviewing API Agreements: Ensuring GDPR Compliance
+
+Before deploying Claude Code, teams should meticulously review their API agreement with Anthropic to ensure it meets GDPR obligations. While most small software companies will find that Anthropic's data processing addendum covers standard requirements, it is essential to confirm this with legal or privacy counsel. 
+
+Specific pitfalls to consider include the potential for data retention beyond what is necessary for processing and the handling of any personal data inadvertently included in API requests. Understanding the terms of data processing can help teams navigate compliance challenges and avoid potential fines associated with GDPR violations.
+
+### Best Practices for Data Minimization and Audit Logging
+
+Establishing best practices for data minimization and audit logging is crucial for maintaining compliance and security. Claude Code sessions generate logs that can be valuable for auditing purposes, but teams must define policies regarding log retention and access. 
+
+These policies should align with existing data retention obligations and ensure that logs do not inadvertently expose sensitive information. By implementing robust logging practices, engineering teams can enhance their ability to monitor and respond to security incidents effectively.
+
+### Conclusion: A Comprehensive Approach to Secure Deployment
+
+In conclusion, deploying Claude Code within an EU engineering team necessitates a careful and deliberate approach to security and compliance. By understanding the tiered permission model, configuring prohibited directories, implementing command allow-listing, and establishing a comprehensive governance framework through `CLAUDE.md`, teams can significantly mitigate the risks associated with data exposure and GDPR compliance. 
+
+Additionally, conducting pilot programs, auditing test fixtures, and reviewing API agreements are essential steps in ensuring a secure and compliant deployment. As AI tools become increasingly integral to software development, prioritizing security will be critical for maintaining trust and compliance in an ever-evolving landscape.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/dr_hernani_costa/claude-code-secrets-leak-the-50k-gdpr-fine-waiting-to-happen-nfj)
+
+---
+
+<SocialShare title="Navigating Claude Code: Essential Security Measures for EU Engineering Teams" slug="navigating-claude-code-essential-security-measures-for-eu-engineering-teams" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
