@@ -1,0 +1,164 @@
+---
+slug: securing-your-mcp-server-common-vulnerabilities-and-fixes
+title: "Securing Your MCP Server: Common Vulnerabilities and Fixes"
+authors: [francis]
+tags: [mcp, security, ai, cloud]
+date: 2026-08-11T17:14:58.338Z
+description: "Originally published on NextFuture
+Bạn vừa dựng xong một MCP server cho agent nội bộ: nó đọc file, chạy lệnh, fetch URL theo yêu cầu của model. Vài tuần sau, một tài liệu độc hại lọt vào ngữ cảnh, và agent của bạn vô tình đọc /etc/passwd hoặc gọi lệnh shell do kẻ tấn công cài sẵn. Bài viết này liệt kê 6 lỗ hổng MCP server phổ biến nhất kèm code fix có thể copy-paste ngay, dựa trên một audit thực tế về MCP server và package AI/ML.
+MCP (Model Context Protocol) server trao cho LLM các tool thật: đọc file, chạy lệnh, fetch URL. Vấn đề là tham số truyền vào các tool này lại đến từ nội dung không đáng tin — một trang web, một tài liệu, hay output của model khác. Đây là bề mặt injection kinh điển, và phần lớn MCP server đang mắc đúng 6 lỗ hổng lặp đi lặp lại.
+Một tool read_file dùng open(base + user_path) sẽ lộ /etc/passwd ngay khi model được yêu cầu đọc ../../../../etc/passwd. Symlink và absolute path dễ dàng bypass các prefix check ngây thơ. Cách vá: resolve cả base lẫn target path, từ chối nếu target không nằm trong parents của base — không được "làm sạch" path rồi tiếp tục chạy, đó chính là cách lỗ hổng quay lại.
+Đoạn code kiểu subprocess.run(f"convert {name}", shell=True) là dấu chấm hết, vì bất kỳ tham số nào model can thiệp được đều coi như do kẻ tấn công kiểm soát. Fix: luôn truyền argv dạng list với shell=False, whitelist tham số người dùng thực sự được phép chỉnh, và từ chối mọi thứ ngoài danh sách đó.
+pickle.load, torch.load bản trước 2.6 (mặc định không an toàn), yaml.load không dùng safe loader, và numpy.load(allow_pickle=True) đều có thể thực thi code ngay khi load. Đây được ghi nhận là nhóm lỗi được trả thưởng nhiều nhất trên huntr cho MCP/AI. Dùng yaml.safe_load, torch.load(f, weights_only=True), và ưu tiên định dạng safetensors thay vì pickle cho model.
+Một tool fetch_url sẵn sàng gọi tới http://169.254.169.254/ (cloud metadata) hoặc http://localhost:6379 nếu không kiểm soát. Trước khi connect, resolve hostname và chặn toàn bộ private range, đồng thời tắt redirect và giới hạn kích thước response.
+Grep nhanh trong source trước khi release: tìm shell=True, os.system, subprocess.call(; tìm pickle.load, yaml.load(, torch.load(, allow_pickle=True; tìm open(, Path(, send_file, extractall. Sau đó bắn thử các payload tấn công thật — ../, 169.254.169.254, một pickle chứa __reduce__ — vào instance local và xác nhận từng cái đều bị từ chối.
+Nếu team bạn đang build MCP server cho agent nội bộ, chạy ngay bộ grep checklist ở trên trên codebase hiện tại trước khi nghĩ đến tính năng mới. Đừng đợi security review hàng quý — mỗi tool mới thêm vào agent là một bề mặt tấn công mới cần soi qua đúng 6 nhóm lỗi này.
+This article was originally published on NextFuture. Follow us for more fullstack & AI engineering content...."
+image: /img/blog/generated/securing-your-mcp-server-common-vulnerabilities-and-fixes-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Securing Your MCP Server: Common Vulnerabilities and Fixes](/img/blog/generated/securing-your-mcp-server-common-vulnerabilities-and-fixes-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### The Critical Function of MCP Servers in AI Frameworks
+
+Model Context Protocol (MCP) servers play a pivotal role in the architecture of AI applications, particularly those utilizing large language models (LLMs). These servers facilitate the seamless interaction between LLMs and various operational tools, including file readers, command execution interfaces, and web fetchers. This intermediary function is essential for enabling AI systems to dynamically access and manipulate data. However, the inherent complexity and flexibility of MCP servers also render them vulnerable to a multitude of security threats, necessitating a comprehensive understanding of these vulnerabilities and their mitigations.
+
+### Vulnerability Landscape: The Risks Associated with MCP Servers
+
+MCP servers are particularly susceptible to security flaws due to their reliance on user-supplied inputs, which often originate from untrusted sources like external documents or web pages. These inputs can introduce various attack vectors, amplifying the risk of exploitation. Security professionals and developers must prioritize understanding these vulnerabilities to implement effective countermeasures. The consequences of neglecting these vulnerabilities can be severe, ranging from unauthorized access to critical data to complete system compromise.
+
+### Identifying Common Vulnerabilities in MCP Servers
+
+A thorough audit of MCP servers has revealed several recurring vulnerabilities that attackers frequently exploit. These include path traversal attacks, command injection vulnerabilities, unsafe deserialization practices, and improper URL validation. Each of these vulnerabilities poses distinct risks that can lead to unauthorized access, data leakage, or even remote code execution. By identifying and understanding these vulnerabilities, developers can take proactive steps to secure their systems against potential threats.
+
+### Path Traversal: Risks of Insecure File Access
+
+Path traversal vulnerabilities arise when an application permits users to specify file paths that can navigate the directory structure inappropriately. For instance, an MCP server that employs a function like `open(base + user_path)` can be manipulated by an attacker to access sensitive files, such as `/etc/passwd`. To mitigate this risk, developers must enforce stringent path validation. The following code snippet illustrates a secure approach to resolving and validating file paths:
+
+```python
+import os
+
+def safe_open(base_path, user_path):
+    # Resolve both base and user paths
+    base_path = os.path.abspath(base_path)
+    user_path = os.path.abspath(os.path.join(base_path, user_path))
+
+    # Validate that the resolved user path is within the base path
+    if not user_path.startswith(base_path):
+        raise ValueError("Access denied: Invalid file path.")
+    
+    return open(user_path, 'r')
+```
+
+### Command Injection: Protecting Execution Environments
+
+Command injection vulnerabilities present a significant risk, allowing attackers to execute arbitrary commands on the host system. A common pitfall is the use of shell commands with user inputs directly, such as in `subprocess.run(f"convert {name}", shell=True)`. This practice can be easily exploited. To enhance security, developers should refrain from using `shell=True` and instead pass arguments as a list. The following implementation illustrates this secure approach:
+
+```python
+import subprocess
+
+def safe_convert(name):
+    # Whitelist acceptable parameters
+    allowed_names = ['image1.png', 'image2.jpg']
+    
+    if name not in allowed_names:
+        raise ValueError("Invalid parameter.")
+    
+    # Use a list to avoid shell injection
+    subprocess.run(["convert", name], check=True)
+```
+
+### Unsafe Deserialization: Risks with Pickle and YAML
+
+Deserialization vulnerabilities can occur when an application deserializes untrusted data. Libraries like `pickle` and `yaml` can execute arbitrary code if not handled properly. For example, using `pickle.load()` without adequate checks can lead to remote code execution. To mitigate this vulnerability, developers should utilize safer alternatives. Below is an example of employing `yaml.safe_load`:
+
+```python
+import yaml
+
+def load_yaml(file):
+    with open(file, 'r') as f:
+        # Use safe_load to prevent code execution
+        return yaml.safe_load(f)
+```
+
+### URL Fetching: Controlling External Connections
+
+MCP servers often include functionality to fetch URLs, which can be exploited if not properly controlled. For instance, if an MCP server permits fetching from unvalidated URLs, it could inadvertently connect to sensitive internal services. To prevent this, developers should implement hostname resolution and restrict connections to known safe domains:
+
+```python
+import requests
+from urllib.parse import urlparse
+
+def safe_fetch_url(url):
+    # Parse the URL to extract the hostname
+    parsed_url = urlparse(url)
+    
+    # Block private IP ranges
+    if parsed_url.hostname.startswith(('169.254.', '127.0.0.')):
+        raise ValueError("Access denied: Invalid URL.")
+    
+    response = requests.get(url)
+    return response.content
+```
+
+### Security Audits: A Comprehensive Checklist
+
+Conducting regular security audits is vital for identifying and mitigating vulnerabilities within MCP servers. A structured checklist can streamline this process and ensure thorough coverage. Key items to include are:
+
+- Search for the use of `shell=True` in subprocess calls.
+- Identify all instances of `pickle.load`, `yaml.load`, and similar functions.
+- Review file access methods for path traversal vulnerabilities.
+- Ensure that all URL fetches are validated against a whitelist.
+- Test for known payloads in a controlled environment.
+
+### Tools for Enhancing MCP Server Security
+
+A variety of tools exist to assist in testing the security of MCP servers. Static analysis tools can identify potential vulnerabilities within the codebase prior to deployment. Dynamic analysis tools, such as fuzzers, can simulate attacks against the running server to uncover weaknesses. Additionally, tools like Bandit for Python can help identify security issues in code, offering a valuable layer of protection.
+
+### The Broader Implications of AI Security
+
+The security of MCP servers is not merely a technical concern; it has far-reaching implications for the integrity of AI applications as a whole. As AI systems become increasingly integrated into critical operations across various sectors, the potential impacts of a security breach grow exponentially. A compromised MCP server could lead to unauthorized data access, manipulation of AI outputs, or even the deployment of harmful AI systems. Organizations must adopt a proactive security posture, encompassing regular audits, code reviews, and the implementation of best practices to safeguard against vulnerabilities. The integration of security measures into the development lifecycle is essential to ensure that AI systems operate safely and effectively.
+
+### Conclusion: Building Robust AI Systems Through Security
+
+In summary, securing MCP servers is a fundamental aspect of maintaining the integrity of AI applications. By understanding common vulnerabilities and implementing robust security measures, developers and system administrators can significantly mitigate the risk of exploitation. As AI technology continues to evolve, ensuring the security of its underlying infrastructure will be paramount in building resilient and trustworthy systems that can withstand the challenges of a dynamic threat landscape. Proactive security measures not only protect sensitive data but also uphold the ethical standards expected in AI deployment, fostering trust in these transformative technologies.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/bean_bean/6-lo-hong-bao-mat-mcp-server-thuong-gap-va-cach-va-ngay-55gl)
+
+---
+
+<SocialShare title="Securing Your MCP Server: Common Vulnerabilities and Fixes" slug="securing-your-mcp-server-common-vulnerabilities-and-fixes" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
