@@ -1,0 +1,124 @@
+---
+slug: understanding-the-disparities-in-ai-reasoning-across-domains
+title: "Understanding the Disparities in AI Reasoning Across Domains"
+authors: [francis]
+tags: [ai, reasoning, llm, machinelearning]
+date: 2026-08-12T17:14:49.009Z
+description: "The standard explanation is that maths is logical and prose is not. That is not it. The difference is that a maths answer can be checked by a script in a millisecond and a paragraph of strategy advice cannot, and every downstream asymmetry follows from that.
+Reasoning ability was trained by reinforcement learning against automatic graders. A domain gets good reasoning in proportion to how cheaply its answers can be graded — because that determines how much training signal existed, how much process supervision could be generated, and whether test-time techniques like best-of-N have anything to select with.
+Difficulty is almost irrelevant to this. Competition maths is much harder than writing a coherent product brief, and models improved far more on the former. Verifiability, not difficulty, is the variable.
+Everything lines up. A final answer is a number or an expression, so equality checking is trivial. Problems come with reference solutions in enormous quantity. Intermediate steps are individually checkable, which is what made step-level datasets possible at all — the PRM800K collection behind Let’s Verify Step by Step exists because a human, or later a rollout estimate, can say whether line seven follows from line six.
+At inference the same properties keep paying. Majority voting works because numeric answers are comparable for equality: wrong answers scatter across the number line, right ones pile up. That single property makes self-consistency almost free in maths and unavailable in prose.
+The published caution here is worth carrying. Mirzadeh and colleagues at Apple introduced GSM-Symbolic in 2024, generating variants of GSM8K problems from symbolic templates, and reported that model accuracy varied noticeably across variants of the same problem and degraded when a clause that looked relevant but changed nothing was inserted — their GSM-NoOp condition, where reported drops were large. Strong maths scores are real; they are also more brittle to surface changes than a benchmark number suggests.
+Code has the second-best verifier in existence: it runs. A compiler rejects a whole class of errors for free, and a test suite gives a binary signal on behaviour. Which is why coding shows the second largest reasoning gains, and why repeated sampling works so well there — you can afford to be wrong 90% of the time if you can identify the 10% automatically.
+The noise comes from tests being partial specifications. Passing tests is not being correct: the code can pass while being unmaintainable, insecure, quadratic where it needed to be linear, or correct only on the cases someone thought to write. A model optimised against test outcomes learns to satisfy tests, which includes special-casing the inputs the tests use. That is an instance of the over-optimisation pattern, not a separate phenomenon.
+Practically: reasoning models earn their cost most clearly on debugging with a reproduction, on multi-file changes with interacting constraints, and on anything with an executable check. They earn it least on writing boilerplate, where the first draft was already right.
+Open-ended text has no cheap grader and, for many tasks, no unique correct answer. That absence bites three times over.
+  Less training signal. Reinforcement learning against a rule-based grader was not available, so text-domain reasoning improved mostly as a side effect of transfer from the domains where it was.
+  No inference-time selection. Best-of-N needs a picker; majority voting needs comparable answers. Neither exists for “write a memo to the board”.
+  Evaluation is itself unreliable. Model-graded evaluation on text carries known biases — toward length, toward elaborate structure, toward the grader’s own style — which is the direction reasoning models push output anyway. It is entirely possible for a reasoning model to score better on an LLM-judged writing eval while readers prefer the shorter answer.
+Where reasoning does help in text domains, it tends to be on the sub-tasks that have smuggled a verifier in: checking a document against a policy with enumerable rules, reconciling two sources that disagree, or answering a question whose answer is entailed by supplied text. Those are closer to logic problems wearing prose, and they behave accordingly.
+Agentic work sits between code and text and is increasingly where reasoning models are deployed. It has a partial verifier — the tool either returned an error or it did not, the file either exists or it does not — which gives step-level feedback that pure text tasks lack. It also has a genuine planning component with interacting constraints and a real cost to a wrong branch, which is the profile reasoning handles best.
+What it lacks is an end-to-end grader. “Did the agent do the thing the user meant” is usually a human judgement, so the technique works well at the step level and stays hard to evaluate at the task level. That mismatch explains a common experience: traces that look impressively competent step by step, attached to outcomes nobody can say much about in aggregate.
+The test is not what your data looks like. It is this: could you write an automatic grader for your task in under an hour, one that returns a boolean and that you would trust?
+If yes, you are in the maths-and-code regime whatever your domain is called, and the whole toolkit — reasoning effort, best-of-N, verifier reranking, escalation routing — is available to you. If no, you are in the text regime, expected gains are smaller, and your first investment should be building an evaluation you believe rather than buying a more expensive model. Without the grader you cannot tell whether the expensive model helped, which means you cannot justify it and cannot notice when it stops helping.
+  When a Reasoning Model Is a Waste of Money
+
+  Process Supervision vs Outcome Supervision
+
+  Do Reasoning Models Actually Reason? The Honest Answer..."
+image: /img/blog/generated/understanding-the-disparities-in-ai-reasoning-across-domains-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Understanding the Disparities in AI Reasoning Across Domains](/img/blog/generated/understanding-the-disparities-in-ai-reasoning-across-domains-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### The Role of Verifiability in AI Reasoning
+
+AI reasoning has emerged as a pivotal area of research, especially as machine learning models find applications across diverse domains. The effectiveness of these models is heavily influenced by the nature of the domain they operate in, particularly in mathematical, coding, and text contexts. A key factor that differentiates these domains is the concept of verifiability, which directly impacts the training signals available to AI models. In this analysis, we will explore how the availability of automatic grading mechanisms shapes the reasoning capabilities of AI across these three domains.
+
+### Mathematical Reasoning: A Benchmark for Verifiability
+
+Mathematics represents a domain where AI reasoning can flourish due to its high degree of verifiability. Mathematical problems typically yield definitive answers that can be easily checked for correctness. For instance, consider a simple algebraic equation like \(x + 3 = 7\). The solution, \(x = 4\), can be verified through straightforward equality checks. This verifiability allows for the development of reinforcement learning models that can be trained against automatic graders, providing consistent feedback. Large datasets, such as the PRM800K collection, facilitate the training of models that can learn from intermediate steps, enhancing the reasoning process. The ability to check each step in a solution enables models to refine their understanding incrementally, leading to robust performance.
+
+### Coding: Partial Verifiability Enhances Reasoning
+
+While coding also benefits from verifiability, it operates under different constraints than mathematics. The presence of compilers allows for the identification of a significant class of errors before runtime. For example, a simple Python function can be tested using assert statements that check for expected outcomes:
+
+```python
+def add(a, b):
+    return a + b
+
+# Test cases
+assert add(2, 3) == 5
+assert add(-1, 1) == 0
+```
+
+This binary feedback mechanism enables models to optimize code based on test outcomes, although it can lead to overfitting to specific test cases. A model trained solely on passing tests may not generalize well to broader coding practices, as it could learn to satisfy the tests rather than produce maintainable and efficient code. This highlights the importance of balancing test coverage with the need for robust, adaptable coding practices. Furthermore, the introduction of tools like static analyzers can enhance the verification process by identifying potential issues that are not caught during runtime testing.
+
+### Text Reasoning: The Challenge of Lack of Verifiability
+
+In stark contrast to mathematics and coding, the text domain lacks reliable automatic grading mechanisms. This absence poses significant challenges for AI reasoning in text generation tasks. For instance, generating a coherent product brief or a memo for a board meeting lacks the straightforward evaluative criteria found in mathematical or coding tasks. The lack of unique correct answers leads to diminished training signals, as models cannot learn from clear feedback loops. This results in models that may produce plausible-sounding text but lack the rigor and reliability of their mathematical or coding counterparts.
+
+### Implications of Absence of Automatic Graders
+
+The absence of an automatic grading system in text tasks has profound implications for model training. Without clear evaluative metrics, models in the text domain often rely on transfer learning from more structured domains. This reliance dilutes their reasoning ability, as the learning process is not directly tied to the tasks they are expected to perform. For example, a language model trained on a dataset of essays may not effectively generalize to generating concise technical documentation, as the evaluative criteria differ significantly. Additionally, the subjective nature of text evaluation can lead to inconsistencies in how models are assessed, further complicating the training process.
+
+### Agentic Work: A Hybrid Domain
+
+Agentic work represents a hybrid domain that sits between coding and text. It encompasses tasks that require both reasoning and execution, such as managing workflows or automating processes. While agentic tasks provide some level of verification—such as checking whether a file exists or whether a command executed successfully—they still lack the comprehensive grading mechanisms found in mathematics and coding. This creates a unique challenge for AI models, which can perform well at the step level but struggle to deliver satisfactory outcomes in aggregate. For example, automating a business process might require not only executing commands but also reasoning about the implications of those commands in a broader context, which remains a challenge for current AI models.
+
+### Practical Considerations for AI Model Deployment
+
+When deploying AI reasoning models, understanding the nature of the domain is essential. In domains with strong verifiability, such as mathematics and coding, models can be expected to perform well with appropriate training data and evaluation mechanisms. However, in text-based applications, organizations must invest in developing robust evaluation frameworks to ensure that the models deliver meaningful outputs. This may involve creating custom grading systems that assess the quality of generated text based on specific criteria relevant to the task at hand. Moreover, incorporating human feedback into the evaluation process can help bridge the gap between model performance and user expectations.
+
+### Addressing Biases in AI Evaluations
+
+Another critical aspect to consider is the potential biases that can arise in AI model evaluations. In the text domain, model-graded evaluations often favor longer, more elaborate responses, which may not align with user preferences for brevity and clarity. This discrepancy can lead to a situation where a reasoning model scores well on an evaluation metric but fails to meet the actual needs of users. To mitigate these biases, it is essential to develop evaluation frameworks that incorporate human judgment and prioritize user-centered outcomes. For instance, using diverse datasets that reflect varying writing styles and preferences can help create more balanced evaluation criteria.
+
+### The Future of AI Reasoning: Tailored Strategies
+
+Looking ahead, the future of AI reasoning will likely hinge on developing domain-specific strategies that account for the unique challenges presented by each area. For mathematical and coding tasks, continued investment in datasets and verification mechanisms will enhance model performance. In contrast, the text domain requires innovative approaches to evaluation and feedback, potentially incorporating human-in-the-loop systems to provide qualitative assessments that can guide model improvements. These tailored strategies will be crucial for ensuring that AI reasoning models are effective and aligned with user needs.
+
+### Conclusion: Navigating the Complex Landscape of AI Reasoning
+
+In conclusion, the disparities in AI reasoning capabilities across mathematical, coding, and text domains underscore the importance of verifiability in training and evaluation. As AI continues to evolve, understanding these differences will be crucial for researchers and practitioners aiming to leverage AI effectively. By developing tailored strategies for each domain and addressing potential biases in evaluations, we can enhance the reasoning capabilities of AI models and unlock their full potential in real-world applications. The path forward involves not only improving the models themselves but also ensuring that the evaluation frameworks we use are aligned with the complexities of each domain, ultimately leading to more reliable and effective AI systems.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/multigrid/reasoning-on-maths-vs-code-vs-text-why-the-gains-differ-3lo0)
+
+---
+
+<SocialShare title="Understanding the Disparities in AI Reasoning Across Domains" slug="understanding-the-disparities-in-ai-reasoning-across-domains" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
