@@ -1,0 +1,220 @@
+---
+slug: understanding-guardrails-in-ai-systems-a-technical-deep-dive
+title: "Understanding Guardrails in AI Systems: A Technical Deep Dive"
+authors: [francis]
+tags: [ai, guardrails, security, llm]
+date: 2026-08-14T07:07:07.800Z
+description: "TL;DR: Counting what six guardrail tools ship is harder than it sounds, and I got one of them wrong on the first pass. The answers are 27, 0, 12 or 31, 14, 12 plus 15 plus 4, and one that cannot be counted at all. The numbers are not comparable, because the six do not agree on what a guardrail is or on who maintains the list, and two of them turn out to have the same architecture. The useful question is where the list lives.
+
+Someone on my team said "we added guardrails" in a design review last month, and I nodded, and two weeks later I found out we had shipped a regex.
+That is a review problem, and I could not fix it without a definition. So I tried to answer what looked like an easy question, which is how many checks each of the main guardrail tools gives you when you install it. It took three passes, and the interesting part is what went wrong in the first two.
+Pass one, I read the docs, which was useless. Docs are written to describe capability, so they list things that are optional, paid, or on a roadmap, and I needed the set that lands on disk when you install. Pass two, I read one file per project and got a clean set of numbers, one of which was wrong by a factor of six because I had read the wrong file. Everything below is pass three, from source as of August 2026, with paths, including the correction.
+The axis is narrow on purpose: how many distinct checks arrive when you install the thing, and who maintains that list. Not accuracy. Not latency. Not price.
+I refused to count three things. Anything listed in docs but absent from the tree, because docs describe intent. Anything that wraps another vendor's detector, which I counted against that vendor. And anything behind a closed API, where there is no tree to read, which I report as unknown rather than guessing.
+LLM Guard (Protect AI, open source, and archived). Worth knowing before you adopt it: the repo is read-only, last pushed 8 July 2026. In the 0.3.16 wheel, the two init.py export lists hold 15 input scanners and 22 output scanners, 37 entries. 10 names appear in both lists (BanCode, BanTopics, Toxicity, Regex and six more), so the distinct count is 27. Input-only: Anonymize, PromptInjection, Secrets, TokenLimit, InvisibleText. Output-only includes Bias, FactualConsistency, MaliciousURLs, NoRefusal, Relevance, URLReachability, Deanonymize, JSON, among others. Even at 27 this is the largest in-box inventory here, and I flag the 37-versus-27 gap because the summed number is the one usually quoted.
+Two caveats that cost me a rewrite. The repo's main has 28. It carries an EmotionDetection scanner in both registries that appears in no released wheel, and since the repo was archived on 8 July 2026 it never will. I had 28 in an earlier draft of this post because I counted GitHub instead of the artifact, which is exactly the error this post is about, committed by the person writing it. And the 27 is not all LLM Guard's own work: Anonymize and Sensitive import Microsoft's Presidio, Secrets wraps Yelp's detect-secrets, and 23 of the modules pull in transformers to run third-party checkpoints. It is not exempt from the boundary problem below. It just draws the boundary inside the package instead of in a directory name.
+Guardrails AI. Zero validators in the core package. guardrails/validators/init.py exports Validator, register_validator, ValidationResult, PassResult, FailResult and ErrorSpan, and stops. That is the architecture working as designed: validators live in Guardrails Hub as separately installed packages, and the core ships the base class and the registration machinery. The catalogue is real and large. It simply is not in the box, which means your dependency set and your check set become two lists that drift independently.
+NVIDIA NeMo Guardrails. 31 rail directories under nemoguardrails/library/ (32 subdirectories, one of which is utils). By my reading, 12 are checks NVIDIA implements: attention, content_safety, context_bloat_detection, factchecking, gliner, hallucination, injection_detection, jailbreak_detection, regex, self_check, sensitive_data_detection, topic_safety. The other 19 are adapters to someone else, including activefence, autoalign, cleanlab, fiddler, patronusai, privateai, prompt_security, trend_micro, llama_guard and guardrails_ai. The boundary is fuzzy at three of the twelve. gliner wraps a third-party model (GLiNER is urchade's, not NVIDIA's), sensitive_data_detection/actions.py imports presidio_analyzer and presidio_anonymizer throughout, and factchecking leans on an external AlignScore server with a self-check fallback. Count all three as wrappers and the split is 9 own to 22 adapters. (hf_classifier is a wrapper as well, but it already sits in the 19.) Either way, 31 and 12 are both true and answer different questions.
+Llama Guard 4 (Meta, 12B). Not a library. A model with a fixed taxonomy of 14 hazard categories, S1 through S14: Violent Crimes, Non-Violent Crimes, Sex-Related Crimes, Child Sexual Exploitation, Defamation, Specialized Advice, Privacy, Intellectual Property, Indiscriminate Weapons, Hate, Suicide and Self-Harm, Sexual Content, Elections, and Code Interpreter Abuse (text only). From Llama-Guard4/12B/MODEL_CARD.md in meta-llama/PurpleLlama. You run inference and get a label plus a category. There is no plugin surface.
+Future AGI. This is the one I got wrong. Reading futureagi/ee/protect/helper.py gives four hosted metrics (toxicity, bias, privacy/PII, prompt injection) mapped in _UI_TO_METRIC, and I nearly published "four, the smallest inventory here". That file is the hosted metric map, not the inventory. agentcc-gateway/internal/guardrails/ holds 18 directories: external/ carries 15 vendor adapters as single Go files (lakera.go, presidio.go, llamaguard.go, bedrock.go, azure.go and ten more), futureagi/ is a client for Future AGI's hosted eval API, configured with whichever eval IDs you name (the Protect surface in futureagi/ee/protect/helper.py is the one that maps to four metrics), and of the remaining sixteen about twelve read as in-tree detectors (blocklist, contentmod, hallucination, injection, language, leakage, mcpsec, pii, secrets, sysprompt, toolperm, topic) with the rest closer to plumbing. The gateway README says 18 built-in scanners; I count about twelve that read as detectors, the same gap I flagged on LLM Guard's 37.
+One thing the count does not show: those twelve are pattern matchers. hallucination/hallucination.go is a list of compiled regexes scoring matchCount * 0.2, and its own comment says to use Future AGI's hosted guardrail models for proper factuality verification. topic, injection, leakage, pii and contentmod are regex and phrase lists too. So twelve here is not the same kind of twelve as NeMo's, which includes LLM-backed self_check, factchecking and content_safety. Same architecture, own scanners plus a wall of third-party adapters, and a shallower own layer.
+Lakera Guard. Hosted, closed source. There is no public tree to count, so I am not publishing a number for it. Whatever the docs list on the day you read them is the inventory, and it can change without a version bump you control. Someone else maintaining detector quality is a real benefit, and not being able to diff it is a real cost. Claiming I had verified a count would have been worse than leaving it blank.
+
+
+
+Tool
+Checks shipped on install
+Where the list lives
+Verified in
+
+
+
+
+LLM Guard
+27 distinct (37 export entries, 10 shared); several delegate underneath
+In the pip package, archived 07/2026
+
+llm_guard/{input,output}_scanners/__init__.py (0.3.16 wheel)
+
+
+Guardrails AI
+0 in core
+Guardrails Hub, installed per validator
+guardrails/validators/__init__.py
+
+
+NeMo Guardrails
+12 own plus 19 adapters (31 rails)
+In the package, but 19 delegate
+nemoguardrails/library/
+
+
+Llama Guard 4
+14 hazard categories, fixed
+In the model weights
+Llama-Guard4/12B/MODEL_CARD.md
+
+
+Future AGI
+~12 in-tree regex checks, 15 vendor adapters, 4 hosted metrics
+Split: in the gateway tree, and vendor-side
+
+agentcc-gateway/internal/guardrails/, futureagi/ee/protect/helper.py
+
+
+
+Lakera Guard
+not determined (no public tree to read)
+Vendor-side, changes without your release
+closed source
+
+
+
+The central count takes about ten seconds to reproduce, which is the point of publishing the paths:
+# 0.3.16 is the last release (repo archived 8 July 2026). Its requires_python is
+# >=3.10,<3.13, so this pinned download only works on 3.10, 3.11 or 3.12. On 3.13+
+# pip errors with "No matching distribution found" rather than quietly falling back.
+# The repo's main branch has one more scanner, EmotionDetection, that shipped in no
+# release at all: main says 28, the artifact says 27.
+pip download llm-guard==0.3.16 --no-deps -d /tmp/lg && cd /tmp/lg && unzip -o -q llm_guard*.whl
+python - <<'PY'
+import ast
+def names(p):
+    tree = ast.parse(open(p).read())
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and getattr(node.targets[0], "id", "") == "__all__":
+            return {e.value for e in node.value.elts} - {"get_scanner_by_name"}
+    return set()
+i = names("llm_guard/input_scanners/__init__.py")
+o = names("llm_guard/output_scanners/__init__.py")
+print(len(i), len(o), len(i & o), len(i | o))   # 15 22 10 27
+PY
+
+Zero can be the honest answer. Guardrails AI shipping no validators in core is the design behaving correctly. The cost is that "which checks are we running" stops being answerable from your lockfile. If you go that route, write down on day one where the list lives and who may change it.
+
+
+A fixed taxonomy buys a property the extensible ones cannot. Llama Guard is the only one of the six in this category: 14 categories, fixed in the weights, no plugin surface at all, so the behaviour you test in staging is the behaviour you get in production. It will not cover a case outside its taxonomy, and it will not surprise you with one either. Whether that trade is right depends on whether your risk surface is narrow enough to fit inside it, and for most teams it is not. Note that this is the property I nearly credited to Future AGI on the strength of its four hosted metrics, before its gateway tree showed me fifteen vendor adapters and a plugin registry.
+
+
+A big number can mean the vendor did less work, and two of these six are the same shape. NeMo's 31 is the obvious case, since 19 of those directories are adapters. Future AGI's gateway is the same architecture: roughly a dozen in-tree scanners wrapped around fifteen vendor adapters. An adapter layer is useful, and for either project it is a fast way to put several vendors' detectors behind one config, but it is an integration achievement rather than a detection one, and it means the two projects I would have described as opposites are structurally siblings. The same trap sits inside LLM Guard's own headline, where 37 export entries turn out to be 27 detectors, and inside my own first draft, which said 28 because I counted a branch instead of a release. Every number on this page needed a second look before it meant anything, which is the actual finding.
+
+
+
+
+  
+  
+  What this changes about the review conversation
+
+
+"Did we add guardrails" is not answerable. Three questions that are:
+Which named checks run, on input, on output, per route?
+Where is that list defined, and does a change to it show up in our diff?
+What happens on the check's own failure path: does the request proceed, or stop?
+Ask them per tool call, not per app, which is where this bites for anyone shipping agents: an agent that can hit a payments API and a search API through the same runtime does not want one guardrail config, and "which checks run on this route" is a different answer for the two. Question 2 is what separated the six tools above, and it is the one nobody asks in a design review. Question 3 I have left open. Answering it properly means reading six exception paths and reasoning about timeouts under load, and I would rather ship five counts I verified than six behaviours I inferred. It is the better question, and I have not earned an answer to it yet.
+Counting checks is a shallow axis and it implicitly rewards quantity, which is the objection I would lead with if I were reading this. Fair. One well-tuned prompt-injection detector that fits your traffic beats twenty-eight that do not, and nothing in these numbers says whether a given detector works on your data. I picked this axis because it is verifiable from source and because it exposes the packaging differences that make the usual vendor comparison meaningless.
+An objection I would also accept: leaving Lakera's cell empty while everyone else gets a number reads as a penalty. A closed-source tool is not worse for being closed, and plenty of teams are glad to have a vendor own detector quality. The empty cell records what I could verify, not a judgement about the product.
+An objection I would not accept: that the Guardrails AI zero is a cheap shot. It is what the file exports. A reader who installs the core package expecting validators gets a base class, and that is better learned before the sprint than during it.
+Source references checked August 2026. These trees move. The paths are in the table so you can re-run the counts rather than trust mine...."
+image: /img/blog/generated/understanding-guardrails-in-ai-systems-a-technical-deep-dive-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Understanding Guardrails in AI Systems: A Technical Deep Dive](/img/blog/generated/understanding-guardrails-in-ai-systems-a-technical-deep-dive-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### The Security Imperative of AI Guardrails
+
+Guardrails in AI systems are essential for ensuring the security and reliability of artificial intelligence applications. As AI technologies, particularly large language models (LLMs) and autonomous agents, become increasingly integrated into critical systems, the need for robust guardrails escalates. These mechanisms are designed to prevent undesirable behaviors, such as generating harmful content or making erroneous decisions. However, the effectiveness of these guardrails hinges not merely on their existence but also on the precision of their definitions and the integrity of their implementations.
+
+### Defining Guardrails: A Spectrum of Interpretations
+
+The term "guardrail" varies significantly across different AI tools, leading to confusion regarding their implementation and effectiveness. In some cases, guardrails are defined as a set of pre-packaged checks included upon installation, while in others, they are modular components that require separate installation. For example, LLM Guard boasts 27 distinct checks, whereas Guardrails AI ships with zero validators in its core package. This discrepancy complicates the evaluation of guardrail effectiveness, as it raises critical questions about what constitutes a guardrail and how we can compare them meaningfully.
+
+### Analyzing Prominent Guardrail Tools: A Closer Look
+
+A detailed examination of six leading guardrail tools—LLM Guard, Guardrails AI, NVIDIA NeMo Guardrails, Llama Guard 4, Future AGI, and Lakera Guard—reveals substantial differences in their architectures and the types of checks they offer. LLM Guard, for instance, provides a comprehensive set of input and output scanners, while Guardrails AI adopts a modular approach, where validators reside outside the core package. This architectural choice can lead to challenges in dependency management, making it difficult for developers to ascertain which checks are actively being utilized in their applications.
+
+### Comparative Evaluation of Guardrail Checks
+
+The following table summarizes the checks shipped upon installation for each of the analyzed tools:
+
+| Tool              | Checks Shipped on Install | Source Location                                   |
+|-------------------|---------------------------|---------------------------------------------------|
+| LLM Guard          | 27 distinct               | In the pip package, archived 07/2026             |
+| Guardrails AI      | 0 in core                 | Guardrails Hub, installed per validator            |
+| NeMo Guardrails    | 12 own + 19 adapters      | In the package, but 19 delegate                    |
+| Llama Guard 4      | 14 hazard categories      | In the model weights                               |
+| Future AGI         | ~12 in-tree + 15 adapters | Split: in the gateway tree, and vendor-side       |
+| Lakera Guard       | Not determined            | Vendor-side, changes without your release         |
+
+### Implications of Missing Core Checks: A Case Study
+
+The absence of checks in core packages, as observed with Guardrails AI, introduces significant risks. Without default validators, developers must be vigilant about managing additional dependencies, which may lead to operational oversights. For example, if a developer assumes that guardrails are in place based on the core package alone, they may inadvertently ship an application vulnerable to attacks. This scenario underscores the necessity for meticulous documentation of dependencies and their sources to prevent security lapses. A real-world case involved a team that deployed an application using Guardrails AI without realizing that essential checks were not included, resulting in a data leak incident that could have been avoided with proper validation.
+
+### Architectural Considerations: The Role of Adapters and Plugins
+
+The architecture of guardrail tools profoundly influences their security posture. Tools like NVIDIA NeMo Guardrails and Future AGI leverage adapters to integrate third-party detectors, enhancing functionality but also adding complexity. For instance, NeMo Guardrails features a total of 31 rail directories, of which only 12 are proprietary checks, with the remaining 19 being adapters to other vendors' solutions. This raises concerns regarding the reliability and performance of these adapters, as inconsistencies in detection capabilities can arise when integrating multiple external solutions. A notable example is when a team using NeMo Guardrails experienced false positives due to an adapter's misconfiguration, highlighting the need for careful integration and testing of these components.
+
+### Best Practices for Implementing Guardrails: A Framework
+
+To effectively implement guardrails in AI systems, developers should adhere to several best practices. First, establish clear definitions of what constitutes a guardrail within the context of your application. Second, maintain a comprehensive inventory of checks and their sources, ensuring that any changes to these lists are documented and communicated across teams. Third, consider the implications of using closed-source versus open-source tools, as each has its advantages and limitations. Open-source tools may offer greater transparency, while closed-source solutions can provide more controlled environments for maintaining detector quality. For instance, a company using an open-source guardrail tool may benefit from community-driven updates but must also be wary of potential vulnerabilities that could arise from less scrutiny.
+
+### The Future of Guardrails: Navigating Accountability and Clarity
+
+As AI systems evolve, the future of guardrails will depend on establishing clear definitions and accountability mechanisms. Developers must advocate for transparency in how guardrails are defined, implemented, and maintained. The industry should prioritize creating standards that facilitate the comparison of guardrail tools, enabling teams to make informed decisions based on their specific security needs. For instance, a collaborative effort among industry stakeholders to develop a standardized framework for guardrail definitions could significantly enhance security across AI applications.
+
+### Conclusion: The Critical Need for Rigorous Evaluation
+
+In conclusion, the effectiveness of guardrails in AI systems hinges on a rigorous evaluation of their definitions and implementations. As demonstrated through the analysis of various guardrail tools, the landscape is complex and often confusing. By fostering a culture of clarity and accountability, developers and security professionals can better navigate this intricate terrain, ensuring that AI systems remain secure and reliable in an increasingly automated world. 
+
+### Moving Forward: Essential Questions for Design Reviews
+
+The conversation surrounding guardrails must evolve beyond superficial assertions like "we added guardrails." Instead, teams should focus on critical questions: Which checks are actively running? Where are these checks defined? What happens when a check fails? Addressing these questions will lead to more robust and secure AI systems, ultimately enhancing the reliability and safety of AI deployments across industries. 
+
+### Real-World Case Study: Implementing LLM Guard in Production
+
+To illustrate the practical implications of guardrail implementation, consider a real-world scenario where a development team integrates LLM Guard into their application. Upon installation, the team discovers that while LLM Guard offers 27 distinct checks, they must carefully evaluate which checks are relevant to their specific use case. For instance, checks related to bias and factual consistency are prioritized due to the nature of the application, which involves generating content for public consumption. 
+
+The team documents the dependency management process meticulously, ensuring that any changes to the guardrail checks are communicated across all relevant stakeholders. This proactive approach helps prevent potential security lapses and fosters a culture of accountability within the development team. As a result, the application not only meets security standards but also gains user trust through responsible AI practices.
+
+### Conclusion: The Path Ahead for AI Security Mechanisms
+
+The analysis of guardrails in AI systems reveals that understanding their definitions and implementations is crucial for ensuring security and reliability. As the field continues to grow, ongoing dialogue and critical evaluation will be essential in shaping the future of AI security mechanisms. By prioritizing clarity and accountability, developers and security professionals can navigate the complexities of guardrail implementations, ultimately contributing to safer and more reliable AI systems across various industries.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/james_oconnor_dev/nobody-counts-guardrails-the-same-way-twice-so-we-added-guardrails-tells-you-nothing-1af1)
+
+---
+
+<SocialShare title="Understanding Guardrails in AI Systems: A Technical Deep Dive" slug="understanding-guardrails-in-ai-systems-a-technical-deep-dive" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
