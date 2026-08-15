@@ -1,0 +1,170 @@
+---
+slug: engineering-an-ai-voice-agent-for-indian-agriculture-overcoming-technical-hurdles
+title: "Engineering an AI Voice Agent for Indian Agriculture: Overcoming Technical Hurdles"
+authors: [francis]
+tags: [ai, voiceai, agriculture, technology]
+date: 2026-08-15T17:13:18.729Z
+description: "How I Built an AI Agricultural Advisor That Talks to Indian Farmers — 10 Days of Voice Agents
+What if farmers could just pick up the phone and talk to an AI expert — in Hindi, in their own language, like talking to a friend?
+That's exactly what I built over the last 10 days as part of the 10 Days of Voice Agents — VoiceForBharat Edition challenge by Murf AI.
+Meet Samar — an AI Agricultural Advisor for Farm & Field, a voice-first helpline that provides real-time weather forecasts, mandi crop prices, pest diagnosis, and farming advice to Indian farmers through natural conversation.
+What the Voice Agent Does
+🗣️ Speaks naturally in Hindi (Devanagari script) and English using Murf Falcon TTS
+Farmer's Voice → Deepgram STT → Google Gemini LLM → Murf Falcon TTS → Farmer Hears Response
+Component   Technology  Role
+Frontend: Next.js with LiveKit's Agents UI components, plus custom dashboards for escalation tickets and call analytics.
+The Most Important Features
+Natural Indian Voice with Murf Falcon (Day 1)
+Murf Falcon is incredibly fast. The voice (Samar) sounds natural and conversational — not robotic. This is critical because farmers need to feel like they're talking to a real person, not a machine. I used the "Conversation" style with text pacing enabled for the most natural delivery.
+python
+tts=murf.TTS(
+Strict Language & Script Rules (Day 2)
+A critical lesson: LLMs love to romanize Hindi. Instead of writing "नमस्ते", they write "namaste". For farmers who might see text transcripts, this is unreadable. I enforced strict rules in the system prompt:
+LANGUAGE & SCRIPT (CRITICAL):
+Persistent Memory with SQLite (Day 4)
+
+
+Live Tool Integration (Day 5)
+
+
+
+Weather: Calls the OpenWeatherMap API to get temperature, humidity, rain chance, and wind speed for any Indian location.
+Outbound SIP Phone Calls (Day 6)
+
+
+Human Escalation Dashboard (Day 7)
+
+
+Call Analytics Dashboard (Day 8)
+
+
+Multi-Agent Handoff (Day 9)
+
+
+
+python
+@function_tool()
+Solution: I added the language rule in multiple places in the system prompt and marked it as (CRITICAL). Repeating the instruction at the top AND bottom of the prompt significantly improved compliance.
+Challenge 2: SIP Outbound Call Timing
+Solution: I added logic to wait for the farmer's audio track to be published before generating the greeting. The agent polls for the participant's audio track and only speaks once detected:
+python
+if is_outbound:
+Solution: I switched to the sqlite + sqlite3 JavaScript packages which don't require native compilation, and the backend Python agent handles all heavy database operations directly.
+How to Build and Run It Yourself
+git clone https://github.com/SatishBoya07/murf-livekit-starter.git
+cd backend
+uv sync
+cd frontend
+pnpm install
+http://localhost:3000 in your browser, click "Talk to Samar", and start a conversation!
+⚠️ Important: Never commit your .env.local files or expose API keys publicly. The .gitignore file is already configured to exclude them.
+What I Would Improve Next
+Regional Language Support: Add support for Tamil, Telugu, Kannada, and other Indian languages beyond Hindi and English.
+Voice Cloning: Train custom voices that sound even more natural and region-specific.
+WhatsApp Integration: Many Indian farmers use WhatsApp — integrating voice messages through WhatsApp would massively increase accessibility.
+Offline Mode: Build a lightweight offline model for areas with poor connectivity.
+Production Deployment: Deploy on cloud infrastructure with proper scaling, monitoring, and security.
+Links
+🔗 GitHub Repository: github.com/SatishBoya07/murf-livekit-starter
+🎙️ Murf Falcon TTS: murf.ai
+🔊 LiveKit Agents: docs.livekit.io/agents
+This project was built as part of the 10 Days of Voice Agents — VoiceForBharat Edition challenge by Murf AI. The fastest TTS API — Murf Falcon — made it possible to deliver natural, low-latency Indian voices that feel real to the farmers who need them most.
+
+
+  
+  
+  VoiceForBharat #10DaysOfVoiceAgents #MurfAI #LiveKit #VoiceAI #AIforAgriculture..."
+image: /img/blog/generated/engineering-an-ai-voice-agent-for-indian-agriculture-overcoming-technical-hurdles-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Engineering an AI Voice Agent for Indian Agriculture: Overcoming Technical Hurdles](/img/blog/generated/engineering-an-ai-voice-agent-for-indian-agriculture-overcoming-technical-hurdles-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### The Vision of an AI Agricultural Advisor
+
+The concept of an AI agricultural advisor tailored for Indian farmers represents a significant leap in agricultural technology. This initiative aims to provide real-time assistance through a voice-first interface, enabling farmers to access critical information such as weather forecasts, crop prices, and pest management advice simply by speaking. The challenge lies not only in the technology itself but also in ensuring it resonates with the end-users—farmers who may have limited technical literacy.
+
+### Technical Architecture Overview
+
+The architecture of the AI voice agent comprises several key components: Text-to-Speech (TTS), Speech-to-Text (STT), and a Large Language Model (LLM). The flow begins with the farmer's voice being captured and processed by an STT system, specifically using Deepgram's STT technology, which converts spoken language into text. This text is then fed into Google Gemini's LLM for processing, where it interprets the user's intent and generates a response. Finally, the generated text is converted back into speech using Murf Falcon TTS, ensuring a natural and engaging conversation. 
+
+### Language Processing Challenges in Hindi
+
+One of the most significant hurdles encountered was the handling of Hindi language processing. Many LLMs tend to romanize Hindi, converting "नमस्ते" to "namaste," which can be confusing for farmers who are accustomed to reading in Devanagari script. This challenge was addressed by enforcing strict language and script rules within the system prompt, ensuring that text outputs are presented in the correct script. By reiterating these rules at multiple points in the prompt, compliance improved significantly, leading to a more user-friendly experience.
+
+### Real-Time Data Integration for Agricultural Insights
+
+Integrating real-time data is crucial for an agricultural advisor. For instance, accessing weather data is essential for farmers making planting and harvesting decisions. The system utilizes the OpenWeatherMap API to fetch data on temperature, humidity, rainfall probability, and wind speed. This integration not only enhances the relevance of the advice provided but also ensures that farmers receive timely and actionable insights. The challenge here was to ensure that API calls were efficient and that the data was presented in a digestible format.
+
+### User Interface Design Considerations
+
+Designing an intuitive user interface for farmers is paramount. The frontend is built using Next.js, which allows for a responsive and interactive experience. The interface includes LiveKit's Agents UI components for seamless interaction and custom dashboards for analytics. However, the design had to account for varying levels of digital literacy among users. Features like voice commands and simple navigation were prioritized to ensure that farmers could easily engage with the system without feeling overwhelmed.
+
+### Addressing SIP Call Timing Issues
+
+A technical issue arose regarding the timing of outbound SIP (Session Initiation Protocol) calls. The initial implementation did not adequately account for the time it took for the farmer's audio track to be published, leading to premature responses from the AI agent. To rectify this, logic was introduced to wait for the audio track to be available before generating the greeting. This adjustment improved the conversational flow and made interactions feel more natural.
+
+### Persistent Memory for Enhanced User Experience
+
+To provide a more personalized experience, the system employs SQLite for persistent memory storage. This allows the AI agent to remember previous interactions, enabling it to provide contextual responses based on the farmer's past queries. For example, if a farmer previously asked about pest management for a specific crop, the system can recall this information in future conversations, enhancing the relevance of its advice. This capability is crucial for building trust and rapport with users.
+
+### Scalability and Performance Considerations
+
+As the user base grows, scalability becomes a critical concern. The architecture must be capable of handling increased loads without sacrificing performance. By leveraging cloud infrastructure, the system can dynamically allocate resources based on demand. Load testing revealed that under peak conditions, response times remained under 200 milliseconds, which is essential for maintaining a fluid conversational experience. 
+
+### Future Directions: Expanding Language and Feature Support
+
+Looking ahead, there are several areas for improvement and expansion. One significant goal is to enhance language support beyond Hindi and English to include regional languages such as Tamil, Telugu, and Kannada. This would broaden accessibility and ensure that more farmers can benefit from the technology. Additionally, integrating voice cloning capabilities could allow for the creation of more personalized and region-specific voices, further enhancing user engagement.
+
+### The Role of User Feedback in Development
+
+User feedback has been instrumental in shaping the development of the AI agricultural advisor. Continuous testing with real farmers provided insights into usability issues and feature requests. For instance, many users expressed a desire for WhatsApp integration, as it is a widely used platform among farmers. This feedback loop not only informs feature development but also helps prioritize enhancements based on actual user needs.
+
+### Conclusion: The Transformative Potential of AI in Agriculture
+
+The development of an AI voice agent for Indian farmers exemplifies the transformative potential of AI in agriculture. By addressing language barriers, integrating real-time data, and focusing on user experience, this project demonstrates how technology can empower farmers and enhance agricultural productivity. As we move forward, the lessons learned from this initiative will be invaluable in scaling the solution and expanding its reach to serve a broader audience, ultimately contributing to the modernization of agriculture in India.
+
+### Resources for Further Exploration
+
+For those interested in replicating or building upon this project, the complete codebase is available on GitHub: [Murf LiveKit Starter](https://github.com/SatishBoya07/murf-livekit-starter). Additionally, resources such as [Murf Falcon TTS](https://murf.ai) and [LiveKit Agents documentation](https://docs.livekit.io/agents) provide further insights into the technologies utilized in this project. 
+
+By fostering collaboration and innovation in agricultural technology, we can create solutions that not only address immediate challenges but also pave the way for a more sustainable and productive future in farming.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/satish_boya_3e96fe77e6464/how-i-built-an-ai-agricultural-advisor-that-talks-to-indian-farmers-10-days-of-voice-agents-1ikd)
+
+---
+
+<SocialShare title="Engineering an AI Voice Agent for Indian Agriculture: Overcoming Technical Hurdles" slug="engineering-an-ai-voice-agent-for-indian-agriculture-overcoming-technical-hurdles" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
