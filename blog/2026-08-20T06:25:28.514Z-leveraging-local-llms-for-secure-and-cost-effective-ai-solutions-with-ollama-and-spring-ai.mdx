@@ -1,0 +1,1112 @@
+---
+slug: leveraging-local-llms-for-secure-and-cost-effective-ai-solutions-with-ollama-and-spring-ai
+title: "Leveraging Local LLMs for Secure and Cost-Effective AI Solutions with Ollama and Spring AI"
+authors: [francis]
+tags: [ai, local-llm, ollama, spring-ai]
+date: 2026-08-20T06:25:28.514Z
+description: "In the previous parts, we connected Spring AI with cloud-based AI models.
+But there is one important question:
+What if you don't want to send your data to an external AI provider?
+What if you want to:
+Run an LLM on your own machine
+Develop AI applications without API costs
+Work without an internet connection
+Keep sensitive company data private
+Experiment with different open-source models
+Build AI features locally before moving them to production
+This is where Ollama becomes very useful.
+In this article, we will learn how to run a local LLM using Ollama and connect it with Spring AI.
+We will build a simple real-world AI Customer Support Assistant using Java, Spring Boot, Spring AI, and Ollama.
+Our application will look like this:
+                  User
+                    |
+                    | HTTP Request
+                    v
+          +---------------------+
+          |   Spring Boot API   |
+          +---------------------+
+                    |
+                    v
+             +-------------+
+             |  Spring AI  |
+             |  ChatClient |
+             +-------------+
+                    |
+                    v
+               +--------+
+               | Ollama |
+               +--------+
+                    |
+                    v
+              Local LLM
+             (Llama/Qwen)
+                    |
+                    v
+              AI Response
+                    |
+                    v
+                  User
+
+The important part is that the LLM is running locally.
+There is no need to send every prompt to OpenAI, Anthropic, or another cloud provider.
+Ollama makes it easy to run open-source LLMs locally.
+Instead of calling a remote API like:
+Spring Boot
+     |
+     v
+OpenAI API
+     |
+     v
+Cloud LLM
+
+we can run:
+Spring Boot
+     |
+     v
+Spring AI
+     |
+     v
+Ollama
+     |
+     v
+Local LLM
+
+Ollama can run models such as:
+Llama
+Qwen
+Gemma
+Mistral
+DeepSeek
+and many other compatible models
+The exact models available change over time, so always check the Ollama model library before choosing one.
+Imagine you are building an internal HR application.
+Employees may send questions such as:
+What is our maternity leave policy?
+
+or:
+What is the process for requesting annual leave?
+
+You may not want internal company information leaving your infrastructure.
+A local LLM can help:
+Employee
+   |
+   v
+Spring Boot
+   |
+   v
+RAG / Business Logic
+   |
+   v
+Ollama
+   |
+   v
+Local LLM
+
+This can provide a useful privacy boundary.
+However, remember:
+Running an LLM locally does not automatically make your application secure.
+You still need proper authentication, authorization, logging, data protection, network security, and prompt/data controls.
+First, install Ollama on your operating system.
+After installation, verify it:
+ollama --version
+
+If the command works, Ollama is installed.
+Now we need an LLM.
+For example:
+ollama pull llama3.2
+
+Then run it:
+ollama run llama3.2
+
+You can now talk to the model directly from your terminal.
+For example:
+>>> Explain Java interfaces in simple English.
+
+The model will generate a response locally.
+At a high level, the architecture is:
+             Your Application
+                    |
+                    v
+              Ollama API
+                    |
+                    v
+             Model Runtime
+                    |
+                    v
+              Local Model
+                    |
+                    v
+                Response
+
+Ollama exposes an API that applications can communicate with.
+Spring AI can communicate with this API for us.
+That means we don't have to manually build HTTP requests to the Ollama API.
+Let's create a Spring Boot application.
+You can use Spring Initializr or your preferred IDE.
+Basic project:
+local-ai-demo
+│
+├── src
+│   └── main
+│       ├── java
+│       │   └── com.example.localai
+│       │       └── LocalAiApplication.java
+│       │
+│       └── resources
+│           └── application.yml
+│
+└── pom.xml
+
+We need:
+Spring Web
+Spring AI Ollama
+Add the Spring AI Ollama starter to your pom.xml.
+<dependency>
+    <groupId>org.springframework.ai</groupId>
+    <artifactId>spring-ai-starter-model-ollama</artifactId>
+</dependency>
+
+You should use the Spring AI version compatible with your Spring Boot version.
+For production projects, avoid randomly mixing Spring Boot and Spring AI versions.
+Now configure the Ollama model.
+spring:
+  ai:
+    ollama:
+      base-url: http://localhost:11434
+      chat:
+        options:
+          model: llama3.2
+
+The important part is:
+localhost:11434
+
+This is the default Ollama API endpoint.
+Your architecture now becomes:
+Spring Boot
+     |
+     | HTTP
+     v
+localhost:11434
+     |
+     v
+Ollama
+     |
+     v
+llama3.2
+
+Spring AI provides ChatClient, which gives us a clean API for interacting with chat models.
+Create a configuration class:
+package com.example.localai.config;
+
+import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+
+@Configuration
+public class AiConfig {
+
+    @Bean
+    ChatClient chatClient(ChatClient.Builder builder) {
+        return builder.build();
+    }
+}
+
+That's it.
+Spring AI will use the configured Ollama chat model.
+Now let's create a simple controller.
+package com.example.localai.controller;
+
+import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.web.bind.annotation.*;
+
+@RestController
+@RequestMapping("/api/ai")
+public class AiController {
+
+    private final ChatClient chatClient;
+
+    public AiController(ChatClient chatClient) {
+        this.chatClient = chatClient;
+    }
+
+    @GetMapping("/ask")
+    public String ask(@RequestParam String question) {
+
+        return chatClient
+                .prompt()
+                .user(question)
+                .call()
+                .content();
+    }
+}
+
+Start your Spring Boot application.
+Then call:
+GET /api/ai/ask?question=Explain Spring Boot in simple English
+
+The request flows like this:
+HTTP Request
+     |
+     v
+AiController
+     |
+     v
+ChatClient
+     |
+     v
+Spring AI
+     |
+     v
+Ollama
+     |
+     v
+Local LLM
+     |
+     v
+AI Response
+
+And the response comes back to the client.
+Let's make our application more useful.
+Imagine we are building an AI Customer Support Assistant.
+A customer sends:
+My payment was deducted but my subscription is still inactive.
+What should I do?
+
+Instead of simply passing the question to the model, we can provide a system instruction.
+@GetMapping("/support")
+public String support(@RequestParam String question) {
+
+    return chatClient
+            .prompt()
+            .system("""
+                    You are a helpful customer support assistant.
+
+                    Answer in simple English.
+                    Do not invent company policies.
+                    If you do not know something, clearly say that
+                    you do not have enough information.
+                    """)
+            .user(question)
+            .call()
+            .content();
+}
+
+Now the model has some context about its role.
+Spring AI allows us to separate instructions from user input.
+For example:
+return chatClient
+        .prompt()
+        .system("""
+                You are an AI customer support assistant.
+                Keep answers short and easy to understand.
+                Never make up information.
+                """)
+        .user(question)
+        .call()
+        .content();
+
+Think about it like this:
+System Prompt
+     |
+     | "Who are you?"
+     | "How should you behave?"
+     |
+     v
+   LLM
+     ^
+     |
+     | "What does the user want?"
+     |
+User Prompt
+
+This separation becomes extremely useful when building production AI applications.
+Putting everything inside the controller is not a good architecture.
+Instead:
+Controller
+    |
+    v
+Service
+    |
+    v
+ChatClient
+    |
+    v
+Ollama
+
+Create:
+package com.example.localai.service;
+
+import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.stereotype.Service;
+
+@Service
+public class AiService {
+
+    private final ChatClient chatClient;
+
+    public AiService(ChatClient chatClient) {
+        this.chatClient = chatClient;
+    }
+
+    public String ask(String question) {
+
+        return chatClient
+                .prompt()
+                .user(question)
+                .call()
+                .content();
+    }
+}
+
+Then the controller becomes:
+package com.example.localai.controller;
+
+import com.example.localai.service.AiService;
+import org.springframework.web.bind.annotation.*;
+
+@RestController
+@RequestMapping("/api/ai")
+public class AiController {
+
+    private final AiService aiService;
+
+    public AiController(AiService aiService) {
+        this.aiService = aiService;
+    }
+
+    @GetMapping("/ask")
+    public String ask(@RequestParam String question) {
+        return aiService.ask(question);
+    }
+}
+
+This structure is much easier to extend later.
+Let's make the prompt more useful.
+public String support(String question) {
+
+    return chatClient
+            .prompt()
+            .system("""
+                    You are a professional customer support assistant.
+
+                    Rules:
+                    1. Use simple English.
+                    2. Be polite and helpful.
+                    3. Give step-by-step instructions when possible.
+                    4. Never invent policies.
+                    5. If information is missing, ask for clarification.
+                    """)
+            .user(question)
+            .call()
+            .content();
+}
+
+Now a question like:
+I cannot reset my password.
+
+could produce something like:
+I'm sorry you're having trouble resetting your password.
+
+Please try these steps:
+
+1. Open the login page.
+2. Click "Forgot Password".
+3. Enter your registered email.
+4. Check your email for the reset link.
+
+If you still cannot reset your password, contact support.
+
+This is already a useful AI feature.
+A basic AI call is stateless.
+For example:
+User:
+My order is late.
+
+AI:
+Please provide your order number.
+
+User:
+It is 12345.
+
+AI:
+What order are you referring to?
+
+The model doesn't automatically know the previous conversation unless we provide that context.
+In a real application, we need conversation memory.
+The architecture becomes:
+User
+ |
+ v
+Spring Boot
+ |
+ +------> Conversation Store
+ |              |
+ |              v
+ |          Previous Messages
+ |
+ v
+Spring AI
+ |
+ v
+Ollama
+ |
+ v
+LLM
+
+Depending on your application, the conversation history can be stored in databases such as PostgreSQL or Redis.
+For example:
+conversation_id
+        |
+        v
++----------------------+
+| User message         |
+| AI response          |
+| User message         |
+| AI response          |
++----------------------+
+
+Then the relevant history can be included when making the next model call.
+This is an important step from a simple AI demo toward a production AI application.
+This is where local models become especially interesting.
+Suppose your company has:
+Employee Handbook
+Product Documentation
+Customer FAQs
+Internal Policies
+Technical Documentation
+
+We can build a RAG system:
+              Documents
+                  |
+                  v
+             Text Parser
+                  |
+                  v
+               Chunking
+                  |
+                  v
+              Embeddings
+                  |
+                  v
+            Vector Database
+                  |
+                  |
+User Question ---> Retrieval
+                  |
+                  v
+             Relevant Data
+                  |
+                  v
+             Spring AI
+                  |
+                  v
+               Ollama
+                  |
+                  v
+             Local LLM
+                  |
+                  v
+               Answer
+
+Now the LLM doesn't need to know your company information beforehand.
+We retrieve the relevant information and provide it as context.
+Imagine an employee asks:
+How many days of annual leave can I take?
+
+The system can search the company's HR documents.
+Suppose the vector database retrieves:
+Employees receive 24 days of annual leave per calendar year.
+
+Spring AI can then construct a prompt:
+Answer the question using only the following context.
+
+Context:
+Employees receive 24 days of annual leave per calendar year.
+
+Question:
+How many days of annual leave can I take?
+
+The local LLM generates:
+According to the company policy, employees receive
+24 days of annual leave per calendar year.
+
+The complete architecture becomes:
+                    Employee
+                       |
+                       v
+                Spring Boot API
+                       |
+                       v
+                Spring AI RAG
+                  /        \
+                 /          \
+                v            v
+        Vector Database    Ollama
+                |             |
+                v             v
+          Relevant Data     Local LLM
+                 \            /
+                  \          /
+                   v        v
+                    Answer
+
+This is much closer to a real enterprise AI architecture.
+Imagine an organization has sensitive documents.
+With a cloud-only architecture:
+Application
+     |
+     v
+Cloud AI API
+     |
+     v
+External Model
+
+With a local architecture:
+Application
+     |
+     v
+Internal Infrastructure
+     |
+     +------> Vector DB
+     |
+     +------> Ollama
+                |
+                v
+             Local LLM
+
+This can be attractive for:
+Internal knowledge assistants
+Developer tools
+Private document analysis
+Customer support prototypes
+Offline applications
+Sensitive enterprise workloads
+But again, local inference is not a complete security strategy by itself.
+For chat applications, waiting for the entire response can feel slow.
+A better experience is:
+AI is typing...
+
+Hello
+Hello, how
+Hello, how can
+Hello, how can I
+Hello, how can I help?
+
+Spring AI supports streaming responses through Flux.
+For example:
+@GetMapping(value = "/stream", produces = "text/event-stream")
+public Flux<String> stream(@RequestParam String question) {
+
+    return chatClient
+            .prompt()
+            .user(question)
+            .stream()
+            .content();
+}
+
+The client can receive pieces of the response as they are generated.
+This is useful for:
+AI chat applications
+Coding assistants
+Customer support
+AI search
+Writing assistants
+Not every local model is good for every task.
+For example:
+Small model
+    |
+    +-- Faster
+    +-- Less memory
+    +-- Lower hardware requirements
+
+Large model
+    |
+    +-- Better reasoning potential
+    +-- More memory
+    +-- Higher latency
+
+Your choice depends on:
+RAM
+GPU/VRAM
+CPU
+Model size
+Context length
+Response speed
+Task complexity
+Accuracy requirements
+For a simple local experiment, start with a relatively small model.
+Then benchmark larger models if your hardware allows it.
+A simple comparison:
+
+
+
+Feature
+Local Ollama
+Cloud LLM
+
+
+
+
+Internet required
+Usually no
+Yes
+
+
+API cost
+No per-token cloud fee
+Usually usage-based
+
+
+Data leaves machine
+Can stay local
+Sent to provider
+
+
+Hardware required
+Yes
+Mostly no
+
+
+Scaling
+Your responsibility
+Provider handles infrastructure
+
+
+Model choice
+Open/local models
+Provider-specific models
+
+
+Setup
+More infrastructure
+Usually easier
+
+
+Latency
+Depends on hardware
+Depends on network/provider
+
+
+
+There is no universal winner.
+A practical architecture may even use both.
+For example:
+                 AI Gateway
+                     |
+            +--------+--------+
+            |                 |
+            v                 v
+        Ollama            Cloud LLM
+            |                 |
+            v                 v
+       Local Model       External Model
+
+You could use:
+Sensitive requests
+        |
+        v
+      Ollama
+
+and:
+Complex reasoning
+        |
+        v
+    Cloud Model
+
+The routing decision can be implemented inside your application.
+This gives you more flexibility.
+Running Ollama on your laptop is great for development.
+Production is different.
+You need to think about:
+Load Balancer
+      |
+      v
+Spring Boot Instances
+      |
+      v
+AI Service
+      |
+      v
+GPU-enabled inference servers
+
+Track:
+Request latency
+Model latency
+Token usage where available
+Error rate
+Timeout rate
+Model failures
+Concurrent requests
+Protect:
+Ollama endpoints
+Internal APIs
+User prompts
+Retrieved documents
+Conversation history
+Do not expose an unauthenticated Ollama service directly to the public internet.
+AI services can fail.
+Your application should not assume every model call succeeds.
+For example:
+public String ask(String question) {
+
+    try {
+        return chatClient
+                .prompt()
+                .user(question)
+                .call()
+                .content();
+
+    } catch (Exception ex) {
+        throw new RuntimeException(
+                "AI service is currently unavailable", ex);
+    }
+}
+
+In a production application, use a proper exception hierarchy and global exception handling rather than exposing raw exceptions.
+You may also add:
+Timeout
+Retry
+Circuit Breaker
+Fallback
+Rate Limiting
+Observability
+
+A more realistic architecture could look like this:
+                    Client
+                      |
+                      v
+               API Gateway
+                      |
+                      v
+              Spring Boot API
+                      |
+          +-----------+-----------+
+          |                       |
+          v                       v
+     Conversation             RAG Service
+       Service                    |
+          |                       v
+          |                 Vector Database
+          |                       |
+          +-----------+-----------+
+                      |
+                      v
+                 AI Service
+                      |
+             +--------+--------+
+             |                 |
+             v                 v
+          Ollama           Cloud LLM
+             |                 |
+             v                 v
+        Local Model      External Model
+
+This architecture allows you to evolve from a simple local experiment into a production-grade AI platform.
+Here is the complete service:
+@Service
+public class AiService {
+
+    private final ChatClient chatClient;
+
+    public AiService(ChatClient chatClient) {
+        this.chatClient = chatClient;
+    }
+
+    public String ask(String question) {
+
+        return chatClient
+                .prompt()
+                .system("""
+                        You are a helpful AI assistant.
+                        Answer in simple English.
+                        Do not invent facts.
+                        """)
+                .user(question)
+                .call()
+                .content();
+    }
+}
+
+Controller:
+@RestController
+@RequestMapping("/api/ai")
+public class AiController {
+
+    private final AiService aiService;
+
+    public AiController(AiService aiService) {
+        this.aiService = aiService;
+    }
+
+    @GetMapping("/ask")
+    public String ask(@RequestParam String question) {
+        return aiService.ask(question);
+    }
+}
+
+Configuration:
+spring:
+  ai:
+    ollama:
+      base-url: http://localhost:11434
+      chat:
+        options:
+          model: llama3.2
+
+Architecture:
+HTTP Client
+    |
+    v
+AiController
+    |
+    v
+AiService
+    |
+    v
+ChatClient
+    |
+    v
+Spring AI
+    |
+    v
+Ollama
+    |
+    v
+Local LLM
+
+That's enough to build your first local AI backend.
+Start Ollama:
+ollama run llama3.2
+
+Then start Spring Boot:
+./mvnw spring-boot:run
+
+On Windows:
+mvnw.cmd spring-boot:run
+
+Then call:
+GET http://localhost:8080/api/ai/ask?question=Explain dependency injection in Spring Boot
+
+You should receive an answer generated by your local model.
+In this article, we built a local AI backend using:
+Java
+   +
+Spring Boot
+   +
+Spring AI
+   +
+Ollama
+   +
+Local LLM
+
+We learned:
+What Ollama is
+How to install and run a local model
+How Spring AI connects to Ollama
+How to use ChatClient
+
+How to create an AI REST API
+How to use system and user prompts
+How streaming works
+How local LLMs can be used with RAG
+How to think about production architecture
+When local and cloud models can be combined
+Running an LLM locally changes the way we think about AI applications.
+You don't always need to start with an expensive cloud API.
+You can start on your own laptop:
+Ollama
+   |
+Local LLM
+   |
+Spring AI
+   |
+Spring Boot
+   |
+REST API
+
+Then gradually evolve it:
+Local LLM
+    ↓
+RAG
+    ↓
+Vector Database
+    ↓
+Conversation Memory
+    ↓
+Tool Calling
+    ↓
+AI Agents
+    ↓
+Observability
+    ↓
+Production AI Platform
+
+And this is where Spring AI becomes interesting for Java developers.
+You can use the Spring ecosystem you already know and add modern AI capabilities without completely changing how you build backend applications.
+In the next part, we can go one step further and build a RAG application with Spring AI, embeddings, PostgreSQL + pgvector, and a local Ollama model.
+That is where our simple chatbot starts becoming a real AI application...."
+image: /img/blog/generated/leveraging-local-llms-for-secure-and-cost-effective-ai-solutions-with-ollama-and-spring-ai-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Leveraging Local LLMs for Secure and Cost-Effective AI Solutions with Ollama and Spring AI](/img/blog/generated/leveraging-local-llms-for-secure-and-cost-effective-ai-solutions-with-ollama-and-spring-ai-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### The Case for Local AI Models
+
+As organizations increasingly prioritize data privacy and cost management, local Large Language Models (LLMs) have emerged as a compelling alternative to cloud-based AI services. Running LLMs locally allows companies to maintain tighter control over sensitive data, circumventing the recurring costs associated with API usage. This shift not only enhances security but also enables organizations to experiment with various open-source models without the constraints of internet connectivity or cloud service limitations.
+
+### Setting Up the Development Environment
+
+To build an AI customer support assistant using local LLMs, the first step is to establish a robust development environment. This involves installing Ollama, a tool designed to facilitate the deployment of open-source LLMs on local machines. The installation process is straightforward and can be verified by executing the command:
+
+```bash
+ollama --version
+```
+
+Once confirmed, developers can pull a model, such as `llama3.2`, using the following command:
+
+```bash
+ollama pull llama3.2
+```
+
+After pulling the model, it can be started with:
+
+```bash
+ollama run llama3.2
+```
+
+This setup allows for direct interaction with the model through the terminal, laying the foundational groundwork for integration with a Spring Boot application.
+
+### Building the Spring Boot Application
+
+With the local model operational, the next phase is to create a Spring Boot application that will serve as the interface for user interactions. Utilizing Spring Initializr, developers can create a basic project structure with essential dependencies, including `Spring Web` and `Spring AI Ollama`. The following dependency must be added to the `pom.xml` file to enable seamless integration:
+
+```xml
+<dependency>
+    <groupId>org.springframework.ai</groupId>
+    <artifactId>spring-ai-starter-model-ollama</artifactId>
+</dependency>
+```
+
+Proper configuration is crucial. The Ollama model must be specified in the `application.yml` file to ensure effective communication between the Spring application and the local model:
+
+```yaml
+spring:
+  ai:
+    ollama:
+      base-url: http://localhost:11434
+      chat:
+        options:
+          model: llama3.2
+```
+
+### Integrating Ollama with Spring AI
+
+To facilitate local LLM inference, the Spring Boot application must integrate Ollama with Spring AI. This can be achieved by configuring a `ChatClient` bean, which abstracts the interaction with the local model. This abstraction simplifies the communication process, allowing developers to focus on feature development rather than managing low-level HTTP requests. The configuration is as follows:
+
+```java
+@Bean
+ChatClient chatClient(ChatClient.Builder builder) {
+    return builder.build();
+}
+```
+
+### Designing the Customer Support Assistant
+
+Creating a functional AI customer support assistant requires defining system prompts that guide the LLM's responses. By specifying a system instruction alongside user queries, the model can generate contextually relevant answers. For instance, a controller method can be implemented to handle support queries, providing clear instructions for the LLM to follow:
+
+```java
+@GetMapping("/support")
+public String support(@RequestParam String question) {
+    return chatClient
+            .prompt()
+            .system("You are a helpful customer support assistant. Answer in simple English.")
+            .user(question)
+            .call()
+            .content();
+}
+```
+
+This setup ensures that the LLM is contextualized in its role, enhancing the quality of its responses.
+
+### Implementing Conversation Memory
+
+A critical feature of an effective customer support assistant is the ability to maintain conversation context. This can be accomplished by implementing a conversation memory system that stores previous interactions. Utilizing a database such as PostgreSQL or Redis, the application can retrieve relevant historical messages and include them in subsequent prompts to the LLM. This capability enables more coherent and context-aware interactions, significantly improving user experience.
+
+### Exploring Retrieval-Augmented Generation (RAG)
+
+Integrating a Retrieval-Augmented Generation (RAG) approach can further enhance the assistant's functionality. By combining LLMs with a vector database, the system can retrieve relevant documents in response to user queries. This method allows the assistant to provide accurate answers based on internal company documents, such as HR policies or product documentation, without requiring the model to have prior knowledge of this information. For example:
+
+```plaintext
+User Question: How many days of annual leave can I take?
+Retrieved Context: Employees receive 24 days of annual leave per calendar year.
+```
+
+This architecture not only improves the accuracy of responses but also leverages existing company knowledge effectively.
+
+### Security Considerations for Local AI Applications
+
+While the advantages of running LLMs locally are significant, it is essential to address security considerations. Developers must implement robust authentication, authorization, and logging mechanisms to protect sensitive data. Securing the Ollama endpoints and internal APIs is crucial to prevent unauthorized access. A layered security approach, including network security measures and data protection protocols, ensures that even with local inference, data remains safeguarded against potential threats.
+
+### Best Practices for Deploying Local AI Applications
+
+Deploying local AI applications requires careful planning and execution. Organizations should consider the following best practices:
+
+1. **Authentication and Authorization**: Implement strict access controls to ensure that only authorized users can interact with the AI system.
+
+2. **Logging and Monitoring**: Establish comprehensive logging mechanisms to track interactions and monitor for unusual activity, enabling quick responses to potential breaches.
+
+3. **Data Protection**: Utilize encryption for data at rest and in transit to safeguard sensitive information.
+
+4. **Regular Security Audits**: Conduct periodic security assessments to identify and mitigate vulnerabilities in the system.
+
+5. **Failover and Recovery Plans**: Prepare for potential system failures by implementing failover strategies and data recovery plans.
+
+### Evaluating Model Performance and Scalability
+
+When deploying local LLMs, evaluating their performance and scalability is crucial. Factors such as RAM, GPU capabilities, and model size significantly impact inference speed and responsiveness. Developers should benchmark various models to identify the best fit for their hardware and application requirements. Understanding the trade-offs between smaller, faster models and larger, more capable ones is essential for optimizing application performance.
+
+### Conclusion: The Future of Local AI Applications
+
+The ability to run LLMs locally with tools like Ollama and Spring AI represents a significant advancement in the development of AI applications. By prioritizing data privacy and reducing dependency on cloud services, organizations can build robust customer support solutions that maintain control over sensitive information. As technology evolves, the integration of local AI models into enterprise applications will likely become a standard practice, paving the way for more secure and efficient AI-driven solutions. 
+
+By leveraging local models, developers can create AI applications that are not only cost-effective but also align with the growing demand for data privacy and security in today's digital landscape.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/ayshriv/run-local-llms-with-ollama-and-spring-ai-36l3)
+
+---
+
+<SocialShare title="Leveraging Local LLMs for Secure and Cost-Effective AI Solutions with Ollama and Spring AI" slug="leveraging-local-llms-for-secure-and-cost-effective-ai-solutions-with-ollama-and-spring-ai" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
