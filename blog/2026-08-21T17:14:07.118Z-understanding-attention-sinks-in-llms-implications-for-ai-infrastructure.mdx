@@ -1,0 +1,533 @@
+---
+slug: understanding-attention-sinks-in-llms-implications-for-ai-infrastructure
+title: "Understanding Attention Sinks in LLMs: Implications for AI Infrastructure"
+authors: [francis]
+tags: [ai, llm, inference, attention]
+date: 2026-08-21T17:14:07.118Z
+description: "Hello, I'm Shrijith Venkatramana. I'm building git-lrc, an AI code reviewer that runs on every commit. Star Us to help devs discover the project. Do give it a try and share your feedback for improving the product.
+Give a Transformer a long stream of text and inspect its attention patterns. You may find that some of the earliest tokens receive a surprisingly large fraction of attention, even when they have little semantic relevance to the token being generated.
+Why?
+The answer turns out to be connected to something deceptively mundane: softmax has to put probability somewhere.
+This odd behavior became operationally important in 2023, when researchers at MIT, Meta AI, CMU, and NVIDIA discovered that preserving a handful of these seemingly useless tokens could make a sliding-window LLM remain stable for millions of tokens.
+That work, Efficient Streaming Language Models with Attention Sinks, became known as StreamingLLM. The paper reported stable language modeling out to 4 million tokens and up to a 22.2x speedup over a recomputation-based baseline.
+For developers building inference systems, attention sinks are a beautiful example of an LLM implementation detail becoming an algorithmic primitive.
+Let's work from intuition all the way down to the math and the GPU economics.
+Recall the basic attention equation from the original Transformer paper:
+Attention(Q, K, V) = softmax(Q K^T / sqrt(d_k)) V
+
+For one query token, imagine that we have five previous tokens:
+Token:       A      B      C      D      E
+score:      2.1    1.7   -0.4    0.2    1.1
+
+Softmax converts these arbitrary scores into probabilities:
+attention:
+A = 0.40
+B = 0.27
+C = 0.03
+D = 0.07
+E = 0.23
+
+The probabilities must add up to exactly 1.
+Now imagine a query for which none of the previous tokens is particularly useful.
+You might intuitively expect:
+A = 0
+B = 0
+C = 0
+D = 0
+E = 0
+
+But softmax cannot do this.
+It has to distribute the probability mass somewhere.
+A token that repeatedly becomes the recipient of this otherwise-unwanted attention is called an attention sink.
+The important observation from Xiao et al. was that the first few tokens frequently become these sinks. They can receive substantial attention even when their semantic content is irrelevant to the current prediction.
+Think of it as a drain in a plumbing system.
+The drain doesn't mean anything about the water. It simply gives the water somewhere to go.
+This is where autoregressive training creates an interesting asymmetry.
+Consider:
+"The cat sat on the mat because it was tired."
+
+When predicting later tokens, the first token is visible to almost every subsequent position.
+The first token therefore has a peculiar property:
+token 1 -> visible to token 2
+token 1 -> visible to token 3
+token 1 -> visible to token 4
+...
+token 1 -> visible to token N
+
+The last token doesn't have this property.
+During causal language-model training, the first token is consequently available as a potential destination for attention across essentially the entire sequence.
+Over many training examples, the model can develop a useful convention:
+"I don't have a particularly useful thing to attend to?
+Fine. Put some attention on this globally available token."
+
+This is an emergent computational convention.
+And there is an important subtlety here:
+The attention sink is not necessarily carrying useful information through its Value vector.
+The interesting quantity is often its attention score.
+Suppose:
+attention scores -> [large, small, small, small, small]
+
+The first token absorbs probability mass.
+Its Value can then contribute relatively little useful semantic information.
+Recent empirical work has investigated this interpretation and found evidence that attention sinks behave partly like extra key biases: they can store attention score mass without necessarily contributing corresponding semantic information through the Value computation.
+That is a much stranger phenomenon than "the model remembers the first word."
+It is closer to:
+The model has learned a place to park unused attention.
+
+To understand why this matters, it helps to remember where the machinery came from.
+In 2017, Ashish Vaswani and colleagues at Google introduced the Transformer in Attention Is All You Need. The central idea was radical for its time: dispense with recurrence and convolutions and build sequence modeling primarily around attention.
+The Transformer's attention mechanism gave us an extremely powerful abstraction:
+query -> "What am I looking for?"
+
+key   -> "What information do I represent?"
+
+value -> "What information should I provide?"
+
+The query-key interaction determines how much attention a token receives.
+Then the weighted Values are aggregated.
+The catch is the normalization:
+softmax(scores)
+
+Softmax isn't an optional implementation detail. It fundamentally couples all the attention probabilities.
+Suppose:
+scores = [10, 0, 0, 0]
+
+The first token dominates.
+But suppose:
+scores = [0, 0, 0, 0]
+
+You don't get:
+[0, 0, 0, 0]
+
+You get approximately:
+[0.25, 0.25, 0.25, 0.25]
+
+The model must allocate attention somewhere.
+That seemingly innocuous property becomes extremely important when we start deleting tokens from the KV cache.
+During autoregressive generation, recomputing attention over the entire conversation for every generated token would be absurdly expensive.
+So inference engines cache the Keys and Values.
+For a simplified Transformer:
+new token
+    |
+    v
+compute Q, K, V
+    |
+    +----> K/V added to cache
+    |
+    v
+attention over cached K/V
+    |
+    v
+next token
+
+The cache grows with every token.
+A useful back-of-the-envelope calculation is:
+KV bytes/token
+    = 2 * layers * KV_heads * head_dim * bytes_per_element
+
+The 2 is because we store both K and V.
+For example, consider a hypothetical model with:
+layers       = 32
+KV heads    = 32
+head_dim    = 128
+precision   = FP16 = 2 bytes
+
+Then:
+KV bytes/token
+= 2 * 32 * 32 * 128 * 2
+= 524,288 bytes
+
+≈ 0.5 MB/token
+
+So:
+4,000 tokens    ≈ 2 GB
+32,000 tokens   ≈ 16 GB
+100,000 tokens  ≈ 50 GB
+
+These numbers are per sequence for this particular architecture.
+This is why modern inference systems care enormously about:
+MQA/GQA
+KV-cache quantization
+paged KV caches
+prefix caching
+speculative decoding
+sliding-window attention
+context compression
+The KV cache is frequently a memory-capacity problem before it becomes a FLOP problem.
+And this is exactly where attention sinks become useful.
+Suppose you want a chatbot that can run indefinitely.
+You don't actually want:
+KV cache:
+[token 1 ... token 10,000,000]
+
+You might instead say:
+KV cache:
+[last 4,096 tokens]
+
+This is sliding-window attention.
+Operationally, it is beautiful.
+Memory becomes approximately constant:
+O(context_length)
+        |
+        v
+O(window_size)
+
+If the window is 4,096 tokens, the cache never grows beyond roughly 4,096 tokens.
+But there is a problem.
+Suppose the model was trained with:
+[token 1 ... token 4096]
+
+and you start evicting old tokens.
+Eventually:
+[token 1] -> evicted
+[token 2] -> evicted
+...
+[token 4096] -> still present
+
+The model suddenly sees a different attention environment.
+And empirically, the model can collapse.
+The surprising discovery from Xiao et al. was that keeping just a few initial tokens alongside the sliding window largely restores the model's behavior.
+So instead of:
+[recent 4096 tokens]
+
+you maintain:
+[first 4 tokens] + [recent 4092 tokens]
+
+The first four tokens are effectively anchors.
+That is StreamingLLM.
+This is the part that initially sounds almost ridiculous.
+Imagine processing:
+1
+2
+3
+4
+5
+...
+4,000,000
+
+You maintain:
+S = [1, 2, 3, 4]
+
+W = [3,995,908 ... 4,000,000]
+
+You discard almost everything.
+Yet the model remains stable because the attention computation still has access to its familiar sinks.
+The memory requirement is therefore approximately:
+KV_memory ~= (sink_tokens + window_tokens) * KV_bytes/token
+
+With:
+sink_tokens = 4
+window      = 4092
+
+you have roughly the same memory footprint as a 4K context window regardless of whether the stream has processed:
+10K tokens
+100K tokens
+1M tokens
+4M tokens
+
+The model is not storing 4 million tokens.
+It is processing a stream while retaining a tiny attention state plus the recent working set.
+The result reported by Xiao et al. was striking: Llama-2, MPT, Falcon, and Pythia models could maintain stable language modeling behavior out to 4 million tokens, while StreamingLLM achieved up to a 22.2x speedup over a baseline requiring recomputation.
+There is a critical caveat.
+This does not mean the model has 4-million-token memory.
+StreamingLLM stabilizes next-token prediction.
+If you tell the model something important at token 100 and ask about it at token 3,000,000, the attention-sink mechanism does not magically preserve that information.
+It solves a different problem:
+How do I keep the inference dynamics stable
+while aggressively evicting old KV entries?
+
+That distinction matters enormously in production.
+Developers often develop an intuitive model of attention:
+high attention
+    =
+important information
+
+That interpretation is frequently useful.
+It is also incomplete.
+An attention distribution can have at least two roles:
+1. Information retrieval
+
+   "Find the token containing the information I need."
+
+2. Computational normalization / routing
+
+   "I need the attention distribution to have somewhere
+    to put probability mass."
+
+Attention sinks expose the second role.
+This also explains why simply inspecting attention maps can be misleading.
+Suppose you see:
+Token #1: 70% attention
+Token #200: 2%
+Token #201: 1%
+...
+
+You shouldn't immediately conclude:
+"The model considers token #1 extremely important."
+It might.
+Or token #1 might simply be serving as a learned computational sink.
+That distinction becomes particularly relevant for systems engineers because it changes how we think about cache eviction.
+A naive cache policy says:
+Keep the tokens that are semantically important.
+
+But the model may need:
+Keep the tokens that are computationally important.
+
+Those are different optimization problems.
+And the latter can sometimes be surprisingly cheap.
+Attention sinks are interesting because they turn a research curiosity into an infrastructure primitive.
+Imagine a production voice assistant.
+A user talks continuously:
+minute 1
+minute 2
+minute 3
+...
+minute 60
+...
+minute 600
+
+Keeping every KV entry indefinitely is expensive.
+Suppose your architecture costs roughly:
+0.25 MB/token
+
+Then a million-token conversation would require roughly:
+250 GB
+
+of KV state for one sequence.
+That is obviously incompatible with ordinary GPU inference.
+A bounded cache changes the economics:
+unbounded context
+    -> memory grows with conversation
+
+sliding window
+    -> memory stays bounded
+
+sliding window + sinks
+    -> bounded memory + stable attention behavior
+
+And the operational consequences are substantial:
+A smaller KV cache allows more concurrent sequences.
+If one request needs 8 GB of KV memory and your GPU has 80 GB available for KV state, you might support roughly:
+80 / 8 = 10
+
+such sequences.
+Cut that requirement to 2 GB and the same memory budget theoretically supports:
+80 / 2 = 40
+
+before accounting for model weights, activations, fragmentation, runtime overhead, and batching.
+That is a 4x concurrency difference.
+Recomputing discarded history can become increasingly expensive.
+StreamingLLM's reported 22.2x speedup against a recomputation-heavy baseline gives a sense of how important this can become for genuinely long streams.
+The economics of LLM serving are dominated by expensive accelerators.
+If an algorithm lets you:
+use less HBM
++
+serve more sequences
++
+avoid recomputation
+
+then a seemingly tiny architectural observation can translate into meaningful infrastructure savings.
+This is one of the recurring patterns in LLM research:
+small mathematical quirk
+        |
+        v
+inference algorithm
+        |
+        v
+memory behavior
+        |
+        v
+GPU utilization
+        |
+        v
+cost per generated token
+
+Attention sinks are a particularly clean example.
+If you're implementing or debugging an LLM inference system, I'd keep three layers in your head.
+"What previous information do I need?"
+
+This is the intuitive interpretation.
+"How does softmax distribute probability mass?"
+
+This is where attention sinks appear.
+"What K/V states must physically remain in GPU memory?"
+
+This is where StreamingLLM becomes useful.
+The crucial connection is:
+softmax behavior
+      |
+      v
+attention sinks
+      |
+      v
+KV-cache eviction policy
+      |
+      v
+memory footprint
+      |
+      v
+serving economics
+
+A phenomenon that initially looks like a weird visualization artifact becomes an answer to a very practical systems question:
+Which old tokens can I safely throw away?
+The surprising answer is:
+Almost all of them.
+
+Except perhaps the few that the model has learned to use
+as computational sinks.
+
+That is a much richer way to think about LLM inference than simply treating the context window as a giant text buffer.
+Attention sinks are a good reminder that neural networks develop internal computational conventions that don't necessarily line up with our semantic intuitions.
+The first token can become important precisely because it is not important in the usual sense.
+It becomes a place where the model can park attention.
+And once researchers recognized that behavior, they could exploit it to build an inference system with a constant-size KV cache that remained stable over streams millions of tokens long.
+For LLM engineers, that suggests a broader principle:
+When you find a strange behavior in an LLM, don't immediately treat it as noise. It may be an undocumented interface between the model's mathematics and the hardware running it.
+That interface is where a lot of the interesting engineering is happening.
+Have you encountered another LLM behavior that initially looked like a quirk but turned out to have major inference or systems implications?
+*AI agents write code fast. They also silently remove logic, change behavior, and introduce bugs -- without telling you. You often find out in production.
+git-lrc fixes this. It hooks into git commit and reviews every diff before it lands. 60-second setup. Completely free.*
+Any feedback or contributors are welcome! It's online, source-available, and ready for anyone to use.
+ / 
+        git-lrc
+      
+    
+
+| 🇩🇰 Dansk | 🇪🇸 Español | 🇮🇷 Farsi | 🇫🇮 Suomi | 🇯🇵 日本語 | 🇳🇴 Norsk | 🇵🇹 Português | 🇷🇺 Русский | 🇦🇱 Shqip | 🇨🇳 中文 | 🇮🇳 हिन्दी |
+
+
+
+git-lrc
+Free, Micro AI Code Reviews That Run on Commit
+
+ 
+      
+
+
+
+
+GenAI today is a race car without brakes. It accelerates fast -- you describe something, and large blocks of code appear instantly. But AI agents silently break things: they remove logic, relax constraints, introduce expensive cloud calls, leak credentials, and change behavior -- without telling you. You often find out in production.
+git-lrc is your braking system. It hooks into git commit and runs an AI review on every diff before it lands. 60-second setup. Completely free.
+In short, git-lrc helps Prevent Outages, Breaches, and Technical Debt Before They Happen
+At a glance: 10 risk categories · 100+ failure patterns tracked · every commit…
+
+  
+View on GitHub..."
+image: /img/blog/generated/understanding-attention-sinks-in-llms-implications-for-ai-infrastructure-e94d4dd3.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Understanding Attention Sinks in LLMs: Implications for AI Infrastructure](/img/blog/generated/understanding-attention-sinks-in-llms-implications-for-ai-infrastructure-e94d4dd3.svg)
+
+*Photo credit: [Shrijith Venkatramana](https://dev.to/shrsv/attention-sinks-in-llms-why-the-first-token-can-become-a-black-hole-5hj0)*
+
+
+### The Role of Attention Mechanisms in LLMs
+
+Attention mechanisms are a cornerstone of large language models (LLMs), enabling them to dynamically weigh the relevance of input tokens during the generation of predictions. The attention equation, as articulated in the seminal paper "Attention Is All You Need" by Vaswani et al. (2017), is foundational to understanding how LLMs operate. The equation can be expressed as:
+
+$$
+\text{Attention}(Q, K, V) = \text{softmax}\left(\frac{QK^T}{\sqrt{d_k}}\right)V
+$$
+
+In this equation, \(Q\), \(K\), and \(V\) signify the query, key, and value matrices, respectively, while \(d_k\) is the dimensionality of the keys. The softmax function normalizes the computed attention scores, ensuring they sum to one. This normalization is vital for the model's ability to allocate attention appropriately across the sequence of tokens.
+
+### Defining Attention Sinks and Their Importance
+
+Attention sinks are defined as tokens that receive a disproportionate amount of attention, especially in contexts where the model lacks relevant alternatives. This phenomenon is particularly pronounced for the first token in a sequence, which often acts as a computational sink. When the model is uncertain about where to direct its attention, it tends to default to the first token, leading to the emergence of attention sinks. This behavior is intrinsically linked to the softmax function, which mandates that probability mass be allocated to some tokens, preventing the model from assigning zero attention across the board.
+
+### The Mechanics of Softmax and Attention Distribution
+
+The softmax function is crucial for shaping the attention distribution. For instance, consider a scenario with five tokens where the attention scores are as follows:
+
+- Token A: 2.1
+- Token B: 1.7
+- Token C: -0.4
+- Token D: 0.2
+- Token E: 1.1
+
+Applying softmax to these scores results in the following attention probabilities:
+
+- Attention A: 0.40
+- Attention B: 0.27
+- Attention C: 0.03
+- Attention D: 0.07
+- Attention E: 0.23
+
+In cases where previous tokens lack semantic relevance, the softmax function still allocates attention, often favoring the first token. This operational characteristic underscores the significance of attention sinks in LLMs and their implications for inference systems.
+
+### Empirical Insights from Recent Research
+
+Recent empirical studies, including work by researchers from MIT, Meta AI, CMU, and NVIDIA, have illuminated the operational importance of attention sinks. Their research, published in "Efficient Streaming Language Models with Attention Sinks," demonstrated that retaining a small number of initial tokens alongside a sliding window can stabilize long-term inference. For example, they found that when the model retained the first three tokens while processing sequences of up to 4 million tokens, it could achieve a 22.2x speedup over traditional recomputation-based baselines. This approach allows models to process sequences containing millions of tokens without performance degradation, highlighting the operational significance of attention sinks.
+
+### Memory Management Challenges in Inference Systems
+
+The presence of attention sinks significantly influences memory management in inference systems. Traditional caching strategies for keys and values (K/V) in LLMs can lead to substantial memory overhead, particularly as sequence lengths increase. For instance, a model with 32 layers, 32 heads, and a head dimension of 128 can require approximately 0.5 MB of memory per token. This results in considerable memory demands for long sequences, necessitating more efficient caching methodologies. 
+
+In practical applications, such as real-time language translation, the memory overhead can become a bottleneck, particularly when processing lengthy input sequences. Efficient memory management strategies that leverage attention sinks can mitigate these challenges, allowing for smoother and more responsive applications.
+
+### Implementing Sliding-Window Attention with Attention Sinks
+
+To address memory constraints effectively, developers can implement sliding-window attention while retaining a limited number of attention sinks. This strategy allows the model to maintain a constant memory footprint while benefiting from the stability provided by attention sinks. For instance, if a model retains the first four tokens alongside a recent window of 4092 tokens, the memory requirement remains manageable, irrespective of the total number of tokens processed. This approach effectively balances computational efficiency with memory management.
+
+In practice, this method has been shown to enhance performance in various applications, including chatbots and virtual assistants, where rapid response times are essential. By optimizing memory usage, engineers can ensure that their systems remain responsive even under heavy loads.
+
+### Case Study: StreamingLLM Architecture
+
+The StreamingLLM architecture serves as a prime example of the successful application of attention sinks in real-world scenarios. By maintaining a fixed number of initial tokens alongside a sliding window of recent tokens, StreamingLLM achieves stable inference dynamics over extremely long sequences. It has demonstrated the capability to process up to 4 million tokens while maintaining performance, a feat that traditional models struggle to achieve without incurring significant memory overhead. 
+
+The architecture's ability to leverage attention sinks effectively allows it to minimize latency and maximize throughput, making it an attractive solution for applications requiring high-performance language processing, such as automated content generation and large-scale document analysis.
+
+### Rethinking Inference Dynamics in LLMs
+
+Insights gained from the study of attention sinks necessitate a reevaluation of how LLM inference dynamics are approached. Engineers must consider not only the semantic relevance of tokens but also their computational roles within the model. This paradigm shift allows for more effective cache eviction policies, prioritizing the retention of tokens essential for computational stability rather than solely those deemed semantically significant.
+
+By integrating this understanding into their design processes, engineers can develop more robust systems that maintain performance across a range of tasks and applications.
+
+### Conclusion: Future Directions in LLM Research
+
+The exploration of attention sinks in LLMs opens new avenues for research and optimization in AI infrastructure. As developers continue to refine inference systems, recognizing the dual roles of attention distributions—both for information retrieval and computational normalization—will be crucial. Future research should aim to uncover additional emergent behaviors within LLMs that can inform system design and enhance performance, particularly in resource-constrained environments.
+
+### Practical Considerations for AI Engineers
+
+For AI engineers and systems architects, understanding the implications of attention sinks is vital for optimizing LLM performance. By adopting strategies that leverage the unique properties of attention sinks, engineers can design more efficient inference systems that reduce memory usage and improve throughput. This knowledge will be increasingly important as the demand for scalable AI solutions continues to grow across various applications, from chatbots to real-time language translation systems.
+
+### The Broader Implications of Attention Mechanisms
+
+Attention mechanisms, particularly the concept of attention sinks, illustrate how LLMs can develop internal conventions that may not align with our semantic intuitions. The first token's role as an attention sink highlights the importance of understanding these dynamics in the context of inference systems. By recognizing the computational significance of attention sinks, engineers can develop more robust and efficient architectures that cater to the evolving demands of AI applications. This understanding will be crucial for advancing the capabilities of LLMs and their integration into diverse technological ecosystems.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/shrsv/attention-sinks-in-llms-why-the-first-token-can-become-a-black-hole-5hj0)
+
+---
+
+<SocialShare title="Understanding Attention Sinks in LLMs: Implications for AI Infrastructure" slug="understanding-attention-sinks-in-llms-implications-for-ai-infrastructure" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
