@@ -1,0 +1,155 @@
+---
+slug: building-a-secure-and-flexible-llm-control-plane-with-agnos-proxy
+title: "Building a Secure and Flexible LLM Control Plane with Agnos Proxy"
+authors: [francis]
+tags: [ai, llm, security, infrastructure]
+date: 2026-08-22T17:14:51.282Z
+description: "I've been building LLM applications for a while, and I kept hitting the same problem: every gateway I used was a bet.
+Bet on LiteLLM? Great reach, but CVEs hit their API-key-verification path and admin endpoints in 2026.
+Bet on Bifrost? Fast, but doesn't speak every provider.
+Bet on Portkey? Managed, but do I want my keys leaving my network?
+The problem is that most gateways fuse two very different jobs:
+Control plane - identity, guardrails, budgets, key vault, cost + audit
+Data plane - translating the OpenAI request shape into each provider's shape
+When they're fused, a vulnerability in the translation code can reach your entire key vault. That's what happened with LiteLLM's 2026 CVEs - pre-auth SQL injection, admin file-read, RCE chain CVSS 9.9.
+Agnos Proxy takes a different approach:
+Control plane + vault stay in your own infrastructure
+Translation engines are disposable, stateless adapters behind a hard boundary
+One provider key injected per request in-flight - engines store nothing
+Swap or combine engines - LiteLLM, Bifrost, Portkey, or built-in
+Per-provider routing - run several engines at once
+Security: A breached engine reaches at most one in-flight key, never the vault.
+Flexibility: Use Bifrost for your high-volume OpenAI traffic, LiteLLM for niche enterprise models only it speaks. Same endpoint, same keys.
+Future-proof: New gateway launches? Contain it. Prices change? Swap providers. Never rewrite your app.
+FastAPI control plane
+React dashboard (served at /app)
+Encrypted Fernet vault
+CEL guardrails + PII/secret detection
+Hierarchical budgets + rate-limits
+OpenTelemetry + Prometheus
+Helm chart, Docker, PyPI CLI
+Anti-coupling test enforces engine boundaries
+ / 
+        agnos-proxy-oss
+      
+    
+
+Agnos Proxy
+
+
+
+
+
+
+
+
+The gateway-agnostic control plane for LLM routing, cost-tracking and observability.
+Agnos Proxy is an OpenAI-compatible governance proxy that sits between your apps and the model
+providers. Point any app at it (change one base_url, send one workspace key) and it inherits
+centralized credential isolation, guardrails, budgets, rate-limits, routing/fallback, cost
+attribution and full observability - for any provider, behind any translation engine.
+Own the control plane. Swap the translator.
+The governance boundary and the encrypted key vault stay in your own infrastructure. The
+provider-translation layer is a swappable, stateless commodity in a fixed slot: plug in
+Bifrost, LiteLLM, Portkey, the built-in Direct engine, or any OpenAI-compatible
+gateway - and swap them per provider, live, with one config change. We contain the engines
+we do not compete with them.
+That is the point: the gateway market never stops moving. Prices change, a provider…
+
+  
+View on GitHub
+agnos-llm-gateway.site
+          
+
+        
+      
+curl -fsSL https://raw.githubusercontent.com/siva010928/agnos-proxy-oss/main/install.sh | sh
+pipx install agnos-proxy-llm-gateway && agnos init..."
+image: /img/blog/generated/building-a-secure-and-flexible-llm-control-plane-with-agnos-proxy-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Building a Secure and Flexible LLM Control Plane with Agnos Proxy](/img/blog/generated/building-a-secure-and-flexible-llm-control-plane-with-agnos-proxy-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### The Complexity of LLM Gateway Management
+
+Large Language Model (LLM) applications are at the forefront of AI innovation, but their success hinges on effective gateway management. These gateways facilitate communication between applications and various model providers, handling both control and data operations. The critical challenge arises from the dual responsibilities of these gateways: the control plane manages identity verification, access control, and auditing, while the data plane is responsible for processing and translating requests. This intertwining creates a vulnerability landscape where a flaw in either plane can lead to significant security breaches and operational failures.
+
+### Real-World Vulnerabilities in LLM Gateways
+
+The vulnerabilities in existing LLM gateways are not hypothetical; they have been documented in real-world incidents. A notable example is the LiteLLM gateway, which suffered from severe vulnerabilities in 2026. These included pre-authentication SQL injection and remote code execution (RCE) vulnerabilities that compromised its API key verification and administrative endpoints. Such incidents highlight the risks of tightly coupled control and data planes, where a single vulnerability can cascade into a systemic failure, exposing sensitive information and leading to unauthorized access. The repercussions of these vulnerabilities can be dire, resulting in financial losses and reputational damage.
+
+### Decoupling Control and Data Planes: A Paradigm Shift
+
+Agnos Proxy offers a transformative approach by decoupling the control plane from the data plane. This architectural separation enhances both security and flexibility. The control plane, which encompasses identity management and key vaults, is securely housed within the organization's infrastructure, while the data plane consists of stateless translation engines that operate behind a strict governance boundary. This design ensures that even if a translation engine is compromised, the attacker can access only a single in-flight key rather than the entire key vault, significantly reducing the risk of widespread data exposure and enhancing overall system integrity.
+
+### Agnos Proxy Architecture: Core Principles and Features
+
+Agnos Proxy is built on several core principles that prioritize security, flexibility, and centralized control. The control plane is implemented using FastAPI, enabling efficient request handling and management through a React-based dashboard. Sensitive information is secured using an encrypted Fernet vault, while compliance and security are enforced through Common Expression Language (CEL) guardrails that detect personally identifiable information (PII) and other sensitive data. This layered security model is critical for maintaining the integrity of LLM applications, ensuring that they can operate securely in a complex threat landscape.
+
+### Comprehensive Security Measures in Agnos Proxy
+
+Security is paramount in LLM applications, and Agnos Proxy employs a multi-faceted approach to ensure robust protection. By isolating the control plane from the data plane, the architecture prevents vulnerabilities in translation engines from compromising sensitive control operations. Additionally, hierarchical budgets and rate limits are implemented to manage costs and prevent abuse, while tools like OpenTelemetry and Prometheus provide observability into system performance and security metrics. This comprehensive approach not only safeguards sensitive data but also enhances the overall reliability and resilience of LLM applications.
+
+### Flexibility in Engine Utilization: Adapting to Change
+
+One of Agnos Proxy's standout features is its flexibility in utilizing multiple translation engines. Developers can easily swap or combine engines such as LiteLLM, Bifrost, or Portkey without rewriting application code. This capability is particularly valuable in a rapidly evolving landscape where new gateways frequently emerge and pricing models change. For example, an organization can leverage Bifrost for high-volume OpenAI traffic while utilizing LiteLLM for specialized enterprise models, all through a single endpoint and consistent key management. This flexibility allows organizations to adapt to market changes without incurring significant overhead.
+
+### Future-Proofing LLM Applications with Agnos Proxy
+
+The rapid pace of innovation in LLM technologies necessitates a future-proof approach to gateway management. Agnos Proxy addresses this need by allowing developers to seamlessly integrate new gateway solutions as they emerge. Instead of being locked into a single provider, organizations can adapt their infrastructure to accommodate new models and pricing structures with minimal friction. This adaptability not only enhances operational efficiency but also ensures that applications remain competitive in a dynamic market where capabilities and costs are constantly shifting.
+
+### Implementation Insights: Deploying Agnos Proxy in Production
+
+Implementing Agnos Proxy in a production environment requires careful planning and consideration of various factors. Organizations must evaluate their existing infrastructure, define security requirements, and establish a clear migration path from legacy gateways. The deployment process can be streamlined using Helm charts and Docker, which facilitate containerization and orchestration. Furthermore, thorough testing is essential to validate the isolation of control and data planes, ensuring that security measures are effectively enforced. Organizations should also consider the operational implications of introducing Agnos Proxy, including the potential need for staff training and process adjustments.
+
+### Common Pitfalls and Mitigation Strategies
+
+While Agnos Proxy offers significant advantages, it is crucial to recognize potential pitfalls during implementation. One common challenge is the misconfiguration of security settings, which can inadvertently expose sensitive data. To mitigate this risk, organizations should adopt a rigorous testing and validation process, including automated security audits and manual reviews. Additionally, teams should stay informed about emerging vulnerabilities and best practices in LLM security to adapt their strategies accordingly. Regular training sessions and updates can help ensure that all stakeholders are aligned on security protocols and operational practices.
+
+### Addressing Limitations and Challenges of Agnos Proxy
+
+Despite its advantages, Agnos Proxy is not without limitations. For instance, the reliance on stateless translation engines may introduce latency in high-throughput scenarios, as each request requires a fresh instantiation of the engine. Additionally, organizations must be vigilant about managing the complexity of multiple engines and configurations, which can lead to operational overhead. The dependency on various translation engines may also complicate debugging processes, as issues can arise from different sources. It is essential for teams to weigh these challenges against the benefits of enhanced security and flexibility. By adopting a proactive approach to monitoring and optimization, organizations can mitigate these drawbacks while reaping the rewards of Agnos Proxy's innovative architecture.
+
+### Conclusion: A New Era in LLM Gateway Management
+
+The complexities of LLM gateway management demand innovative solutions that prioritize security and flexibility. Agnos Proxy stands out as a compelling option, offering a decoupled architecture that enhances security while allowing for adaptable integration of multiple translation engines. As the landscape of LLM applications continues to evolve, embracing a new approach to gateway management will be crucial for developers, DevOps engineers, and IT security professionals alike. The future of LLM applications hinges on the ability to secure, adapt, and innovate—qualities that Agnos Proxy adeptly embodies. By addressing both the strengths and limitations of its architecture, Agnos Proxy positions itself as a leader in the next generation of LLM gateway solutions.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/siva_prakashkkumar_556b/the-gateway-agnostic-llm-control-plane-why-i-built-agnos-proxy-3531)
+
+---
+
+<SocialShare title="Building a Secure and Flexible LLM Control Plane with Agnos Proxy" slug="building-a-secure-and-flexible-llm-control-plane-with-agnos-proxy" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
