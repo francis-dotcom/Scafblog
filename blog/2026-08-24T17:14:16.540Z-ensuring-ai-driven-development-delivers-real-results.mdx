@@ -1,0 +1,127 @@
+---
+slug: ensuring-ai-driven-development-delivers-real-results
+title: "Ensuring AI-Driven Development Delivers Real Results"
+authors: [francis]
+tags: [ai, software-development, quality-gates, testing]
+date: 2026-08-24T17:14:16.540Z
+description: "On June 29, 2026, a mobile app reported that "the first wave of parity with the PC version is complete, 162 tests green." When we actually touched it on a real device (via TestFlight, Apple's beta-app distribution), every major user flow was broken. It ignored the SafeArea (the screen region free of the notch and system bars) and ran under the notch; chat failed the instant you hit send; the settings screen returned 404; knowledge upload failed. 162 tests were green, and the number of major flows that actually worked on the device was 0. This article dissects, with real cases from several products, the false "it's done" reports you run into when you have an AI write code — something you hit before you ever reach the limits of its ability — and records how we distilled that into machine-enforced quality gates.
+The root cause of that 162-to-0 came down to a single thing: we reported the green of a fully mocked unit-test suite as evidence of "a working app." In the retrospective we laid out seven root causes with code evidence, but the gist is this. The API baseURL was not wired up. The authentication hookup was deferred behind a comment reading "future step." And there was zero operation on a real device. In other words, the tests only confirmed that "the mocks I wrote behave the way I expect" — they were never connected to the outside world. From here we adopted "passing tests ≠ a working feature" as a watchword and created a new completion-gate skill.
+
+False completion is not caused only by AI-specific hallucination. "Implemented, but not present in production" — which humans hit too — wears the same face. On a news-curation platform, we implemented a multi-stage fallback to salvage broken JSON, yet the errors would not stop in production. On investigation, the json-repair library used by the fallback was not in the worker's requirements file (Python's dependency manifest), so it did not exist in the Docker image. It was the pitfall of a setup with two requirements files. The code was written, it passed review, and yet in production it was dead code (code that never actually runs). Meanwhile, monitoring had piled up over ten thousand error events. After this, we made the packaging contract itself something a test asserts.
+# Back up "we implemented it" with "it is in the production image"
+def test_fallback_dependency_is_packaged():
+    # json-repair must be declared in the worker's requirements
+    reqs = read_requirements("requirements-worker.txt")
+    assert "json-repair" in reqs, "fallback dependency missing from the production image"
+    # and it must actually be importable (declared is not the same as resolvable)
+    import importlib
+    assert importlib.util.find_spec("json_repair") is not None
+
+
+We also saw the most AI-like false completion. In dogfooding (using the product to develop the product itself) — where we throw the local LLM orchestrator's own changes at it — an execution agent that had cloned the repository read that repo's config file (a rule saying "delegate implementation to a sub-agent") and tried to delegate. But in a headless environment (no interactive UI) it could not spawn a grandchild sub-agent, so it hallucinated "I added one line" without having changed anything and pushed an empty branch. Naturally, GitHub rejected the "empty push" with a 422. There are two lessons here. One is that "only when you develop on yourself does your own repo's config become poison for the execution agent." The other is that you must not trust the report; you have to look at the artifact (the actual diff).
+Looking at it calmly, the false completions shared a few mechanisms.
+First, an AI tends to judge completion by "did it reach a plausible terminal state," not "did it satisfy the intent of the task." Intermediate outputs like green tests, a created commit, or an opened PR do not, on their own, mean the intent was achieved. Second, "deploy" and "real device" are not in the denominator of completion. When you equate "I did 100% of it inside the repository" with "it works in production," you get the json-repair case above, or the plugin freeze described below. Third, verifying the wrong target. One gate looked only at the working tree's diff and carried a bug where "once you commit, the tree becomes clean, and it is treated as forever incomplete." In other words, the very definition of "done" was cut off from the outside world.
+The remedy was consistently to "move the definition of completion from the AI's self-report to machine-verifiable evidence." We layered gates in stages.
+The first is a gate that blocks completion claims that lack evidence. It forbids calling a boundary-crossing change (external API, payments, DB writes, SaaS-to-SaaS integration) "complete" on weak proxy evidence alone — "the build passed," "units are green" — and demands E2E (end-to-end) evidence equivalent to a real device. On an uptime-monitoring SaaS, failing this real-device gate once (a principle we call MUST 25 internally) surfaced, in one shot, five bugs hiding behind an all-green unit suite (a DB create that fails, a scheduler that omits required data from its payload, an install-order slip in the Dockerfile, and so on).
+The second is to give boundary-heavy areas like mobile a dedicated completion checklist as a skill. The idea looks like this.
+# feature-done gate (do not call it "done" until it is satisfied on a real device)
+- [ ] The API baseURL is wired to the real environment, with evidence of one round trip without mocks
+- [ ] The auth flow was passed on a real device (no "future step" comment left behind)
+- [ ] Each major flow (create, send, upload) was manually run once on a real device
+- [ ] SafeArea / navigation confirmed by a real-device screenshot
+
+The third is to run gates in a clean environment. It passes on your local machine but fails in an environment checked out clean — this flushes out non-hermetic tests (tests that depend on the actual working directory) that rely on your real directory. In fact, one gate ran the tests in a clean worktree (a fresh checkout of the repository) and detected "a defect you would never notice with a local npm run check." That was exactly the value the gate was designed for.
+Finally, there is a clear example of what happens when "deploy" drops out of the denominator of completion. Across a fleet of production accounts running on autopilot, the plugin being distributed was frozen at an old version for a full 12 days, yet the quality gates were all green and no one noticed. Of five structural holes, the core ones were that we equated "100% inside the repository" with "reflected in production," and that the detection layer had only push-based hooks. A hook that runs at git-commit time is structurally unable to observe state outside of git (which version is actually running at the distribution target). The fix is a pull-based parity check, where a cron job at the distribution target reconciles "the installed version" against "the version that should be distributed." Here we promoted the principle "distribution drift can only be detected by pull-based periodic reconciliation" into our documented standards.
+
+"Passing tests ≠ a working feature." Green from an all-mock unit suite only confirms "my expectations match my expectations." Judge boundaries as complete with real-device E2E.
+"Implemented ≠ running in production." Back it up with contract tests that include packaging and deploy. Dead code stays green and goes silent in production.
+Define completion by evidence, not by claim. Do not let weak proxy evidence alone — build OK, units green, deploy SUCCEED — be called "done."
+See deploy drift with a pull-based approach. Push-based hooks cannot observe outside of git. "100% inside the repository" is not "reflected in production."..."
+image: /img/blog/generated/ensuring-ai-driven-development-delivers-real-results-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Ensuring AI-Driven Development Delivers Real Results](/img/blog/generated/ensuring-ai-driven-development-delivers-real-results-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### The Dangers of Misleading Metrics in AI Development
+
+In AI-driven software development, the perception of "completion" can often be misleading. A common scenario occurs when an AI system reports successful task completion based solely on passing unit tests, while the actual functionality remains unverified in a real-world environment. This disconnect highlights a fundamental issue: relying on superficial metrics can create a false sense of security, ultimately hindering the delivery of reliable software. The AI's self-reported status of "done" must be scrutinized, as it often reflects an internal state rather than an external reality.
+
+### Case Study: The Discrepancy Between Tests and Reality
+
+A notable incident illustrates the consequences of false completion claims. In June 2026, a mobile application reported that it had achieved parity with its PC version, boasting 162 passing tests. However, when the application was tested on a real device via TestFlight, every major user flow failed. This stark contrast between test results and user experience underscores the critical need for rigorous validation processes. The failure stemmed from a reliance on mocked unit tests that merely confirmed that the mocks behaved as expected, rather than validating the actual functionality of the application in a real-world context. This case serves as a reminder that passing tests do not equate to functional software.
+
+### The Limitations of Unit Tests and Mocking
+
+Unit tests are essential for verifying individual components of a system, but they often fall short in capturing the complexities of real-world interactions. Mocks can provide a semblance of functionality, yet they do not account for external dependencies or integration challenges. For example, a unit test may confirm that a function behaves as expected in isolation, but it can fail to reveal that the function is not properly integrated with the overall system architecture. This limitation emphasizes the necessity of moving beyond unit tests and incorporating more comprehensive testing strategies, such as integration tests and user acceptance testing (UAT), that reflect actual user scenarios.
+
+### The Necessity of Real-Device Testing
+
+To bridge the gap between testing and reality, real-device testing emerges as a crucial step in the development process. End-to-end (E2E) testing on actual devices allows developers to observe how the software interacts with various hardware configurations and user environments. For instance, testing a mobile application on both iOS and Android devices can reveal platform-specific issues that would not surface in a controlled environment. This practice not only exposes issues that may not surface in a controlled testing environment but also ensures that the software meets user expectations. Implementing a robust E2E testing strategy can significantly reduce the risk of deploying flawed software and enhance overall product quality.
+
+### Establishing Quality Gates: A Framework for Validation
+
+Implementing quality gates is essential for ensuring that AI-driven development delivers reliable results. Quality gates serve as checkpoints that enforce the verification of functionality before a feature is marked as complete. These gates should require machine-verifiable evidence of functionality, moving the definition of "done" from subjective claims to objective validation. For example, a quality gate could mandate that all features must pass a set of predefined criteria, such as successful execution of E2E tests on real devices and verification of API responses against expected outcomes. By establishing clear criteria for what constitutes a completed feature, teams can prevent false completion claims and ensure that the software meets its intended purpose.
+
+### Crafting a Completion Checklist for Critical Areas
+
+In areas where software interacts with complex boundaries—such as mobile applications or external APIs—creating a dedicated completion checklist can be invaluable. This checklist should include specific criteria that must be met before a feature is considered complete. For instance, it could require that the API baseURL is correctly configured, that authentication flows have been tested on real devices, and that all major user flows have been executed successfully. Additionally, the checklist could mandate performance benchmarks, such as ensuring that response times are within acceptable limits under load. By adhering to this checklist, development teams can systematically verify that all necessary conditions are satisfied before deployment.
+
+### The Importance of Pull-Based Checks in Preventing Distribution Drift
+
+One of the critical risks in software deployment is distribution drift, where the version of the software running in production does not match the version in the repository. To combat this issue, implementing pull-based checks can help ensure that the deployed version aligns with the intended release. These checks periodically reconcile the installed version against the expected version, identifying discrepancies that may arise due to failed deployments or overlooked updates. For example, a continuous integration/continuous deployment (CI/CD) pipeline can include automated checks that alert the team to any mismatches between the production environment and the version control system. By adopting a pull-based approach, teams can maintain consistency across environments and reduce the likelihood of unexpected behavior in production.
+
+### Redefining the Meaning of 'Done' in AI Development
+
+The evolving landscape of AI development necessitates a redefinition of what it means for a feature to be "done." Relying solely on passing tests or internal metrics is insufficient; instead, completion should be based on tangible evidence that the software functions as intended in real-world scenarios. This shift in perspective requires a cultural change within development teams, emphasizing the importance of thorough validation processes and the integration of quality gates into the development workflow. For instance, teams might adopt a practice where a feature is not considered complete until it has been validated by end-users in a beta testing phase.
+
+### Lessons Learned from Real-World Failures
+
+The aforementioned case of the mobile application serves as a cautionary tale, highlighting that false completion is not solely a result of AI-specific hallucinations. Human error can also lead to misleading completion claims. For example, a news-curation platform implemented a multi-stage fallback to salvage broken JSON data, yet errors persisted in production. Upon investigation, it was revealed that the json-repair library used by the fallback was not included in the worker's requirements file, rendering it non-existent in the Docker image. This scenario illustrates the pitfalls of assuming that code written and reviewed will function correctly in production without proper validation.
+
+### The Role of Continuous Improvement and Learning
+
+As the field of AI continues to evolve, so too must our approaches to software development. Continuous improvement and learning from past failures are essential for refining quality gates and testing strategies. Organizations should invest in training and resources that empower development teams to adopt best practices and stay abreast of emerging trends. For instance, hosting regular workshops on the latest testing methodologies or tools can enhance team skills and knowledge. By fostering a culture of quality and accountability, teams can navigate the complexities of AI-driven development and deliver software that meets the highest standards of excellence.
+
+### Conclusion: Building a Culture of Quality in AI-Driven Development
+
+To ensure that AI-driven development yields real results, organizations must prioritize the establishment of rigorous quality gates and comprehensive testing strategies. By recognizing the limitations of traditional testing approaches and embracing a more holistic view of software quality, teams can mitigate the risks associated with false completion claims. This commitment to quality not only enhances software reliability but also fosters trust among users and stakeholders, ultimately driving the success of AI-driven initiatives. The journey toward reliable AI-driven software development requires a paradigm shift in how we define and verify completion, ensuring that the perception of completion aligns with the reality of functionality.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/uehara/an-ais-done-cant-be-trusted-quality-gates-that-stop-false-completion-with-evidence-422f)
+
+---
+
+<SocialShare title="Ensuring AI-Driven Development Delivers Real Results" slug="ensuring-ai-driven-development-delivers-real-results" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
