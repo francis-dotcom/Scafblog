@@ -1,0 +1,236 @@
+---
+slug: understanding-the-autonomy-of-ai-coding-agents
+title: "Understanding the Autonomy of AI Coding Agents"
+authors: [francis]
+tags: [ai, coding, security, devops]
+date: 2026-08-25T06:26:55.410Z
+description: "A vendor's homepage will tell you an agent is "autonomous." It will not tell you, in one clear sentence, whether that means it asks before running rm -rf on your machine or just does it. That's a different question from capability, and it's the one that actually determines what you're wiring into a CI pipeline or a laptop with production credentials on it. So we read the permissions, security and settings documentation for all 21 coding agents in our index, not the marketing copy, and recorded one thing for each: what happens the first time it wants to edit a file or run a shell command, before you've touched a single setting.
+Of the 21 tools, 20 execute file edits or shell commands directly. (The 21st, CodeRabbit, reviews pull requests rather than running code, so "asks before it acts" doesn't map onto it the same way; it's covered separately below.) Of those 20:
+12 ask for explicit approval before every file edit and shell command by default. GitHub Copilot's agent mode and CLI, Devin, Windsurf (now Devin Desktop), Cline, OpenHands, Factory, Antigravity CLI, Zed, Junie, Warp, Juggler and, as of this research, Claude Code all ship with a manual, ask-first default.
+5 run both, automatically, with no default approval gate at all: OpenAI Codex CLI, OpenCode, Zot, Replit Agent and Bolt.new.
+2 split the difference: Cursor and Aider both auto-apply file edits without a prompt, but still ask before running a shell command, by default, independently of each other.
+1 uses a third shape entirely: Meta's brand-new Muse Code asks for approval once, on the plan, then works largely unsupervised for the rest of the run.
+The most consequential number in this table has an expiration date. Anthropic's own docs state that starting August 14, 2026, three days after this research was checked, its classifier-gated "auto" mode becomes the default permission mode for new Claude Code sessions on Pro, Max and Team plans — moving one of the most widely used agents in this index from the ask-first column to something closer to the auto-executing one.
+The largest group requires a yes for both a file write and a shell command, out of the box. Where it matters, the opt-in escape hatch (the setting that turns approval off) is noted alongside.
+
+
+
+Tool
+What we found
+Opt-in full-autonomy setting
+
+
+
+
+GitHub Copilot
+VS Code agent mode ships "Default Approvals": a confirmation dialog before any tool that isn't pre-classified as safe. Copilot CLI auto-approves read-only actions only; anything that can modify the system prompts every time.
+
+Bypass Approvals (VS Code); --allow-all/--yolo (CLI)
+
+
+Claude Code
+Default mode ("Manual") only auto-runs reads; every edit, command or network call pauses for approval. Changes to a classifier-gated auto default on 2026-08-14 for most paid plans.
+
+bypassPermissions, docs specify "isolated containers and VMs only"
+
+
+Devin
+"Normal" mode, the default: read-only actions auto-approve, shell commands and file writes prompt every time.
+
+Bypass mode, all tool calls auto-approved
+
+
+Windsurf (now Devin Desktop)
+Its Devin Local agent's confirmed default is ask-before-run for MCP tools; the broader shell/file default isn't spelled out as explicitly in the current docs, but the underlying permission model (Deny > Ask > Allow) treats "ask" as the baseline.
+Per-scope allow rules, session-wide or permanent
+
+
+Cline
+"Every file edit and terminal command requires your approval, so you stay in control of what actually changes," per Cline's own docs.
+YOLO Mode: "auto-approves everything... no confirmation dialogs"
+
+
+OpenHands
+CLI default is "Always ask for confirmation" for every action. Only headless mode (a separate, deliberate deployment choice) always auto-approves.
+
+--always-approve flag
+
+
+Factory
+Interactive default Autonomy Level is "Off": only read tools and an allowlist run unprompted. Headless droid exec defaults to read-only "spec-mode" and needs an explicit --auto flag to change anything.
+Autonomy levels Low/Medium/High, cycled manually
+
+
+Antigravity CLI
+Default toolPermission is request-review: "Prompts for your approval before running write, bash, or web tools."
+
+always-proceed, docs label it "highest risk"
+
+
+Zed
+
+agent.tool_permissions.default is "confirm" out of the box.
+Per-tool always_allow override, or an Write profile with allow rules
+
+
+Junie
+"By default, Junie requests your permission to run suggested bash commands, introduce changes, perform file operations, or use external tools."
+Brave Mode, opt-in, JetBrains' own docs warn it "can lead to data loss"
+
+
+Warp
+Warp's own language frames approval as the baseline ("total control to approve commands before Agent Mode executes them"), though the docs page describing its four configurable levels doesn't spell out which is factory-preselected.
+"Always allow" / "Never" levels, set per action type
+
+
+Juggler
+Per its creator, directly: "The default mode it uses for approving LLM tools is already read-only... it tries to let things that are definitely read-only get approved without bothering the user." Anything else pauses.
+No named toggle; approval logic is a replaceable plugin
+
+
+
+Two tools with nothing else in common (a closed-source commercial IDE and a free, MIT-licensed terminal tool) independently converged on the identical shape.
+
+
+
+Tool
+Edits
+Commands
+
+
+
+
+Cursor
+Auto-applied, except changes to configuration files, which still require approval
+"By default, terminal commands need your approval," per Cursor's own security docs
+
+
+Aider
+Auto-applied and auto-committed to git in the same step, no prompt
+Prompts "Run shell command? (Y)es/(N)o" by default when the model proposes one, unless --yes-always is set
+
+
+
+These five run both file edits and shell commands with nothing to click through, straight out of the box.
+
+
+
+Tool
+Scope of the default
+What stands in for a gate
+
+
+
+
+OpenAI Codex CLI
+"Auto" mode, the recommended default inside a version-controlled folder: reads, edits and runs commands automatically inside the workspace. Approval is only asked for actions outside the working directory or network access.
+Workspace-scoped sandbox; approval re-appears at the workspace boundary
+
+
+OpenCode
+"Most permissions default to 'allow', including bash," per its own docs.
+An on-by-default worktree snapshot before and after every model step, with /undo and /redo
+
+
+
+Zot
+Tools run without confirmation by default in interactive mode; the --no-yolo flag is what turns approval on. Non-interactive (print/JSON/RPC) modes always run tools freely, regardless of the flag.
+An opt-in /jail path sandbox; no rollback feature documented
+
+
+Replit Agent
+"Build" mode, the default, "applies changes directly," with no pre-action confirmation. Plan Mode is the opt-in way to get approval first.
+Automatic checkpoints at development milestones, restorable with one click
+
+
+Bolt.new
+No documented per-action approval step; the model gets "complete control over the entire environment," writing atomic file operations directly.
+All execution happens inside an in-browser WebContainer, isolated from the host machine by construction
+
+
+
+Meta's Muse Code, in public beta since 2026-08-05, doesn't fit either bucket cleanly. Meta's own developer blog describes it as working "largely without supervision once you approve a plan" — one approval gate at the start, then autonomous execution for however long the task takes. Parallel subagents each get an isolated git worktree so they can't collide on the same files, and every tool call is logged for replay. We could not confirm the granular per-command approval mechanics (whether specific dangerous commands still trigger a pause mid-run) against Meta's own primary documentation, which sits behind an account-gated developer portal; where third-party writeups describe that detail, we're leaving it out rather than reporting it as vendor fact.
+GitHub Copilot alone spans three different answers depending which surface you're using, and averaging them into one row would misrepresent all three. Its VS Code agent mode and its CLI both ask by default. Its cloud coding agent, the one you assign to a GitHub issue, is a fourth model entirely: it runs unsupervised inside a firewalled, ephemeral sandbox with no per-action human gate at all. The approval checkpoint doesn't disappear; it moves downstream, to whether the resulting pull request's CI workflow is allowed to run.
+The five tools that act automatically by default don't skip safety, they relocate it. None of them ships with zero protection; each substitutes an after-the-fact or architectural safeguard for a before-the-fact prompt. OpenCode's snapshot system requires no configuration and captures the worktree before and after every model step. Bolt.new's WebContainer sandbox means a runaway command can't touch the host machine during development, full stop. Replit Agent's checkpoints and Codex CLI's workspace-scoped sandbox both work the same way: act first, keep a way back.
+If you're pointing an agent at a repository with real consequences (production credentials in the environment, a CI pipeline that deploys, a codebase you can't easily git revert), the ask-first-by-default group of 12 is the conservative starting point, and every one of them offers an opt-in auto-run mode for when you've earned the trust to turn it on. If you want an agent that gets out of your way immediately, the 5 that auto-execute are worth checking specifically for what stands in for the approval prompt, since that safeguard is doing the job a human would otherwise do. And if you're currently on Claude Code, the ask-first default you're used to changes on 2026-08-14 for most paid plans: check your permission-mode setting before that date if you'd rather keep the manual gate.
+Methodology: for each of the 21 coding agents in our index, we read the vendor's own current permissions, security or settings documentation directly, not third-party summaries, and recorded the stated default behavior for file edits and shell/terminal commands separately, since they frequently differ. Primary sources checked, by tool: Cursor (run modes, checkpoints); GitHub Copilot (VS Code approvals, coding agent); Claude Code (sandboxing); Devin; Windsurf/Devin Desktop; Cline (checkpoints); Aider; Replit Agent (checkpoints); Bolt.new; Juggler; OpenAI Codex CLI; OpenCode (snapshots); Zot; OpenHands; Factory; Antigravity CLI; Warp; Zed; Muse Code; Junie. Checked 2026-08-11. Where a vendor's public documentation didn't state a clear default, we said so rather than guess; where a claim came from a community report rather than the vendor's own page, we excluded it. Vendor defaults change, sometimes on a published date, as Claude Code's own August 14 shift shows — treat this as a snapshot, and check the linked source directly before relying on it for a security decision...."
+image: /img/blog/generated/understanding-the-autonomy-of-ai-coding-agents-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Understanding the Autonomy of AI Coding Agents](/img/blog/generated/understanding-the-autonomy-of-ai-coding-agents-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### The Growing Role of AI in Development Workflows
+
+As the software development landscape evolves, the integration of AI coding agents is becoming a cornerstone of modern development workflows. These agents, powered by large language models (LLMs), assist developers in automating various tasks, including code generation, debugging, and deployment. However, their increasing autonomy raises critical security considerations that must be meticulously examined. The default permissions and autonomy levels of these agents are pivotal for maintaining security and control over code execution, particularly in environments where sensitive data and production systems are involved.
+
+### Understanding Autonomy and Permissions
+
+In the context of AI coding agents, **autonomy** refers to the extent to which these agents can perform tasks independently without human intervention. **Permissions**, on the other hand, define the specific actions an agent is authorized to take, such as modifying files or executing shell commands. A clear understanding of these concepts is essential for assessing the security implications of deploying AI agents in software development. High-autonomy agents with broad permissions can introduce significant risks if not properly managed, while ask-first agents that require explicit user approval can enhance security but may compromise efficiency.
+
+### Analyzing Autonomy Levels of 21 AI Coding Agents
+
+A detailed analysis of 21 AI coding agents reveals a diverse range of autonomy levels and default permissions. Out of the 21 agents evaluated, 20 have the capability to execute file edits or shell commands directly. Alarmingly, only 12 of these agents, including GitHub Copilot, Devin, and Claude Code, require explicit user approval before executing any actions. In contrast, five agents, such as OpenAI Codex CLI and Replit Agent, operate without default approval, raising immediate security concerns. The remaining two agents, Cursor and Aider, adopt a mixed approach, auto-applying file edits while still asking for approval before executing shell commands.
+
+### The Security Risks of Auto-Executing Agents
+
+The distinction between ask-first and auto-executing agents is critical from a security perspective. Ask-first agents prompt users for approval before executing commands, inherently limiting the risk of unintended actions. This model aligns with best practices in security, as it places the responsibility of decision-making on the developer. Conversely, auto-executing agents can streamline workflows but may inadvertently introduce vulnerabilities. For instance, an agent that automatically executes a command to delete files could lead to catastrophic data loss if misconfigured. The lack of an approval mechanism in such cases underscores the necessity for rigorous oversight and a comprehensive understanding of the agent's operational parameters.
+
+### Case Study: The Dangers of High-Autonomy Agents
+
+Consider a scenario in which a development team adopts an AI coding agent with high autonomy, such as OpenAI Codex CLI, which defaults to auto-executing commands within a version-controlled folder. While this setup may enhance productivity, it also exposes the team to significant risks. If the agent inadvertently runs a destructive command, such as `rm -rf`, it could irreversibly delete critical files and disrupt the entire development pipeline. This example highlights the urgent need for teams to implement strict oversight mechanisms and to thoroughly understand the operational parameters of the agents they deploy.
+
+### Best Practices for Managing Agent Permissions
+
+To mitigate the risks associated with AI coding agents, developers should adopt best practices for managing agent permissions. First, organizations should prioritize agents that default to ask-first modes, particularly in production environments. Regularly reviewing and updating permission settings as agent capabilities evolve is crucial. For instance, developers should establish a routine to audit agent permissions every quarter or after significant updates to the agent's software. Implementing robust logging and monitoring mechanisms can provide visibility into agent actions, enabling teams to respond swiftly to any anomalies. Additionally, establishing clear guidelines for when and how to grant elevated permissions can help maintain a balance between efficiency and security. For example, developers might restrict elevated permissions to specific team members or critical tasks, ensuring that only trusted personnel can execute high-risk commands.
+
+### Statistical Insights on Agent Approval Requirements
+
+A thorough examination of the 21 coding agents reveals that 12 require explicit user approval for both file edits and shell commands, while 5 operate without any default approval. This stark contrast in operational modes emphasizes the importance of selecting agents that align with an organization's security posture. For example, GitHub Copilot and Claude Code, which both require approval, can be considered safer choices compared to OpenAI Codex CLI and Replit Agent, which operate autonomously. Understanding these statistics can aid developers in making informed decisions regarding the integration of AI coding agents into their workflows. Furthermore, organizations should analyze historical data on agent performance and security incidents to refine their selection process continually.
+
+### Future Trends in AI Agent Permissions and Security
+
+As the capabilities of AI coding agents continue to advance, the landscape of permissions and security will inevitably evolve. Notably, upcoming changes to Claude Code's default permissions, which will shift to an auto-executing mode in August 2026, underscore the importance of staying informed about vendor updates. Organizations must proactively evaluate how these changes impact their security posture and adjust their practices accordingly. Future developments may also introduce more granular permission controls, allowing teams to tailor agent behaviors to specific use cases while maintaining oversight. For example, agents may soon offer customizable permission settings that allow developers to define specific actions that require approval, thus enhancing security without sacrificing efficiency.
+
+### Conclusion: Balancing Efficiency and Security in AI-Assisted Coding
+
+In conclusion, the integration of AI coding agents into development workflows presents both opportunities and challenges. Understanding the autonomy levels and default permissions of these agents is crucial for maintaining security and control over code execution. By prioritizing ask-first agents, implementing robust permission management practices, and staying informed about evolving capabilities, organizations can harness the benefits of AI while safeguarding their systems. Ultimately, achieving a balance between efficiency and security will define the successful adoption of AI coding agents in the software development landscape. As the technology evolves, continuous education and adaptation will be key to navigating the complexities of AI-assisted coding securely.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/matfy_748796e44de3a871560/which-coding-agents-run-commands-without-asking-21-tools-checked-1h5d)
+
+---
+
+<SocialShare title="Understanding the Autonomy of AI Coding Agents" slug="understanding-the-autonomy-of-ai-coding-agents" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
