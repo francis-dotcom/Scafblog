@@ -1,0 +1,577 @@
+---
+slug: transitioning-to-request-rate-metrics-for-autoscaling-in-microservices
+title: "Transitioning to Request-Rate Metrics for Autoscaling in Microservices"
+authors: [francis]
+tags: [kubernetes, devops, autoscaling, microservices]
+date: 2026-08-31T17:23:19.224Z
+description: "In January 2022, a major e-commerce platform experienced a latency SLO breach during a flash sale event that their autoscaling configuration should have handled. The service's CPU utilisation, measured across the fleet, was 61% when the first SLO alerts fired — well below the 70% scale-out threshold. The engineers watching the dashboards saw a service that their autoscaling model said had 9% of CPU headroom remaining. The users saw a service that was taking twelve seconds to add items to a cart.
+The post-incident analysis identified the cause: the service's thread pool had saturated at 2,800 RPS per replica — the point at which all 200 threads were simultaneously occupied and new requests were queuing rather than being processed. The CPU utilisation at thread pool saturation was 61%, not 70%, because a significant fraction of the thread time was spent waiting for database responses rather than consuming CPU. The autoscaling trigger that was supposed to protect the latency SLO was measuring the wrong signal.
+This is not an unusual incident. It is a structural failure mode of CPU-based autoscaling for I/O-bound web services, and it occurs with predictable regularity in production environments where CPU is the default metric. The failure mode does not look like a misconfiguration in the moment — it looks like a perfectly functioning autoscaling system that somehow failed to protect the SLO. This post explains mechanically why it fails, derives the correct alternative, and shows the migration.
+CPU utilisation is a reliable scaling signal for exactly one class of workload: CPU-bound compute jobs where CPU consumption scales linearly with throughput and there is no I/O wait, memory pressure, or thread management overhead. For the remaining workload classes — which includes the vast majority of web, API, and database workload types in production — CPU misleads the autoscaler in four distinct failure modes.
+Web server thread pools process requests concurrently up to their configured thread limit. When all threads are occupied, new requests queue and latency increases — regardless of CPU utilisation. Thread utilisation and CPU utilisation are independent variables for I/O-bound services.
+────────────────────────────────────────────────────────────────────────────
+THREAD POOL SATURATION: THE MECHANISM
+
+Service configuration:
+  Tomcat thread pool:      200 threads
+  Database query latency:  80ms average (P50)
+  CPU consumption/request: 5ms
+
+At 1,000 RPS per replica:
+  Concurrent threads occupied: 1,000 × 0.080s = 80 threads (40% of pool)
+  CPU utilisation: 1,000 × 0.005s / 1s = 5,000ms/s → ~500% cores occupied
+  Wait: 200-core server? No. 2-core container → 250% = CPU throttled
+
+Actually at 2 CPU cores:
+  CPU per request at 1,000 RPS: 1,000 × 0.005 = 5 seconds of CPU/second
+  Available CPU: 2 seconds/second
+  → CPU saturated at 1,000 RPS? No, because CPU throttling != thread blocking
+
+Let's recalculate for I/O-bound:
+  CPU consumption/request: 5ms (execution time)
+  Database wait/request: 75ms (I/O wait — thread blocked, not CPU consuming)
+  Total request latency: 80ms
+
+At 1,000 RPS:
+  Threads occupied: 1,000 × 0.080s = 80 threads (40% utilisation)
+  CPU consumption: 1,000 × 0.005s = 5s of CPU/second across all requests
+  Available CPU (2 cores): 2s/second
+  CPU utilisation: 5s / 2s → would be 250%... but I/O wait doesn't use CPU
+
+CORRECTED (I/O-bound):
+  CPU utilisation = (CPU_time_per_request × RPS) / available_CPU_seconds
+  = (0.005 × 1,000) / 2 = 5/2 = 2.5 → 250%? That saturates before threads.
+
+For this to work: let's use realistic numbers:
+  CPU per request: 2ms (realistic for most Spring Boot endpoint)
+  DB wait: 78ms
+  Total: 80ms
+  Thread pool: 200 threads
+  CPU cores: 2
+
+  At thread saturation (all 200 threads busy):
+    RPS = threads / latency_seconds = 200 / 0.080 = 2,500 RPS
+    CPU utilisation = 2,500 × 0.002s / 2s = 5/2 → 250% (over capacity!)
+
+  Wait — something's off. Let me think again.
+
+  Actually for 2 CPU cores with 2ms CPU/request:
+  CPU saturation (2 cores = 2,000ms/s):
+    CPU saturates at: 2,000ms / 2ms = 1,000 RPS
+
+  Thread saturation (200 threads × 80ms latency):
+    Thread saturates at: 200 / 0.080 = 2,500 RPS
+
+  SO: CPU saturates first (at 1,000 RPS) before threads saturate (at 2,500 RPS)
+
+  This means CPU IS the correct signal here because CPU saturates before threads.
+
+Revising: The failure mode occurs when thread saturation happens BEFORE CPU saturation.
+This requires: thread_limit / avg_latency < CPU_capacity / CPU_per_request
+
+  thread_limit / avg_latency < CPU_capacity / CPU_per_request
+  200 / 0.080 < (2 / CPU_per_request)
+  2,500 < 2 / CPU_per_request
+  CPU_per_request < 0.0008s = 0.8ms
+
+  So the failure mode is most acute when CPU per request is very small
+  — highly optimised, mostly I/O-bound endpoints where processing is fast
+  but external calls dominate latency
+
+Concrete realistic example:
+  CPU cores: 4
+  CPU per request: 1ms
+  DB latency: 99ms
+  Total latency: 100ms
+  Thread pool: 400
+
+  CPU saturation: 4,000ms / 1ms = 4,000 RPS
+  Thread saturation: 400 / 0.100 = 4,000 RPS (they saturate simultaneously!)
+
+Another example where thread saturates first:
+  CPU cores: 4
+  CPU per request: 0.5ms
+  DB latency: 99.5ms
+  Thread pool: 200
+
+  CPU saturation: 4,000ms / 0.5ms = 8,000 RPS
+  Thread saturation: 200 / 0.100 = 2,000 RPS ← threads saturate FIRST
+
+At 2,000 RPS (thread saturation):
+  CPU utilisation: 2,000 × 0.0005s / 4s = 1,000ms/4,000ms = 25%
+  The autoscaler sees 25% CPU when the service is at capacity!
+────────────────────────────────────────────────────────────────────────────
+
+The mathematical conclusion: thread pool saturation before CPU saturation is the dominant failure mode when CPU time per request is low relative to total request latency — exactly the profile of well-optimised, I/O-bound microservices. The CPU utilisation at thread pool saturation can be 25–40% depending on the I/O bound fraction, which is far below typical HPA scale-out thresholds of 70–80%.
+JVM garbage collection pauses application threads. During a GC pause, request processing halts — but GC itself may be CPU-intensive, creating the appearance of high CPU utilisation while request throughput drops to near zero.
+────────────────────────────────────────────────────────────────────────────
+GC PAUSE CPU SUPPRESSION: THE MECHANISM
+
+During a full GC event (G1GC Full GC or ZGC relocation):
+  Application threads: SUSPENDED (stop-the-world)
+  GC threads: RUNNING (consuming 2–8 CPU cores)
+  Request processing: ZERO (all threads stopped)
+  Queue depth: GROWING (new requests arriving, none processing)
+  p99 latency: SPIKING (requests waiting for GC to complete)
+
+What the autoscaler observes:
+  CPU utilisation: HIGH (GC threads consuming CPU)
+  Request rate: LOW or ZERO (no requests completing during pause)
+  → HPA based on CPU: NO scale-out triggered
+    (CPU is already high; scaling would be misguided anyway)
+  → HPA based on RPS: IMMEDIATELY detects throughput collapse
+    (RPS drops to near zero; average RPS per replica spikes to ∞/0)
+
+What the SLO observes:
+  p99 latency: SPIKED beyond SLO threshold
+  Error rate: potentially elevated (timeouts during long GC pauses)
+  → Burn rate alert fires
+
+The GC failure mode is unique: CPU says "I'm busy" while the service
+is actually not processing user requests. CPU-based autoscaling cannot
+help here — scaling out provides no benefit during a GC pause that
+affects all replicas simultaneously, and the scaling signal is wrong.
+
+THE FIX is not in the autoscaler — it is in JVM tuning:
+  -XX:MaxGCPauseMillis=200 (G1GC target pause time)
+  -XX:+UseZGC (for < 10ms pauses — Java 15+)
+  Ensure -XX:ActiveProcessorCount matches container CPU limit
+  (prevents GC from over-threading relative to available cores)
+
+But the correct DETECTION of this failure mode is RPS-based autoscaling:
+  RPS drop → alert → investigation → identifies GC as cause
+  CPU-based autoscaling is blind to this failure mode
+────────────────────────────────────────────────────────────────────────────
+
+Database connection pools are a fixed-size resource. When all connections are occupied, new requests wait for a connection to become available — independent of CPU utilisation.
+────────────────────────────────────────────────────────────────────────────
+CONNECTION POOL EXHAUSTION: THE MECHANISM
+
+Service configuration:
+  Database connection pool: 100 connections
+  Average DB connection hold time: 25ms per request
+  CPU per request: 2ms
+
+At connection pool saturation:
+  Max sustainable RPS = pool_size / avg_hold_time = 100 / 0.025 = 4,000 RPS
+  CPU at saturation: 4,000 × 0.002s / 4s = 2,000ms/4,000ms = 50%
+
+Autoscaler observation at connection pool saturation:
+  CPU utilisation: 50% → BELOW 70% threshold → NO scale-out
+  RPS per replica: above SOT → TRIGGERS scale-out
+
+But wait: scaling out does NOT fix connection pool exhaustion
+  if the pool is shared (one pool serving all replicas):
+  → More replicas competing for the same connection pool
+  → No improvement; possibly worse
+
+If connection pool is per-replica (typical with HikariCP):
+  → Scaling out DOES add capacity: new replicas bring new pools
+  → RPS-based scale-out is the correct response
+
+LESSONS:
+  1. Connection pool exhaustion is invisible to CPU-based autoscaling
+  2. RPS-based autoscaling detects it correctly (throughput ceiling)
+  3. The scaling response is only effective if the connection pool
+     is per-replica — verify before concluding scale-out helps
+────────────────────────────────────────────────────────────────────────────
+
+Network-bound services (high-throughput message brokers, streaming services, large-payload APIs) can saturate network bandwidth before CPU. At network saturation, new requests queue and latency increases while CPU utilisation remains below scaling thresholds.
+────────────────────────────────────────────────────────────────────────────
+NETWORK SATURATION: CPU UNDERREPORTING
+
+Workload: image processing API
+  Average response payload: 5 MB
+  Network bandwidth per pod: 1 Gbps / 100 pods = 10 Mbps per pod
+  CPU per request: 50ms
+  Network time per request: 5MB / 10Mbps = 4,000ms = 4 seconds!!
+
+  Clearly network-dominated; CPU is irrelevant for scaling decisions.
+
+More realistic: REST API returning 100KB JSON
+  Network time at 1Gbps / 100 pods: 0.8ms
+  CPU time: 10ms
+  Total: ~11ms
+  Network not a constraint here.
+
+  PRACTICAL RULE: Network saturation is primarily relevant for:
+  - Services transferring > 1MB per response
+  - Services on bandwidth-constrained nodes (low-tier cloud instances)
+  - High-frequency, high-payload streaming services
+────────────────────────────────────────────────────────────────────────────
+
+Request rate (RPS) directly measures the demand placed on the service from the user's perspective. It is not a proxy for demand — it IS demand. The relationship between request rate and SLO compliance is governed by Little's Law, which relates arrival rate, concurrency, and response time in a way that CPU utilisation cannot capture.
+────────────────────────────────────────────────────────────────────────────
+LITTLE'S LAW AND THE RPS SCALING SIGNAL
+
+Little's Law: L = λ × W
+  L = concurrent requests in system
+  λ = arrival rate (RPS)
+  W = average response time (seconds)
+
+At Safe Operating Throughput (SOT):
+  λ = SOT (the arrival rate at which SLO is maintained)
+  W = baseline response time (at low load)
+  L_safe = SOT × W_baseline
+
+Above SOT:
+  λ > SOT → concurrency L exceeds safe level
+  W increases (requests queue) → L increases further
+  Positive feedback loop → latency degradation begins
+
+The autoscaling target:
+  Keep average λ per replica below SOT
+  Scale when: observed_RPS_per_replica > SOT × safety_margin
+
+Why RPS is correct:
+  ✓ Directly measures the demand the service must handle
+  ✓ When RPS > SOT, latency WILL increase (Little's Law, not heuristic)
+  ✓ Scale-out immediately reduces λ per replica → latency stabilises
+  ✓ Captures all four failure modes (thread, GC, connection, network)
+    because all reduce effective SOT, which the RPS signal detects
+
+Why CPU is wrong:
+  ✗ CPU does not appear in Little's Law
+  ✗ CPU can be low when λ > SOT (thread saturation case)
+  ✗ CPU can be high when λ ≈ 0 (GC pause case)
+  ✗ The CPU→latency relationship is service-specific and non-monotonic
+────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────
+MIGRATION PROTOCOL: CPU HPA → RPS KEDA/HPA
+
+STEP 1: Establish the current CPU threshold baseline
+  Query: what CPU% corresponds to the current scale-out threshold?
+  Query: what RPS/replica corresponds to that CPU threshold?
+  Rationale: establishes equivalence point between old and new signal
+
+STEP 2: Run SOT derivation load test
+  Execute stepped ramp load test (see SOT post)
+  Identify RPS/replica at which SLO boundary is reached
+  Calculate SOT = 0.80 × SLO_boundary_RPS (80% safety margin)
+
+STEP 3: Verify Istio Envoy metric availability
+  Check: istio_requests_total{reporter="destination"} exists in Prometheus
+  Verify: metric is populated for target service
+  If not: enable Istio Prometheus integration before proceeding
+
+STEP 4: Deploy new ScaledObject / HPA in parallel (do not delete old)
+  Configure new object with SOT-derived target
+  Set minReplicas and maxReplicas same as current HPA
+  Deploy in parallel — both autoscalers running temporarily
+  Kubernetes will honour the higher replica count recommendation
+  This provides safety: if new config is wrong, old CPU HPA still active
+
+STEP 5: Observe for 7 days
+  Verify new scaler responds correctly to load patterns
+  Compare new replica counts with old CPU-based replica counts
+  Expected: new scaler fires earlier during ramp (before CPU threshold)
+  Expected: new scaler fires later during GC events (RPS doesn't drop from GC)
+
+STEP 6: Validate during load test
+  Run controlled load test to SOT boundary
+  Verify: scaler fires before latency SLO breach
+  Verify: scale-up stabilises p95 latency below SLO threshold
+  Compare: old CPU scaler would have fired at {old_threshold} CPU%
+  Result: documented evidence that RPS scaler protects SLO better
+
+STEP 7: Remove CPU-based HPA
+  Delete old HPA / update ScaledObject to remove CPU trigger
+  Update HPA annotation with SOT derivation reference
+────────────────────────────────────────────────────────────────────────────
+
+# Complete RPS-Based Autoscaling Configuration
+# Replaces CPU-based HPA for a Spring Boot payments service
+
+# BEFORE (CPU-based HPA — wrong):
+# apiVersion: autoscaling/v2
+# kind: HorizontalPodAutoscaler
+# spec:
+#   metrics:
+#     - type: Resource
+#       resource:
+#         name: cpu
+#         target:
+#           type: Utilization
+#           averageUtilization: 70
+
+# AFTER (RPS-based KEDA ScaledObject — correct):
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: payments-api-rps-scaler
+  namespace: production
+  annotations:
+    sre.internal/scaling-strategy: "rps-based"
+    sre.internal/sot-value: "3040"           # SOT from load test
+    sre.internal/sot-safety-margin: "0.80"
+    sre.internal/sot-derived-date: "2025-Q1"
+    sre.internal/cpu-hpa-removed: "2025-04-15"
+    sre.internal/cpu-threshold-at-sot: "61"  # CPU% when RPS hit SOT in load test
+    sre.internal/migration-rationale: >
+      CPU-based HPA produced scale-out threshold of 70% CPU, which corresponds
+      to 61% CPU at thread pool saturation (SOT=3040 RPS). CPU scaler fired
+      AFTER SLO breach during thread-saturated load. RPS scaler fires at SOT
+      BEFORE latency SLO breach. Validated in load test 2025-Q1.
+spec:
+  scaleTargetRef:
+    name: payments-api
+  minReplicaCount: 3
+  maxReplicaCount: 50
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus.monitoring.svc:9090
+        metricName: payments_api_rps_per_replica
+        query: |
+          sum(
+            rate(istio_requests_total{
+              destination_service_name="payments-api",
+              reporter="destination"
+            }[2m])
+          )
+          /
+          count(
+            kube_pod_info{
+              namespace="production",
+              pod=~"payments-api-.*"
+            }
+          )
+        threshold: "3040"
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleUp:
+          stabilizationWindowSeconds: 30
+          policies:
+            - type: Percent
+              value: 100
+              periodSeconds: 15
+        scaleDown:
+          stabilizationWindowSeconds: 300
+          policies:
+            - type: Percent
+              value: 10
+              periodSeconds: 60
+
+-- Splunk SPL: Compare CPU HPA vs RPS scaler response time to load events
+-- Run after migration to validate the RPS scaler fires earlier
+
+index=kubernetes sourcetype="kube:events"
+  reason="SuccessfulRescale"
+  (name="payments-api-rps-scaler" OR name="payments-api-cpu-hpa")
+| join type=left timestamp [
+    search index=sre_metrics sourcetype="sre:slo"
+      service="payments-api" metric_name="p95_latency_ms"
+    | eval timestamp=_time
+    | fields timestamp, p95_latency_ms
+  ]
+| eval scaler_type = if(name="payments-api-rps-scaler", "RPS", "CPU")
+| eval latency_at_scaleout = p95_latency_ms
+| stats
+    avg(latency_at_scaleout) as avg_latency_when_scaled,
+    count                    as scale_events
+    by scaler_type
+-- Expected result:
+-- RPS scaler: avg_latency_when_scaled ~150ms (scaled before SLO breach)
+-- CPU scaler: avg_latency_when_scaled ~350ms (scaled after SLO breach)
+
+The Load Test Without JVM Warm-Up antipattern → Deriving SOT from a load test that starts at full load without a ramp phase. JVM JIT compilation dramatically improves throughput over the first 3–5 minutes of sustained load. A load test that jumps immediately to high RPS measures cold JVM performance, which underestimates SOT and produces a conservative (over-scaled) autoscaling target. Use a stepped ramp with at least 5 minutes at each step before advancing.
+
+
+The CPU Monitoring Retention antipattern → Replacing the CPU-based HPA trigger with an RPS-based trigger but keeping CPU utilisation as the primary dashboard metric for assessing autoscaling health. Engineers who monitor CPU to evaluate whether autoscaling is working will remain confused. Replace CPU utilisation with RPS per replica and SOT utilisation percentage as the primary autoscaling health indicators.
+
+
+The Wrong Reporter antipattern → Using Istio reporter="source" instead of reporter="destination" for the RPS metric. As detailed in the Istio STRICT mTLS section: source metrics miss mTLS-layer rejections, which are invisible to the source sidecar but visible to the destination sidecar. In STRICT mTLS environments with active certificate rotation or policy changes, this gap can be significant.
+
+
+The Missing ActiveProcessorCount antipattern → Migrating to RPS-based autoscaling without also fixing JVM ActiveProcessorCount alignment. The RPS scaler will correctly trigger scale-out at the SOT boundary — but the SOT itself will be artificially low if JVM thread pools and GC threads are misconfigured for the container CPU limit. Both changes are needed to produce the correct behaviour.
+
+
+The Stability Window Optimism antipattern → Setting scaleDown.stabilizationWindowSeconds to a low value (< 60 seconds) in an attempt to reduce costs. For RPS-based scaling, a short scale-down window causes replica removal during brief RPS valleys between request bursts — which then requires immediate scale-up when the next burst arrives. The scale-up cold-start latency creates the SLO breach that the autoscaler was supposed to prevent. 300 seconds minimum.
+
+
+
+
+
+
+
+  
+  
+  Maturity Progression
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────
+STAGE        RPS AUTOSCALING MATURITY           NORTH STAR SIGNAL
+────────────────────────────────────────────────────────────────────────────
+Reactive     CPU-based HPA everywhere.          SLO breaches during
+             Thread pool saturation             load events despite
+             events invisible.                  autoscaler operating
+             CPU at 61% when SLO               "correctly" by CPU
+             breaches.                          threshold.
+
+Defined      RPS-based autoscaling             First SOT derivation
+             policy adopted. Failure            complete. First service
+             modes documented.                  migrated to RPS-based
+             SOT derivation protocol            KEDA. CPU-based HPA
+             established.                       retained in parallel.
+
+Measured     Migration complete for            RPS scaler fires before
+             critical services. CPU            SLO breach in load test.
+             threshold at SOT                  CPU% at SOT boundary
+             documented for each.              documented for each
+             Splunk comparison                 service.
+             validates timing.
+
+Optimised    JVM ActiveProcessorCount          Zero thread-saturation-
+             aligned. GC tuning                caused SLO breaches.
+             validated in load tests.          GC pause impact visible
+             RPS/replica dashboard             in telemetry but not
+             primary autoscaling               causing SLO events.
+             health metric.
+
+Generative   SOT derivation required          New services blocked
+             for all new services             from production launch
+             before launch. Autoscaling        without RPS-based
+             strategy part of design           autoscaling configured
+             review checklist.                 and SOT validated.
+────────────────────────────────────────────────────────────────────────────
+
+Identify the CPU utilisation value for each production service at which thread pool saturation actually occurs. Run a load test at stepped RPS increments for one service and record the CPU utilisation at each step. Find the step where latency begins to increase (the SOT boundary). Record the CPU% at that step — this is the CPU utilisation that your 70% threshold should have been, and it is probably not 70%.
+
+
+Check ActiveProcessorCount alignment for every JVM service in production. Run kubectl exec <pod> -- java -XshowSettings:all 2>&1 | grep "processors". Compare the reported processor count to the container CPU limit. If they differ, the JVM has misconfigured thread pools. Add -XX:ActiveProcessorCount=<cpu_limit_integer> to JAVA_TOOL_OPTIONS before the next deployment.
+
+
+Verify that your Istio Envoy metrics exist and are being scraped. Query istio_requests_total{reporter="destination"} in Prometheus for a production service. If the metric is absent or shows zero, Istio Prometheus integration needs to be enabled before RPS-based autoscaling can be configured.
+
+
+Deploy the RPS-based ScaledObject for one service in parallel with its existing CPU HPA. Let both run for one week. Compare scale-out event timing: does the RPS scaler fire earlier than the CPU HPA during load events? The expected answer is yes. Document the comparison — it is your migration evidence and your justification for removing the CPU HPA.
+
+
+Update your autoscaling dashboard to show RPS per replica and SOT utilisation percentage as primary metrics. Remove CPU utilisation from the primary autoscaling health view. CPU is still useful for capacity planning and infrastructure efficiency; it is not useful for autoscaling health assessment for web workloads. The dashboard changes what engineers monitor, which changes what they optimise.
+
+
+
+
+
+
+
+"CPU-based autoscaling is correct for CPU-bound workloads. Most production web and API services are not CPU-bound. They are I/O-bound, thread-pool-bound, connection-pool-bound, or GC-pause-affected — and for all of these, CPU utilisation is at best a lagging indicator and at worst an actively misleading one. The autoscaling signal should measure demand, not the infrastructure's response to demand. Request rate measures demand. CPU measures something else."..."
+image: /img/blog/generated/transitioning-to-request-rate-metrics-for-autoscaling-in-microservices-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Transitioning to Request-Rate Metrics for Autoscaling in Microservices](/img/blog/generated/transitioning-to-request-rate-metrics-for-autoscaling-in-microservices-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### The Autoscaling Dilemma in Microservices
+
+In modern microservices architectures, autoscaling is an essential capability that dynamically adjusts resource allocation based on demand. However, relying solely on CPU utilization as a scaling metric can lead to significant operational challenges and performance degradation. A notable case occurred with a major e-commerce platform during a flash sale event, where latency service level objectives (SLOs) were breached despite CPU utilization being reported at a seemingly safe 61%. This incident underscores a critical flaw: CPU metrics often fail to accurately reflect the real-time demand and performance of I/O-bound services, leading to misguided scaling decisions.
+
+### The Mechanisms Behind Autoscaling Failures
+
+Understanding the mechanics of autoscaling failures is crucial for addressing the limitations of CPU utilization as a metric. In I/O-bound services, low CPU utilization can persist even under heavy load due to thread pool saturation. For instance, consider a service with a thread pool of 200 and a maximum request rate of 2,800 requests per second (RPS) per replica. If all threads are occupied, incoming requests are queued while the CPU remains underutilized, prompting the autoscaler to erroneously conclude that the service has sufficient capacity. This disconnect can lead to unacceptable latency spikes and SLO breaches, as the autoscaler cannot respond to the actual demand on the service.
+
+### The Four Failure Modes of CPU-Based Autoscaling
+
+CPU-based autoscaling can fail in four distinct ways: thread pool saturation, garbage collection (GC) pauses, connection pool exhaustion, and network saturation. Each of these scenarios illustrates how CPU metrics can misrepresent service demand. For example, during a GC pause, application threads are suspended, causing request processing to halt while GC threads consume CPU resources. The autoscaler, observing high CPU utilization, fails to trigger additional instances, exacerbating latency issues. Similarly, connection pool exhaustion can lead to queued requests, independent of CPU utilization, complicating scaling decisions further.
+
+### Request-Rate Metrics: A More Accurate Reflection of Demand
+
+To address the limitations of CPU-based metrics, request-rate metrics (RPS) provide a more accurate representation of service demand. RPS correlates directly with user demand, enabling a more responsive scaling mechanism. By applying Little's Law, which relates the arrival rate of requests to system concurrency and response time, teams can develop a more effective autoscaling strategy. When RPS exceeds a defined safe operating throughput (SOT), latency will inevitably increase, indicating the need for additional resources before SLO breaches occur. This direct correlation between RPS and demand makes it a superior choice for autoscaling in microservices.
+
+### A Step-by-Step Migration Protocol to Request-Rate Autoscaling
+
+Transitioning from CPU-based to request-rate-based autoscaling requires a systematic approach. 
+
+### Establish Current CPU Threshold Baseline
+
+Begin by determining the current CPU threshold baseline. This involves querying what CPU percentage corresponds to the existing scale-out threshold and identifying the RPS per replica at that CPU threshold. This step establishes an equivalence point between the old and new scaling signals.
+
+### Conduct SOT Derivation Load Test
+
+Next, execute a stepped ramp load test to derive the SOT. This test should identify the RPS per replica at which the SLO boundary is reached, allowing teams to calculate the SOT with an 80% safety margin. This data will be critical for configuring the new autoscaler.
+
+### Verify Metric Availability
+
+Ensure that the necessary metrics are available for monitoring. For instance, check that the Istio metric `istio_requests_total{reporter="destination"}` exists in Prometheus and is populated for the target service. If not, enable Istio Prometheus integration before proceeding. Additionally, consider implementing Grafana dashboards that visualize these metrics in real-time for better observability.
+
+### Deploy New Autoscaler in Parallel
+
+Deploy the new autoscaling configuration alongside the existing CPU-based autoscaler. Configure the new object with the SOT-derived target while retaining the current minimum and maximum replicas. This dual deployment allows for a safety net; if the new configuration is flawed, the old CPU-based autoscaler remains active.
+
+### Observe for Performance
+
+Monitor the new autoscaler for at least seven days, verifying that it responds correctly to load patterns. Compare the new replica counts with those from the CPU-based autoscaler. Ideally, the new autoscaler should trigger scale-outs earlier during load events and later during GC events, reflecting its responsiveness to actual demand.
+
+### Validate with Controlled Load Tests
+
+Conduct controlled load tests to validate the new autoscaler. Verify that it triggers scale-outs before latency SLO breaches occur and that the scaling stabilizes p95 latency below the SLO threshold. Document the results, showcasing that the new RPS-based scaler performs better than the legacy CPU-based system. Tools like K6 or JMeter can be employed for these tests to simulate realistic traffic conditions.
+
+### Remove CPU-Based Autoscaler
+
+Finally, once the new autoscaler has been validated, remove the old CPU-based autoscaler. Update the autoscaling annotations to reflect the SOT derivation reference, ensuring that all team members are aware of the rationale behind the migration.
+
+### Best Practices for Monitoring and Validating Autoscaling Effectiveness
+
+Implementing request-rate-based autoscaling necessitates rigorous monitoring and validation to ensure its effectiveness. Here are some specific best practices:
+
+1. **Utilize Prometheus for RPS Metrics**: Track RPS metrics using Prometheus and establish alerts for when RPS approaches the SOT. This proactive approach allows teams to respond to demand spikes before they impact performance.
+
+2. **Implement Anomaly Detection**: Consider using anomaly detection algorithms to identify unusual patterns in request rates that may indicate potential issues. This can help in early detection of problems before they escalate.
+
+3. **Visualize Metrics in Real-Time**: Create Grafana dashboards that visualize RPS metrics, SOT utilization, and latency metrics. This visualization aids in quickly assessing the health of the autoscaling system.
+
+4. **Conduct Regular Load Tests**: Regularly perform load tests to validate scaling behavior and ensure that the autoscaler responds appropriately to varying load patterns. Document the outcomes to track improvements over time.
+
+5. **Compare Scaling Events**: Analyze scaling events between the new RPS-based autoscaler and the legacy CPU-based autoscaler to glean insights into performance enhancements and document the migration's success.
+
+### Real-World Implications of Request-Rate Metrics
+
+The shift to request-rate metrics has profound implications beyond performance enhancements. The e-commerce platform's incident serves as a cautionary tale, illustrating how traditional CPU metrics can obscure critical issues, leading to poor user experiences. Transitioning to RPS-based autoscaling allows organizations to respond more effectively to user demand, reduce latency, and ultimately enhance customer satisfaction. This approach also aligns autoscaling strategies more closely with the actual workload characteristics of microservices, fostering a more resilient architecture.
+
+### Conclusion: The Path Forward for Autoscaling in Microservices
+
+In conclusion, moving from CPU-based to request-rate-based autoscaling is not merely a technical adjustment; it signifies a fundamental shift in understanding and responding to demand in microservices architectures. By acknowledging the limitations of CPU as a scaling metric and embracing the more accurate reflection of demand provided by request-rate metrics, organizations can significantly enhance their ability to maintain performance and reliability under fluctuating loads. This transition is essential for engineering teams aiming to build robust, scalable applications that meet the demands of modern users, ultimately leading to improved user satisfaction and operational efficiency.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/npayyappilly/request-rate-based-autoscaling-why-cpu-metrics-lie-and-how-to-fix-them-pie)
+
+---
+
+<SocialShare title="Transitioning to Request-Rate Metrics for Autoscaling in Microservices" slug="transitioning-to-request-rate-metrics-for-autoscaling-in-microservices" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
