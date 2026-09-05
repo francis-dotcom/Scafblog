@@ -1,0 +1,192 @@
+---
+slug: fortifying-llm-agents-the-case-for-logits-level-firewalls
+title: "Fortifying LLM Agents: The Case for Logits-Level Firewalls"
+authors: [francis]
+tags: [ai, llm, security, firewall]
+date: 2026-09-05T09:36:28.755Z
+description: "TL;DR
+
+
+Prompt filters can be jailbroken. Post-generation moderation lets forbidden content leak before detection. reskSecure intercepts token predictions inside the generation loop, using a 64-bit permission bitmask to block or penalize disallowed phrases at the logits level. It can force EOS on a match and block tool calls entirely. This tutorial shows you how to move from a vulnerable setup to a logits-level firewall.
+When you build an LLM agent, you often rely on prompt engineering to keep it safe. You tell the model "do not reveal salaries" or "do not call send_email". But prompt injections can bypass these instructions. A clever user can craft a prompt that overrides your system message. Even if you scan the output after generation, the forbidden content has already been emitted to the user. That is a leak.
+reskSecure takes a different approach. It works at the logits level, inside the model's generation loop. Each token must pass through a security policy before it is sampled. If a token would start or complete a banned phrase, its logit is set to -inf (hard block) or reduced by a penalty (bias). If a complete match occurs, the EOS token is forced, stopping generation immediately. Tool calls are also blocked at the token level: if the user's bitmask does not have the required bit, the tool's trigger phrases are added to the hard-blocked list. The model can never generate the first token of a disallowed tool call, no matter how hard it tries.
+Here is a typical setup that relies on prompt instructions and post-generation checks. It is vulnerable because the model can still generate forbidden content before you catch it.
+from transformers import AutoModelForCausalLM, AutoTokenizer
+model = AutoModelForCausalLM.from_pretrained("mistralai/Mistral-7B-v0.1")
+system_prompt = "You are a helpful assistant. Never reveal salaries or call send_email."
+outputs = model.generate(**inputs)
+This code has no protection at the token level. The model might output "The CEO's salary is $10M" before any post-generation check runs. A prompt injection can easily override the system prompt.
+Now let's protect the same generation with reskSecure. First, define a policy file policy.yaml that maps a bitmask to phrase rules and tool permissions.
+version: "1.0"
+mask: 7
+name: contributor
+strict: false
+default: true
+rules:
+
+
+phrase: "DROP TABLE"
+mode: hard
+phrase: "DELETE FROM"
+mode: hard
+phrase: "salaries"
+mode: bias
+penalty: -5.0
+tools:
+read_email:
+required_bit: 0
+send_email:
+required_bit: 1
+read_sql:
+required_bit: 2
+Now use the BitmaskLogitsProcessor in your generation pipeline:
+from transformers import AutoModelForCausalLM, AutoTokenizer
+model = AutoModelForCausalLM.from_pretrained("mistralai/Mistral-7B-v0.1")
+policy_set = load_policy("policy.yaml")
+processor = BitmaskLogitsProcessor(
+outputs = model.generate(**inputs, logits_processor=[processor])
+if has_tool_call(response):
+Imported BitmaskLogitsProcessor, load_policy, and verify_tool_action from resksecure. These are the core building blocks.
+Created a policy_set from policy.yaml using load_policy. This defines which phrases are banned or penalized, and which tools require which bits.
+Instantiated the BitmaskLogitsProcessor with a mask of 7, the model name, the tokenizer, and the device. This processor intercepts each token prediction and applies the security policy.
+Passed the processor to model.generate via logits_processor=[processor]. This is the key: every token must pass through the firewall before being sampled.
+Added a post-generation verify_tool_action check as defense-in-depth. Even though the logits processor already blocks tool calls at the token level, this verifies the action against the bitmask again.
+Bitmask is not authentication: reskSecure receives a raw integer bitmask. Your application must handle JWT decoding and authentication to determine the correct mask for each user.
+No guarantee against all attacks: While logits-level filtering is strong, it is not a silver bullet. Complex obfuscations or novel jailbreaks might still slip through. The package provides a strong layer, but you should combine it with other security measures.
+Requires Python 3.13+ and PyTorch 2.0+: Make sure your environment meets the requirements.
+Performance overhead: The Aho-Corasick automaton runs on every token, which adds some latency. The package uses GPU-accelerated matching to mitigate this, but it is not free.
+If you are building LLM agents that handle sensitive data or call external tools, do not rely on prompt engineering alone. Move your security policy to the logits level with reskSecure. It gives you a single source of truth — a 64-bit permission bitmask — that controls what the model can generate and which tools it can call. The model never even sees a banned sequence as a completion candidate.
+Try it today: reskSecure on GitHub and on PyPI. For enterprise solutions, visit resk.fr...."
+image: /img/blog/generated/fortifying-llm-agents-the-case-for-logits-level-firewalls-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Fortifying LLM Agents: The Case for Logits-Level Firewalls](/img/blog/generated/fortifying-llm-agents-the-case-for-logits-level-firewalls-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### The Rising Threat Landscape for LLMs
+
+As large language models (LLMs) become integral to various applications, their vulnerabilities have increasingly come under scrutiny. The flexibility of LLMs, which allows for creative and contextually relevant responses, also makes them susceptible to prompt injections. These injections can manipulate the model's behavior, leading to unintended and potentially harmful outputs. The implications of such vulnerabilities are substantial, ranging from data breaches to reputational damage, necessitating robust security measures.
+
+### The Mechanics of Prompt Injections
+
+Prompt injections exploit the inherent design of LLMs by embedding malicious instructions within seemingly benign user inputs. For example, a user could craft a prompt designed to override the model’s intended behavior, causing it to disclose sensitive information or generate harmful content. The risks associated with such manipulations are severe, as they can result in data leaks, violation of privacy regulations, and loss of user trust. A thorough understanding of these risks is essential for developers tasked with securing LLM applications.
+
+### Introducing Logits-Level Firewalls
+
+To counter the vulnerabilities posed by prompt injections, implementing a logits-level firewall represents a significant advancement in security architecture. This approach intercepts token predictions during the generation process, applying a security policy that evaluates each token against a predefined set of rules. By leveraging a 64-bit permission bitmask, developers can enforce real-time validation, ensuring that disallowed phrases are either blocked or penalized before they reach the output stage. This proactive measure significantly mitigates the risk of unauthorized content generation.
+
+### Crafting a Security Policy with a Bitmask
+
+Establishing a robust security policy is the cornerstone of implementing a logits-level firewall. This involves creating a policy file that maps specific phrases to their corresponding security measures. For instance, a policy file might stipulate that certain SQL commands are to be hard-blocked, while other sensitive terms incur a penalty. Below is an example of a policy file in YAML format:
+
+```yaml
+version: "1.0"
+mask: 7
+name: contributor
+strict: false
+default: true
+rules:
+  - phrase: "DROP TABLE"
+    mode: hard
+  - phrase: "DELETE FROM"
+    mode: hard
+  - phrase: "salaries"
+    mode: bias
+    penalty: -5.0
+tools:
+  read_email:
+    required_bit: 0
+  send_email:
+    required_bit: 1
+  read_sql:
+    required_bit: 2
+```
+
+This policy file delineates which phrases are prohibited and which tools require specific permissions, thereby establishing a clear framework for token-level security.
+
+### Implementing the BitmaskLogitsProcessor
+
+Once the policy file is defined, the next step is to integrate the `BitmaskLogitsProcessor` into the model's generation pipeline. This processor acts as a security layer that intercepts each token prediction, applying the security policy in real-time. Below is an example of how to implement this in Python using the Hugging Face Transformers library:
+
+```python
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from resksecure import BitmaskLogitsProcessor, load_policy
+
+# Load the model and tokenizer
+model = AutoModelForCausalLM.from_pretrained("mistralai/Mistral-7B-v0.1")
+tokenizer = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-v0.1")
+
+# Load the security policy
+policy_set = load_policy("policy.yaml")
+
+# Instantiate the logits processor
+processor = BitmaskLogitsProcessor(mask=7, model=model, tokenizer=tokenizer)
+
+# Generate text with security measures in place
+outputs = model.generate(**inputs, logits_processor=[processor])
+```
+
+This code snippet illustrates how to set up the `BitmaskLogitsProcessor`, ensuring that every token is evaluated against the defined security policy before being generated.
+
+### Testing and Validating Security Measures
+
+Implementing a logits-level firewall is only the first step; rigorous testing and validation of security measures are imperative. This process involves simulating various prompt injections and assessing the model's responses. Developers must ensure that the model does not generate any disallowed content and that the security policies are consistently enforced. Automated testing frameworks can streamline this validation process, enabling continuous integration and deployment of security updates.
+
+### Performance Trade-offs of Logits-Level Filtering
+
+While logits-level filtering enhances security, it is essential to consider the performance implications. The Aho-Corasick algorithm, utilized for matching phrases against the security policy, introduces some latency during token generation. Although GPU acceleration can alleviate this overhead, developers must be aware of the trade-offs involved. Performance benchmarks should be conducted to assess the impact of the logits-level firewall on generation speed and responsiveness. For instance, testing under load conditions can reveal how many tokens per second the model can generate while maintaining security.
+
+### Recognizing Limitations of Logits-Level Filtering
+
+Despite the advantages of logits-level filtering, it is critical to acknowledge its limitations. While this method significantly bolsters security, it is not infallible. Sophisticated attackers may still devise methods to bypass these measures through complex obfuscations or novel prompt injections. Therefore, adopting a multi-layered security strategy that combines logits-level filtering with other defenses—such as user authentication, input validation, and continuous monitoring—is essential.
+
+### Best Practices for Sustaining LLM Security
+
+To ensure the ongoing security of LLM agents, developers should adhere to several best practices. Regularly updating the security policy in response to emerging threats is vital. Additionally, employing a defense-in-depth strategy, which incorporates both pre- and post-generation checks, can provide an additional layer of protection. Continuous training and awareness programs for developers and users can also mitigate risks associated with prompt injections.
+
+### Future Directions in AI Security
+
+As LLM technology advances, so too will the tactics employed by malicious actors. Future considerations for AI security should encompass the development of more sophisticated filtering mechanisms, the integration of machine learning for anomaly detection, and the exploration of decentralized approaches for securing model interactions. By proactively addressing potential threats and adapting security measures, developers can create safer and more reliable LLM agents.
+
+### Conclusion: A Call to Action for Developers
+
+In summary, securing LLM agents against prompt injections and unauthorized content generation is a critical challenge that necessitates a proactive approach. By implementing a logits-level firewall that leverages a permission bitmask for real-time token validation, developers can significantly enhance the security posture of their applications. As the landscape of AI security continues to evolve, it is imperative for developers to remain vigilant and adaptable, ensuring that their systems are robust against emerging threats.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/resk/stop-jailbreaks-at-the-token-level-a-bitmask-firewall-for-llm-agents-199m)
+
+---
+
+<SocialShare title="Fortifying LLM Agents: The Case for Logits-Level Firewalls" slug="fortifying-llm-agents-the-case-for-logits-level-firewalls" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
