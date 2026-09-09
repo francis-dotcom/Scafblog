@@ -1,0 +1,894 @@
+---
+slug: mastering-the-agent-loop-building-robust-ai-systems
+title: "Mastering the Agent Loop: Building Robust AI Systems"
+authors: [francis]
+tags: [ai, agents, systems, infrastructure]
+date: 2026-09-09T17:16:07.287Z
+description: "Most agent failures are not model failures. They are loop failures.
+The model may be smart enough. The tools may be correctly defined. The prompt may even be reasonable. But the agent still repeats itself, misreads a tool result, burns through retries, or confidently turns a transient API timeout into a business decision.
+That usually happens because the agent loop — the Think, Act, Observe, Repeat cycle — is treated as glue code instead of the core control system it really is.
+A lot of agent content focuses on prompts, tools, or model selection. Far less attention is paid to the boring machinery that decides:
+what the agent should think about next,
+which actions are allowed,
+how observations are normalized,
+when the loop should stop,
+how errors become information,
+and how state survives across iterations.
+That machinery matters more than most teams expect.
+TL;DR
+The agent loop is not a chatbot with tools; it is a state machine.
+“Think” should produce a constrained next decision, not a long monologue.
+Actions need scope, idempotency, and blast-radius controls.
+Observations must be normalized before the model sees them.
+“Repeat” needs an explicit termination policy, not vibes.
+Errors should become structured observations.
+Step-level tracing is what makes agent debugging possible.
+Start with a hand-rolled loop; add a framework when state transitions become complex.
+The loop is the product
+1. Make Think a Decision, Not a Diary
+2. Actions Need a Blast Radius
+3. Observations Should Be Normalized Before the Model Sees Them
+4. Repeat Needs a Termination Policy
+5. Errors Are Observations, Not Exceptions
+6. Memory Should Be Written for the Next Step, Not the Database
+7. Instrument the Loop at Step Granularity
+8. Hand-Rolled, Graph, or Hosted: Choosing a Runtime
+What I Would Ship First
+At its core, an agent loop looks deceptively simple:
+while policy.should_continue(state):
+    thought = think(state)
+
+    if thought.stop_reason:
+        break
+
+    action = choose_action(thought)
+    observation = execute(action)
+    state = update_state(state, action, observation)
+
+That is the whole idea behind Think, Act, Observe, Repeat.
+But the difference between a demo and a production agent lives inside each of those functions.
+A toy agent assumes:
+the model’s reasoning is useful,
+actions are safe,
+tool results are clean,
+retries are harmless,
+and stopping is obvious.
+A production agent knows none of that is true.
+The loop has to handle:
+malformed tool output,
+partial failures,
+nondeterministic model decisions,
+repeated actions,
+untrusted content inside observations,
+context pressure,
+human approval gates,
+and the fact that “the model sounds confident” is not a completion signal.
+That is the part nobody talks about enough.
+Scenario:
+
+Your agent writes a long plan, then calls the wrong tool anyway. Or it produces an impressive chain of reasoning but keeps repeating the same action with slightly different arguments.
+Why it matters:
+
+A lot of agent implementations ask the model to “think step by step” and then treat whatever comes back as useful reasoning. In practice, unstructured thinking increases variance. The model may produce a beautiful essay, but the loop still needs one concrete thing: what happens next?
+If the thinking step does not reduce uncertainty, it is just expensive text.
+Solution:
+
+Make the thinking step produce a narrow, structured decision.
+Instead of asking for a broad plan, ask for:
+the current goal,
+known facts,
+missing information,
+possible next actions,
+the selected action,
+and an optional stop condition.
+
+
+
+from dataclasses import dataclass
+
+@dataclass
+class Thought:
+    goal: str
+    known_facts: list[str]
+    missing_info: list[str]
+    options: list[str]
+    chosen_action: str
+    stop_reason: str | None = None
+
+Then the loop can validate that output before acting on it.
+For example:
+If missing_info is empty but no action is chosen, something is wrong.
+If chosen_action is not in the allowed tool set, reject it.
+If stop_reason is present, require evidence before honoring it.
+Why this works:
+
+This turns “thinking” from open-ended generation into a constrained decision step. The model still reasons, but the loop gets a predictable object it can inspect, log, validate, and reject.
+It also makes failures easier to diagnose. If the agent chooses the wrong tool, you can see whether the problem was:
+bad known facts,
+missing context,
+a poor option list,
+or an invalid selection.
+💡 Practical note:
+
+If your agent keeps looping, shorten the thinking horizon. Asking for the next step is usually more reliable than asking for a ten-step plan.
+Scenario:
+
+You give an agent a tool called update_customer. It works fine until the model decides that “cleanup” means deleting 300 stale records.
+Or, more subtly, the agent calls a payment API with the wrong currency because the tool allowed too many things.
+Why it matters:
+
+A common mistake is modeling actions like generic functions. The agent does not understand risk the way a human does. If a tool can do something dangerous, the agent will eventually do something dangerous.
+This is especially true when observations contain untrusted text. A support ticket, web page, or document can include language that nudges the agent toward an unsafe action. If the action surface is too broad, the loop has no defense.
+Solution:
+
+Treat actions as commands with explicit scope and policy.
+At minimum, separate:
+read-only tools,
+limited mutating tools,
+high-risk tools requiring approval.
+
+
+
+from dataclasses import dataclass
+
+@dataclass
+class Action:
+    tool: str
+    arguments: dict
+    idempotency_key: str
+    requires_confirmation: bool = False
+
+READ_ONLY_TOOLS = {
+    "search_orders",
+    "get_customer",
+    "list_invoices",
+}
+
+MUTATING_TOOLS = {
+    "update_shipping_address",
+    "issue_refund",
+}
+
+HIGH_RISK_TOOLS = {
+    "delete_account",
+    "export_all_user_data",
+}
+
+def authorize_action(action: Action) -> bool:
+    if action.tool in READ_ONLY_TOOLS:
+        return True
+
+    if action.tool in MUTATING_TOOLS:
+        return action.idempotency_key is not None
+
+    if action.tool in HIGH_RISK_TOOLS:
+        return action.requires_confirmation
+
+    return False
+
+The important part is not the exact code. It is that the loop has a policy layer between the model’s intention and the side effect.
+Good action design usually includes:
+narrow tools instead of omnibus tools,
+explicit identifiers instead of free-text selectors,
+idempotency keys for mutating operations,
+dry-run modes where possible,
+and confirmation gates for irreversible actions.
+Why this works:
+
+It limits damage even when the model is wrong. The agent can still propose an action, but the loop decides whether that action is acceptable.
+This is one of the biggest differences between a prototype agent and one you can trust near real systems.
+⚠️ Gotcha:
+
+Do not split tools so finely that the model cannot choose between them. If you have 60 tiny tools with near-identical names, action selection will degrade. Group by capability, not by database table.
+Scenario:
+
+Your agent calls a CRM API. The API returns 120 KB of nested JSON. The model either ignores the relevant field, hallucinates a value, or gets distracted by irrelevant metadata.
+This is one of the most common failure modes in real agent systems.
+Why it matters:
+
+Models reason better over compact, relevant context than over raw system dumps. A huge observation creates three problems:
+it consumes context budget,
+it introduces noise,
+and it can hide the exact fact the agent needs to proceed.
+The observation step is not just “put the tool result into the message history.” It is a transformation step.
+Solution:
+
+Normalize observations into an envelope that contains only what the loop needs.
+A useful observation usually has:
+a status,
+a short summary,
+the relevant entities,
+the next possible actions,
+and a reference to raw data if needed.
+
+
+
+def normalize_customer_observation(raw: dict) -> dict:
+    customer = raw.get("customer", {})
+
+    return {
+        "status": "ok",
+        "summary": (
+            f"Found customer {customer.get('id')} "
+            f"with {customer.get('open_ticket_count', 0)} open tickets."
+        ),
+        "entities": [
+            {
+                "type": "customer",
+                "id": customer.get("id"),
+                "email": customer.get("email"),
+                "plan": customer.get("plan"),
+            }
+        ],
+        "available_next_actions": [
+            "get_recent_tickets",
+            "get_billing_history",
+        ],
+        "raw_ref": raw.get("debug_id"),
+    }
+
+This does something important: it separates what happened from everything the system knows.
+In production, I would always prefer an observation like:
+{
+  "status": "ok",
+  "summary": "Found 3 matching invoices, 1 overdue",
+  "entities": [
+    {
+      "type": "invoice",
+      "id": "inv_8842",
+      "state": "overdue",
+      "amount": 120.0
+    }
+  ],
+  "next_actions": ["get_invoice_details", "start_reminder_flow"]
+}
+
+over a raw API payload with dozens of irrelevant fields.
+Why this works:
+
+The model gets a cleaner decision surface. The loop also becomes easier to test because observations are stable objects instead of arbitrary vendor payloads.
+This is also where you can reduce security risk. Observations often include external content. If you pass that content straight into the next prompt, you are effectively letting outside text influence the agent’s next action. Normalization gives you a place to filter, label, or quarantine untrusted content.
+🔍 Why this matters:
+
+If you only fix one part of the agent loop, fix observation shaping. Many “model quality” problems are actually bad observation problems.
+Scenario:
+
+The agent says, “I’m almost done,” then calls the same tool again with slightly different arguments. Or it keeps searching for a record that does not exist.
+Why it matters:
+
+Many agent loops stop when the model produces a final answer. That is dangerous because the model can decide it is done for the wrong reasons. It may be confident, concise, and wrong.
+A production loop needs explicit stopping conditions.
+Solution:
+
+Define termination in terms of state, not tone.
+Good termination policies usually combine:
+a maximum step budget,
+repeated-action detection,
+evidence requirements,
+and explicit failure thresholds.
+
+
+
+from dataclasses import dataclass, field
+
+@dataclass
+class AgentState:
+    steps: int = 0
+    repeated_action_count: int = 0
+    required_fields: set[str] = field(default_factory=set)
+    collected_fields: set[str] = field(default_factory=set)
+
+    def has_sufficient_evidence(self) -> bool:
+        return self.required_fields.issubset(self.collected_fields)
+
+class LoopPolicy:
+    def __init__(self, max_steps: int = 8, max_repeats: int = 2):
+        self.max_steps = max_steps
+        self.max_repeats = max_repeats
+
+    def should_continue(self, state: AgentState) -> bool:
+        if state.steps >= self.max_steps:
+            return False
+
+        if state.repeated_action_count >= self.max_repeats:
+            return False
+
+        return not state.has_sufficient_evidence()
+
+This forces the loop to ask a better question than “Does the model want to stop?”
+It asks:
+Have we collected the required facts?
+Are we making progress?
+Are we repeating ourselves?
+Have we exceeded the budget?
+For example, if the task is to answer a billing question, the required evidence might be:
+customer ID,
+invoice ID,
+payment status,
+refund eligibility.
+Until those fields are filled from trusted observations, the agent should not be allowed to finish.
+Why this works:
+
+It replaces subjective completion with observable progress. That matters because agents often fail by drifting, not by crashing.
+A termination policy also makes product behavior more predictable. If the loop has a step budget, you can reason about latency and cost. If it has evidence requirements, you can explain why it stopped.
+🚨 Production warning:
+
+If your agent can take mutating actions, a hard stop is not enough. You also need to report what was already changed and what remains incomplete.
+Scenario:
+
+A tool call times out. The agent interprets that as “the record does not exist” and proceeds.
+This happens more often than it should.
+Why it matters:
+
+In many systems, errors are either swallowed, retried blindly, or converted into vague text. All three are bad.
+An agent needs to know the difference between:
+a transient failure,
+invalid input,
+insufficient permissions,
+and a confirmed negative result.
+Those are not the same thing.
+Solution:
+
+Return errors as structured observations.
+def execute_tool(action: Action):
+    try:
+        result = tool_registry.call(action.tool, action.arguments)
+        return {
+            "status": "ok",
+            "result": result,
+        }
+
+    except TimeoutError:
+        return {
+            "status": "retryable_error",
+            "message": "The request timed out.",
+            "safe_to_retry": action.tool in READ_ONLY_TOOLS,
+        }
+
+    except PermissionError:
+        return {
+            "status": "permission_denied",
+            "message": "The agent does not have access to this resource.",
+            "safe_to_retry": False,
+        }
+
+    except ValueError as exc:
+        return {
+            "status": "invalid_input",
+            "message": str(exc),
+            "safe_to_retry": False,
+        }
+
+Then the loop can decide what to do:
+retry a read-only lookup,
+ask for corrected input,
+escalate for permission,
+or stop safely.
+This is especially important for actions with side effects. A failed payment call and a successful-but-delayed payment call are very different. If the loop cannot distinguish them, it may duplicate an action.
+Why this works:
+
+Structured errors prevent the model from improvising meaning from failure. Instead of guessing, the agent receives a precise signal about what happened and what is allowed next.
+A useful classification scheme is:
+
+
+
+Error type
+Meaning
+Usual response
+
+
+
+
+retryable_error
+Temporary failure
+Retry only if safe
+
+
+invalid_input
+Arguments are wrong
+Revise arguments or stop
+
+
+permission_denied
+Not authorized
+Escalate or stop
+
+
+not_found
+Confirmed absence
+Proceed with negative fact
+
+
+conflict
+State changed underneath
+Re-read state before retry
+
+
+
+⚠️ Gotcha:
+
+Never retry mutating actions automatically unless they are explicitly idempotent. “Try again” is not a universal recovery strategy.
+Scenario:
+
+The agent works fine for three turns, then forgets a constraint that appeared early in the conversation. Or worse, it treats a hallucinated detail as if it were a verified fact.
+Why it matters:
+
+A lot of teams conflate three different things:
+conversation history,
+working memory,
+durable system state.
+They are not the same.
+Conversation history is a transcript. Working memory is the agent’s current understanding. Durable state is what has been verified and stored.
+If you rely only on the transcript, the agent has to rediscover important facts by rereading everything. That is inefficient and error-prone.
+Solution:
+
+Maintain an explicit working memory that the loop updates after each observation.
+from dataclasses import dataclass
+from datetime import datetime, UTC
+
+@dataclass
+class Fact:
+    key: str
+    value: str
+    source: str
+    observed_at: str
+
+def update_memory(memory: dict[str, Fact], observation: dict) -> None:
+    if observation.get("status") != "ok":
+        return
+
+    for entity in observation.get("entities", []):
+        if entity.get("type") == "customer" and entity.get("id"):
+            memory["customer_id"] = Fact(
+                key="customer_id",
+                value=entity["id"],
+                source="crm_lookup",
+                observed_at=datetime.now(UTC).isoformat(),
+            )
+
+The important part is that memory entries carry their source.
+That lets the loop distinguish:
+facts observed from tools,
+facts inferred by the model,
+and facts asserted by the user.
+Those deserve different trust levels.
+For example:
+customer_id from a verified CRM lookup is strong evidence.
+“The customer said their plan is Enterprise” is weaker until confirmed.
+“The model thinks the invoice is overdue” is not evidence at all unless a tool result supports it.
+Why this works:
+
+Working memory becomes the loop’s internal state instead of an accidental byproduct of chat history. That makes the agent easier to reason about, easier to debug, and less likely to drift.
+It also helps with context limits. You can keep a compact set of verified facts in the prompt instead of relying on the entire transcript.
+💡 Practical note:
+
+If a fact matters enough to affect an action, it should be traceable to an observation. If it cannot be traced, treat it as unverified.
+Scenario:
+
+The final answer is wrong. You open the logs and see the last prompt and the final response. That tells you almost nothing.
+Why it matters:
+
+Agent failures are usually step failures, not final-answer failures.
+The problem may have happened because:
+the third observation was truncated badly,
+the model repeated an action,
+an error was misclassified,
+or the loop stopped too early.
+If you only log final inputs and outputs, you cannot diagnose any of that.
+Solution:
+
+Trace every step as a structured event.
+from dataclasses import dataclass
+
+@dataclass
+class StepTrace:
+    step: int
+    thought: dict
+    action: dict
+    observation: dict
+    policy_decision: str
+    latency_ms: int
+    token_estimate: int | None = None
+
+At minimum, log:
+the structured thought,
+the selected action,
+the policy decision that approved or rejected it,
+the normalized observation,
+retries,
+and the reason the loop stopped.
+Useful metrics include:
+average steps per task,
+repeated-action rate,
+tool error rate,
+termination reason distribution,
+observation size before and after normalization,
+and failure rate by tool.
+This changes debugging from “the agent seems weird” to “step 4 repeatedly misclassifies not_found as a retryable error.”
+Why this works:
+
+You cannot improve what you cannot see. Step-level traces make the loop observable as a system, not just as a language-model interaction.
+This is also where evals become practical. If you want to test changes, you need to know whether the agent improved because:
+it chose better tools,
+understood observations better,
+stopped earlier,
+or made fewer invalid calls.
+A final-answer benchmark alone hides all of that.
+🧠 The important part:
+
+If your tracing only captures the final response, you do not have an agent observability strategy. You have a receipt.
+Once teams decide to take the loop seriously, the next question is usually: should we build it ourselves, use a graph framework, or adopt a hosted agent runtime?
+There is no universal answer, but there is a useful way to think about it.
+A hand-rolled loop is often the best starting point.
+It gives you:
+full control over state,
+clear debugging,
+minimal abstraction,
+and no hidden assumptions.
+This is especially true for simple agents with a small number of tools and a linear flow.
+If your agent mostly does:
+look something up,
+ask one follow-up question,
+call one mutating action,
+and summarize,
+then a graph framework may add more complexity than value.
+Graph-based runtimes become useful when the flow is no longer linear.
+They tend to shine when you need:
+branching,
+checkpointing,
+human-in-the-loop approval,
+long-running workflows,
+parallel tool calls,
+or resumable state.
+If your agent can pause for user confirmation, resume later, and move through multiple stages, a graph model can make that explicit.
+The tradeoff is abstraction. You gain structure, but you also inherit the framework’s mental model. That can help, but it can also obscure what is happening if you do not understand the underlying loop.
+Hosted runtimes can be attractive because they bundle:
+tool management,
+persistence,
+execution,
+and sometimes tracing.
+They can be useful when you want to move quickly and your requirements fit the platform’s model.
+The risk is that the most important details — retries, termination, observation normalization, approval gates — may become implicit. If the platform’s defaults do not match your product requirements, you may not notice until production.
+
+
+
+Approach
+Best for
+Strengths
+Main risk
+
+
+
+
+Hand-rolled loop
+Simple tool-use agents
+Full control, easy to inspect
+You must build state management and safety yourself
+
+
+Graph engine
+Multi-step, branching, human-in-loop flows
+Explicit state transitions, good for complex routing
+Framework abstraction can hide loop behavior
+
+
+Hosted runtime
+Fast iteration within platform constraints
+Less infrastructure work, integrated tooling
+Less visibility into defaults and edge cases
+
+
+
+If I were building a new agent today, I would choose like this:
+Start hand-rolled if the agent has fewer than about five tools and the flow is mostly linear.
+Move to a graph engine when approval, branching, checkpointing, or long-running state becomes central.
+Use a hosted runtime when the platform’s model closely matches your use case and you can still export detailed traces.
+The worst approach is to adopt a complex framework before you understand your own loop. Frameworks do not fix unclear termination, unsafe actions, or malformed observations. They just give those problems a nicer API.
+If I had to ship a production agent loop with minimal regret, I would start with a deliberately boring design.
+Not because boring is fashionable, but because it fails in understandable ways.
+I would build:
+a structured Thought object,
+a small action allowlist,
+normalized observations,
+explicit error categories,
+a step budget,
+and step-level traces.
+That alone eliminates a surprising number of real-world failures.
+For anything mutating, I would add:
+idempotency keys,
+dry-run mode,
+human confirmation for high-risk operations,
+and a policy check before execution.
+If the agent cannot prove why an action is safe, it should not take it.
+I would not let the model end the task just because it sounds finished.
+I would require:
+enough verified evidence,
+no repeated action pattern,
+and an explicit termination reason.
+If those are not met, the loop continues or escalates.
+Before shipping an agent loop, I would want answers to these questions:
+Can the loop stop without relying on model confidence?
+Are actions scoped narrowly enough to survive a bad decision?
+Are tool observations normalized before entering the prompt?
+Are errors classified by what the agent is allowed to do next?
+Is working memory separated from raw chat history?
+Can we reconstruct a failure step by step?
+Do we know the difference between “not found” and “request failed”?
+Are high-risk actions gated?
+Do we have budgets for steps, retries, and tokens?
+Can we test loop behavior without changing the model?
+If the answer to several of those is “not yet,” the agent is not ready for production.
+The most important shift is this:
+Do not think of the agent as a model that uses tools. Think of it as a control system that happens to use a model.
+The model supplies judgment. The loop supplies discipline.
+That distinction is what separates an impressive demo from an agent you can actually trust...."
+image: /img/blog/generated/mastering-the-agent-loop-building-robust-ai-systems-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Mastering the Agent Loop: Building Robust AI Systems](/img/blog/generated/mastering-the-agent-loop-building-robust-ai-systems-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### Understanding the Agent Loop: A Critical Control Mechanism
+
+In the realm of artificial intelligence (AI), the agent loop—comprising the phases of Think, Act, Observe, and Repeat—serves as the vital control mechanism that dictates how agents interact with their environments. While much of the discourse in AI development often centers around model architecture and data handling, the intricacies of the agent loop are frequently overlooked. This loop is not merely a series of operations; it is a sophisticated orchestration that governs decision-making, action execution, observation normalization, and error management. A thorough understanding of this architecture is crucial, as neglecting its complexities can lead to failures where agents misinterpret observations or perpetuate errors, ultimately undermining operational efficacy.
+
+### Structuring the Think Phase: From Open-Ended Thoughts to Constrained Decisions
+
+The Think phase is where agents formulate their next steps based on the current state. A common pitfall is allowing models to generate open-ended thoughts, leading to inefficiencies and increased variance in outcomes. Developers should focus on structuring the output of this phase into a well-defined Thought object. For instance, a Thought object could encapsulate the current goal, known facts, missing information, options for action, and the chosen action. This structured approach streamlines the decision-making process and facilitates validation checks before the agent proceeds with an action.
+
+```python
+from dataclasses import dataclass
+
+@dataclass
+class Thought:
+    goal: str
+    known_facts: list[str]
+    missing_info: list[str]
+    options: list[str]
+    chosen_action: str
+    stop_reason: str | None = None
+```
+
+By constraining the output, the agent can produce more predictable and actionable decisions. For example, if the missing_info list is empty but no action is chosen, the loop can flag this as an anomaly, prompting further investigation. Consider an agent tasked with processing customer inquiries; structuring the Thought object to include specific customer details and inquiry types allows the agent to prioritize actions based on urgency or relevance. A practical example would be an agent analyzing customer feedback; if it recognizes that feedback is missing specific details, it can flag this and request additional information from the user before proceeding.
+
+### Designing Actions with Safety and Scope: Mitigating Risks
+
+The Act phase involves executing actions based on the decisions made during the Think phase. However, actions must be designed with explicit safety measures to prevent unintended consequences. Categorizing actions into read-only, mutating, and high-risk tools, each with its execution rules, is critical. This categorization ensures that agents can only perform actions that align with their intended purpose and risk profile.
+
+```python
+from dataclasses import dataclass
+
+@dataclass
+class Action:
+    tool: str
+    arguments: dict
+    idempotency_key: str
+    requires_confirmation: bool = False
+
+READ_ONLY_TOOLS = {
+    "search_orders",
+    "get_customer",
+    "list_invoices",
+}
+
+MUTATING_TOOLS = {
+    "update_shipping_address",
+    "issue_refund",
+}
+
+HIGH_RISK_TOOLS = {
+    "delete_account",
+    "export_all_user_data",
+}
+
+def authorize_action(action: Action) -> bool:
+    if action.tool in READ_ONLY_TOOLS:
+        return True
+
+    if action.tool in MUTATING_TOOLS:
+        return action.idempotency_key is not None:
+
+    if action.tool in HIGH_RISK_TOOLS:
+        return action.requires_confirmation
+
+    return False
+```
+
+This design ensures that even if the model suggests a risky action, the loop has a policy layer that can reject it based on predefined criteria, enhancing the overall robustness of the system. For instance, if an agent attempts to delete an account without proper confirmation, the action is automatically blocked, thus preventing potential data loss. Additionally, implementing a logging mechanism to track rejected actions can help developers understand why certain actions were blocked, providing insights for future improvements.
+
+### Normalizing Observations: Transforming Raw Data into Usable Insights
+
+The Observe phase is pivotal in transforming raw data from tool outputs into meaningful insights. Raw observations often contain irrelevant information that can confuse the model in subsequent decisions. Normalizing these observations is essential for creating a concise envelope that highlights only the necessary information for the agent to proceed effectively.
+
+```python
+def normalize_customer_observation(raw: dict) -> dict:
+    customer = raw.get("customer", {})
+
+    return {
+        "status": "ok",
+        "summary": (
+            f"Found customer {customer.get('id')} "
+            f"with {customer.get('open_ticket_count', 0)} open tickets."
+        ),
+        "entities": [
+            {
+                "type": "customer",
+                "id": customer.get("id"),
+                "email": customer.get("email"),
+                "plan": customer.get("plan"),
+            }
+        ],
+        "available_next_actions": [
+            "get_recent_tickets",
+            "get_billing_history",
+        ],
+        "raw_ref": raw.get("debug_id"),
+    }
+```
+
+This normalization process aids in decision-making and helps maintain security by filtering out untrusted content before it influences the agent's actions. By ensuring that only relevant data is presented to the model, we can significantly improve the quality of decision-making. For example, if an agent receives a customer observation with irrelevant metadata, normalizing it allows the agent to focus on actionable insights, such as the customer's current issues or requests. An agent could apply this technique to filter out noise from user-generated input, ensuring it only processes actionable feedback that directly impacts service improvement.
+
+### Implementing Robust Termination Policies: Ensuring Progress
+
+The Repeat phase requires careful consideration of when and how the agent should stop its operations. Many agents fail because they rely on subjective signals of completion, leading to either premature termination or endless loops. A robust termination policy should incorporate factors such as the maximum number of steps, repeated actions, and evidence requirements.
+
+```python
+from dataclasses import dataclass, field
+
+@dataclass
+class AgentState:
+    steps: int = 0
+    repeated_action_count: int = 0
+    required_fields: set[str] = field(default_factory=set)
+    collected_fields: set[str] = field(default_factory=set)
+
+    def has_sufficient_evidence(self) -> bool:
+        return self.required_fields.issubset(self.collected_fields)
+
+class LoopPolicy:
+    def __init__(self, max_steps: int = 8, max_repeats: int = 2):
+        self.max_steps = max_steps
+        self.max_repeats = max_repeats
+
+    def should_continue(self, state: AgentState) -> bool:
+        if state.steps >= self.max_steps:
+            return False
+
+        if state.repeated_action_count >= self.max_repeats:
+            return False
+
+        return not state.has_sufficient_evidence()
+```
+
+This structured approach to termination ensures that the agent only completes its task when it has gathered enough evidence, reducing the likelihood of errors stemming from incomplete information. For instance, an agent processing customer support tickets may need to gather all relevant details before closing a ticket, ensuring that no critical information is overlooked. By implementing these policies, developers can prevent agents from entering infinite loops or terminating prematurely, both of which can lead to poor user experiences.
+
+### Transforming Errors into Structured Observations: The Role of Error Handling
+
+Error handling is paramount in any robust AI system. An agent should not treat errors as exceptions to be avoided; instead, they should be classified and treated as structured observations that inform future actions. By categorizing errors into types such as retryable errors, invalid input, and permission denied, the agent can respond appropriately based on the context of the failure.
+
+```python
+def execute_tool(action: Action):
+    try:
+        result = tool_registry.call(action.tool, action.arguments)
+        return {
+            "status": "ok",
+            "result": result,
+        }
+
+    except TimeoutError:
+        return {
+            "status": "retryable_error",
+            "message": "The request timed out.",
+            "safe_to_retry": action.tool in READ_ONLY_TOOLS,
+        }
+
+    except PermissionError:
+        return {
+            "status": "permission_denied",
+            "message": "The agent does not have access to this resource.",
+            "safe_to_retry": False,
+        }
+
+    except ValueError as exc:
+        return {
+            "status": "invalid_input",
+            "message": str(exc),
+            "safe_to_retry": False,
+        }
+```
+
+This structured error handling allows the loop to make informed decisions on whether to retry, escalate, or halt actions based on the type of error encountered. By transforming errors into actionable insights, the agent can learn from its mistakes rather than being derailed by them. For example, if an agent encounters a permission error while attempting to access a customer's billing history, it can log this as a structured observation and adjust its future actions accordingly. This proactive approach to error management enhances the resilience of AI systems.
+
+### Maintaining Contextual Working Memory: The Importance of Memory Management
+
+A significant challenge in AI systems is managing the distinction between conversation history, working memory, and durable state. Effective agents must maintain an explicit working memory that updates with each observation, allowing them to retain context without relying solely on a transcript of past interactions. This separation is crucial for ensuring that agents do not forget important constraints or facts as they proceed through their tasks.
+
+```python
+from dataclasses import dataclass
+from datetime import datetime, UTC
+
+@dataclass
+class Fact:
+    key: str
+    value: str
+    source: str
+    observed_at: str
+
+def update_memory(memory: dict[str, Fact], observation: dict) -> None:
+    if observation.get("status") != "ok":
+        return
+
+    for entity in observation.get("entities", []):
+        if entity.get("type") == "customer" and entity.get("id"):
+            memory["customer_id"] = Fact(
+                key="customer_id",
+                value=entity["id"],
+                source="crm_lookup",
+                observed_at=datetime.now(UTC).isoformat(),
+            )
+```
+
+By maintaining a clear and organized working memory, agents can make better-informed decisions based on verified facts rather than relying on potentially misleading historical data. This practice not only enhances the agent's efficiency but also its reliability in complex scenarios. For instance, an agent managing multiple customer interactions can refer back to the relevant facts without confusion, ensuring a more coherent and effective response. This memory management strategy is essential for agents that operate in dynamic environments, where the context can change rapidly.
+
+### The Necessity of Step-Level Tracing for Enhanced Debugging
+
+To ensure that an agent can be effectively debugged and monitored, it is essential to implement step-level tracing throughout the agent loop. This allows developers to capture detailed logs of each phase, including the thought process, actions taken, and observations made. By logging these details, teams can diagnose failures more effectively and identify areas for improvement.
+
+```python
+from dataclasses import dataclass
+
+@dataclass
+class StepTrace:
+    step: int
+    thought: dict
+    action: dict
+    observation: dict
+    policy_decision: str
+    latency_ms: int
+    token_estimate: int | None = None
+```
+
+With comprehensive logging in place, teams can shift from vague observations of agent behavior to precise analyses of where and why failures occur. This visibility is crucial for continuous improvement and operational excellence in AI systems. For instance, if an agent consistently fails during a specific phase, the logs can reveal whether the issue lies in the decision-making process or in the execution of actions. This level of detail not only aids in troubleshooting but also facilitates iterative improvements to the agent's design.
+
+### Conclusion: Building Trustworthy AI Agents Through Rigorous Design
+
+In summary, the agent loop is a complex control system that requires careful design and implementation. By focusing on structured decision-making, safe action execution, effective observation normalization, and robust error handling, developers can create AI agents that are not only capable but also trustworthy. The discipline applied to each phase of the agent loop directly impacts the reliability and efficacy of the overall system, making it imperative for teams to invest time and resources into mastering this critical aspect of AI development. Ultimately, a well-architected agent loop enhances performance and fosters trust among users, paving the way for broader adoption of AI technologies. By adhering to these principles, developers can ensure their agents are equipped to navigate the complexities of real-world applications effectively.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/hosseinhezami/the-agent-loop-nobody-talks-about-think-act-observe-repeat-34m8)
+
+---
+
+<SocialShare title="Mastering the Agent Loop: Building Robust AI Systems" slug="mastering-the-agent-loop-building-robust-ai-systems" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
