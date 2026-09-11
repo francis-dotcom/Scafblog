@@ -1,0 +1,208 @@
+---
+slug: avoiding-common-pitfalls-in-free-tier-backend-development
+title: "Avoiding Common Pitfalls in Free-Tier Backend Development"
+authors: [francis]
+tags: [backend, devops, freemium, cloud]
+date: 2026-09-11T10:16:53.882Z
+description: "🚢 #BuildInPublic for the RevenueCat Shipaton 2026. RentDera is my Shipaton entry, and I'm sharing the whole journey — the wins and the 5 AM disasters like this one. This is one chapter of that trail.
+At 9 PM on September 10th, 2026, Render emailed me to say my production services had been suspended.
+At 5 AM on September 11th, I published v1.2.0 to the Play Store.
+In between was the worst night of this project so far — and it was entirely my own doing. Three separate mistakes, each individually reasonable, stacked into an outage that took down a shared identity service, a product API, and a mail service at once.
+Here's all three, with the numbers.
+
+Free tiers are metered. Render gives ~750 machine-hours/month across a workspace; a month is ~730 hours. Keeping one service awake 24/7 eats almost the entire budget.
+A keep-alive cron is a trap. Pinging services to stop them sleeping doesn't outsmart the platform — it just spends the free quota faster, and then everything gets suspended.
+On a serverless database, min_connections: 0 is mandatory. One idle connection held open keeps the database awake 24/7 and can nearly double your usage at zero traffic.
+Never bake a platform's URL into a mobile app. Use a domain you own, so you can move servers without shipping a new app build.
+If you're new to this, don't worry — I explain every term below in plain language.
+Jargon, in one line each:
+Free tier = the no-cost plan, with usage caps. · Cold start / spin-down = a sleeping server takes a few seconds to wake. · Cron job = a task on a timer. · Connection pool = a small set of reusable database connections. · Serverless / scale-to-zero database = a database that sleeps when idle and bills by the second. · Compute Unit (CU) = Neon's unit of database processing time. · Hostname / subdomain = the address in a URL, like auth.notils.com.
+I'm a solo developer. The stack is deliberately cheap:
+Three Rust backend services — a shared identity service, a product API, and a transactional email service
+Postgres on Neon's free tier
+A React Native + Expo mobile app, in Play Store closed testing with 20 testers
+
+Everything on Render's free tier, in one workspace
+Free tier everywhere. That was the point. There's no revenue yet, and 20 testers don't justify a hosting bill.
+Render's free services spin down after ~15 minutes of inactivity. The next request pays a 30–60 second cold start.
+For 20 testers, that's a genuine problem. A landlord opens the app, waits 40 seconds, and concludes the app is broken. So I did the obvious thing: a cron job pinging every service every 5 minutes to keep it awake.
+It worked perfectly. That was the problem.
+Render's free allowance is 750 instance-hours per month, per workspace — shared across every free service in it.
+A calendar month is about 730 hours.
+Read those two numbers again. The free tier is sized so that one always-on service consumes the entire monthly allowance with 20 hours to spare. It is not sized for two. The spin-down isn't a defect you work around — it's the mechanism that makes the arithmetic work at all.
+I had four services (production and staging for two of them), all pinned awake by my own cron:
+4 services × 24 hours/day = 96 instance-hours per day
+750 ÷ 96 ≈ 7.8 days
+
+Just under eight days to burn a month's allowance. Mine lasted about ten, because the cron didn't catch every service on every pass. Not much longer.
+And when the allowance runs out, Render suspends every free service in the workspace. Not the greediest one. All of them. Staging and production together.
+The lesson: before you defeat a platform's idle timeout, check what the idle timeout is paying for. If the free quota is smaller than a calendar month, sleeping is not optional — it's the business model.
+Then Neon emailed me too. 100 compute-unit hours on the free plan, and I was at 80%.
+
+This one took longer to find, because the culprit was four lines in a config struct I'd written weeks earlier and never looked at again:
+DbConfig {
+    max_connections: 10,
+    min_connections: 1,                        // ← this line
+    connect_timeout: Duration::from_secs(5),
+    acquire_timeout: Duration::from_secs(5),
+    idle_timeout: Duration::from_secs(600),
+    max_lifetime: Duration::from_secs(1800),
+}
+
+min_connections: 1 is a completely ordinary pool setting. It means: always keep at least one connection open, so the first request after a quiet period doesn't pay for a TCP handshake and TLS negotiation. On a traditional Postgres box, it's free. You'd have no reason to think about it.
+On serverless Postgres, it's a standing charge.
+Neon (and Supabase, and PlanetScale, and every other scale-to-zero database) suspends your compute after a few minutes of inactivity. But it cannot suspend while a client is still connected. A pool that always holds one open connection keeps the compute awake 24 hours a day, at zero traffic.
+0.25 CU × 730 hours = ~182 CU-hours/month
+Free tier allowance:     100 CU-hours/month
+
+Nearly twice the free allowance, burned by a service nobody was using. And idle_timeout: 600 didn't save me — the pool closes an idle connection after 10 minutes and then immediately opens a new one to satisfy the minimum.
+The fix is four lines:
+DbConfig {
+    max_connections: 10,
+    min_connections: 0,                        // let the last connection actually close
+    connect_timeout: Duration::from_secs(10),  // absorb a suspended compute resuming
+    acquire_timeout: Duration::from_secs(10),
+    idle_timeout: Duration::from_secs(60),     // well under Neon's ~5-min suspend timer
+    max_lifetime: Duration::from_secs(1800),
+}
+
+Two things worth noting beyond min_connections: 0:
+idle_timeout has to be well below the provider's suspend timer. Closing your connection after 10 minutes when the provider suspends at 5 means you never suspend. It has to drain first.
+Raise your timeouts. Once the compute does suspend, the next request has to wait for it to wake up. A 5-second budget that was generous for a warm connection can be tight for a cold resume. Scale-to-zero trades a standing charge for occasional latency — you have to actually budget for the latency.
+All three of my services were generated from the same template, so all three had the identical bug on the identical line. If you run a service template, a default like this propagates silently into everything you'll ever generate from it.
+The lesson: connection pool defaults were written for servers that are always on. If your database bills by the second and sleeps when idle, min_connections: 0 isn't a tuning preference. It's a correctness requirement.
+The first two mistakes cost me money I didn't spend and a night I didn't sleep. This one cost me something I can't get back.
+While cleaning up, I deleted the suspended Render service.
+Render assigns every service a unique *.onrender.com address. Delete the service and that address is gone permanently — you cannot recreate it, and a new service gets a new unique name. There's no "restore".
+My mobile app v1.1.0 — already in the hands of closed testers, already through Play Store review — had that address compiled into the binary.
+v1.1.0 is now permanently dead. Not degraded. Not slow. Requests to the old hostname return:
+HTTP/1.1 404 Not Found
+x-render-routing: no-server
+
+There is no configuration change, no server-side fix, and no rollback that can save it. The only repair is a new build, a new review, and every tester updating.
+That's why I was publishing at 5 AM.
+
+It was that a hostname I didn't own was baked into a binary I couldn't hot-fix.
+A mobile app is the least forgiving consumer you will ever have. A web frontend redeploys in a minute. A backend service reads an environment variable and restarts. An app in a store is frozen the moment it ships, and unfreezing it costs a review cycle measured in hours or days.
+So v1.2.0 ships pointing at domains I control:
+❌  my-service-a3f9.onrender.com     ← platform's address, platform's to revoke
+✅  auth.notils.com                  ← mine, points wherever I say
+
+Now migrating providers is a DNS change. Testers notice nothing. The app doesn't need to know where the server lives, and that was true the whole time — I just hadn't made it true in the config.
+The lesson: anything compiled into a store binary must be a name you own. Not a convenience URL. Not a platform subdomain. A hostname on a domain you control, from the very first build that reaches another human being.
+One detail that nearly caught me a second time: I picked hostnames one label deep — auth.notils.com, not api.auth.notils.com. Cloudflare's free Universal SSL covers example.com and *.example.com, one level only. A deeper subdomain needs Advanced Certificate Manager at $10/month per zone, which is more than the server. Free-tier constraints show up in the strangest places.
+Two production services are now live on owned domains, both fronted by Cloudflare and proxying to a Render origin:
+$ curl -s -o /dev/null -w "%{http_code} %{time_total}s\n" https://auth.notils.com/health
+200 0.31s
+
+$ curl -s https://auth.notils.com/.well-known/jwks.json
+{"keys":[{"kty":"EC","crv":"P-256","alg":"ES256","use":"sig","kid":"…","x":"…","y":"…"}]}
+
+Three things I checked, and would check again:
+/health/ready, not just /health. Liveness only proves the process is up. Readiness does a database round-trip, which is what actually proves the pool change didn't break the cold-resume path.
+The JWKS response contains no d field. On an identity service, d is the private key component of an EC key. A JWKS endpoint that leaks it hands over the ability to mint tokens. It's a one-line check and it should be in your deploy runbook forever.
+The response headers. CF-RAY: …-KTM told me Cloudflare was terminating TLS at a Kathmandu edge — in-country for my users — while x-render-origin-server: Render confirmed it was reaching the right origin. Useful to know before optimizing anything about where the server itself lives.
+The obvious response to all this is "just pay for hosting." Let's do that math honestly.
+Render's paid tier is $7/month per service. I need three services in production, so $21/month, every month, before the database or anything else.
+A VPS with more RAM and more cores than all three services combined is cheaper per month — but the advertised price usually requires committing to one to four years upfront. The monthly rate is often double, and renewal rates are higher still. "Cheaper per month" and "affordable this month" are not the same sentence when you're a solo developer with no revenue.
+So the real options for a pre-launch solo project are:
+Pay $21/month indefinitely for 20 testers
+Prepay a year or more for a VPS and become your own sysadmin
+Make the free tier actually work
+I picked option 3, but properly this time: a new workspace, production services only, no staging, no keep-alive cron, a pool that drains to zero, and custom domains in front of everything. The spin-down is back, and testers will occasionally wait a few seconds on first open. That's an honest trade for $0, and it's reversible — the day upgrading makes sense, it's a dashboard toggle and nothing else changes, because nothing downstream knows where the service lives.
+The staging environments are simply gone for now. That's a real cost, not a clever saving: I test against production and I'm careful. It buys back the headroom that keeps production inside the free allowance, and it's the first thing I'll restore when there's a budget.
+Read the quota arithmetic before designing around it. 750 hours/month sounds generous until you divide by a 730-hour month.
+Never add a keep-alive ping to a metered free tier. You're not outsmarting the platform, you're spending the budget faster.
+Set min_connections: 0 on any serverless database. Check this today if you're on Neon, Supabase, or PlanetScale with a pooled client. It's four lines and it may be your entire bill.
+Own the hostname before the first store release, not after.
+Deleting a resource on a platform that assigns unique names is irreversible. Read the dialog. I didn't.
+Don't miss the first warning email. Render and Neon both warned me before suspending. I caught the second one, at 9 PM, after the damage.
+In the interest of not writing a tidier ending than I earned: the third service — the one that sends transactional email — is still down while I work through this. Both of its addresses return 404.
+Its two call sites fail differently, and one of them fails silently. The email-verification endpoint propagates the error, so a client gets a real 500 and can tell the user to retry. But the forgot-password endpoint deliberately swallows delivery errors — because an endpoint that behaves differently for registered and unregistered addresses is an account-enumeration oracle. Correct security design. It also means a real user can request a password reset right now, see "check your email," and wait forever.
+That's next. But v1.2.0 is live, the testers are unblocked, and the two root causes are fixed in all three services.
+I'll take it.
+If you're running a free-tier stack, go check min_connections right now. It'll take two minutes and it might be the most expensive line in your codebase.
+This is part of **Building RentDera in Public* — my journey shipping a rent-management app for the RevenueCat Shipaton 2026. Follow the series for the next chapter (including whether the email service ever comes back). If this saved you a bad night, drop a comment with the free-tier gotcha that bit you. 🚢*
+Built with Rust · Neon · Render · Cloudflare · React Native + Expo. Full RentDera changelog: https://rentdera.com/changelog. #BuildInPublic #Shipaton..."
+image: /img/blog/generated/avoiding-common-pitfalls-in-free-tier-backend-development-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Avoiding Common Pitfalls in Free-Tier Backend Development](/img/blog/generated/avoiding-common-pitfalls-in-free-tier-backend-development-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### The Dual-Edged Sword of Free-Tier Services
+
+Free-tier services are often a double-edged sword for solo developers and small teams. They provide an attractive no-cost entry point to cloud infrastructure, allowing developers to build, deploy, and test applications without immediate financial commitment. However, these services come with stringent limitations, including reduced performance, strict usage quotas, and potential pitfalls that can lead to unexpected downtimes. Understanding these constraints is essential for effectively leveraging free-tier platforms while avoiding costly mistakes that can derail projects.
+
+### The Misunderstanding of Metering: Hours vs. Months
+
+One of the most significant misconceptions surrounding free-tier services is the interpretation of usage limits. For example, a service may advertise 750 machine-hours per month, but a month is only about 730 hours. This discrepancy can lead to confusion and mismanagement of resources. Developers must recognize that exceeding the monthly quota results in service suspension, impacting all applications within the workspace. This metering mechanism underscores the importance of careful resource allocation and monitoring to avoid unintentional service interruptions. Failing to understand this arithmetic can lead to the abrupt suspension of services, as experienced by many developers who miscalculated their usage.
+
+### The Keep-Alive Ping: A Costly Misstep
+
+Implementing keep-alive pings to prevent services from spinning down may seem like a straightforward solution to maintain responsiveness. However, this approach can quickly consume free-tier quotas, leading to premature service suspension. For instance, if a developer sets up a cron job to ping multiple services every five minutes, they may unintentionally burn through their free hours faster than anticipated. Instead of attempting to circumvent the platform's spin-down behavior, developers should embrace it as a fundamental aspect of the service's architecture. Designing applications to handle cold starts gracefully is a more sustainable approach that allows for efficient resource management.
+
+### Connection Pooling: Understanding the Critical Configuration
+
+Connection pooling is a vital aspect of database management, especially in serverless environments. A common mistake is setting the `min_connections` parameter to a value greater than zero, which keeps at least one connection open at all times. This configuration can lead to unnecessary charges in serverless databases that bill based on active connections. For example, a developer using a serverless PostgreSQL service may inadvertently double their usage costs by maintaining idle connections. 
+
+To optimize connection pooling, developers should set `min_connections` to zero, allowing the database to sleep when not in use. Additionally, understanding the implications of `max_connections` is crucial; setting it too high can lead to resource exhaustion and throttling. Developers should also consider implementing connection timeouts and adjusting pooling strategies based on expected traffic patterns. For instance, using libraries like `pg-pool` for PostgreSQL allows developers to fine-tune connection settings dynamically, ensuring efficient resource consumption and keeping costs within budget. This adjustment is crucial, particularly for databases that operate on a scale-to-zero model, where billing is based on active connections rather than a flat rate.
+
+### The Importance of Domain Ownership in Deployments
+
+When deploying mobile applications, the choice of hostname can have significant long-term implications. Using a platform-specific subdomain (e.g., `my-service.onrender.com`) may seem convenient, but it poses risks if the service needs to be migrated or deleted. If a developer inadvertently deletes a service, the associated subdomain is permanently lost, requiring a new app build and submission process. Instead, developers should use custom domains that they own, allowing for seamless transitions between hosting providers without impacting end users. This foresight can save considerable time and effort in the long run, ensuring that mobile applications remain functional and accessible.
+
+### Learning from Service Suspension: The Cost of Neglect
+
+Experiencing service suspension can be a harsh lesson in the importance of monitoring and proactive management. In one case, a developer received warning emails from their hosting provider but failed to act before reaching their quota limit. As a result, all services within the workspace were suspended, leading to significant downtime and loss of user trust. Developers should implement robust monitoring solutions to track usage metrics and respond promptly to warnings, ensuring that they remain within their allocated limits. Employing tools such as Grafana or Prometheus can provide real-time insights into resource usage and alert developers to impending resource limits, mitigating the risk of unexpected service interruptions.
+
+### Strategies for Optimizing Free-Tier Usage
+
+To maximize the benefits of free-tier services, developers should adopt strategies that optimize resource usage without sacrificing application performance. This includes implementing efficient connection pooling configurations, avoiding unnecessary keep-alive pings, and regularly reviewing service quotas. Additionally, developers can consider consolidating services to minimize the number of active instances, thereby reducing overall resource consumption. By proactively managing their architecture, developers can ensure that their applications remain responsive while staying within budgetary constraints. Techniques such as caching frequently accessed data or optimizing API calls can further enhance performance without incurring additional costs.
+
+### Embracing Best Practices for Sustainable Development
+
+Navigating the complexities of free-tier backend development requires a nuanced understanding of the limitations and nuances inherent in these platforms. Developers must be vigilant in monitoring resource usage, configuring services appropriately, and making strategic decisions regarding domain ownership. By learning from past mistakes and implementing best practices, solo developers and small teams can successfully leverage free-tier services to build robust applications while avoiding costly pitfalls. As the landscape of backend development continues to evolve, staying informed and adaptable will be key to achieving long-term success.
+
+### Conclusion: Key Takeaways for Future Projects
+
+In conclusion, the journey of free-tier backend development is fraught with challenges that can derail even the most promising projects. Understanding the intricacies of metering, the implications of connection pooling, and the importance of domain ownership are critical for successful deployment. By embracing a proactive approach to resource management and learning from past experiences, developers can navigate the pitfalls of free-tier services effectively. The lessons learned from real-world mistakes serve as valuable reminders of the importance of strategic planning, careful monitoring, and the implementation of best practices in the ever-evolving landscape of backend development. By applying these insights, developers can not only avoid common pitfalls but also leverage free-tier services to their fullest potential.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/sanjaysah/750-free-hours-a-month-but-a-month-is-730-3-free-tier-mistakes-that-took-down-my-app-17g8)
+
+---
+
+<SocialShare title="Avoiding Common Pitfalls in Free-Tier Backend Development" slug="avoiding-common-pitfalls-in-free-tier-backend-development" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
