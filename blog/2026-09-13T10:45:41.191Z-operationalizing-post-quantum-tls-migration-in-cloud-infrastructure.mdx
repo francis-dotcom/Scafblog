@@ -1,0 +1,224 @@
+---
+slug: operationalizing-post-quantum-tls-migration-in-cloud-infrastructure
+title: "Operationalizing Post-Quantum TLS Migration in Cloud Infrastructure"
+authors: [francis]
+tags: [post-quantum, tls, cloud, infrastructure]
+date: 2026-09-13T10:45:41.192Z
+description: "The least useful conversation about post-quantum TLS is still the most common one:
+"When will quantum computers actually break RSA?"
+I get why people ask it. It sounds like the responsible question. It has a countdown-clock feeling. It lets everyone argue about physics, national labs, cryptographers, and whether the threat is five years away or fifteen.
+It is also a nice way to avoid the engineering work already landing on normal teams.
+Post-quantum TLS is no longer only a standards topic or a security conference slide. It is becoming platform surface area. AWS has ML-KEM hybrid TLS support on KMS, ACM, and Secrets Manager. Cloudflare documents post-quantum key agreement from visitors to the edge and from the edge to origins. Microsoft has shipped Windows platform support for ML-KEM hybrid TLS groups and post-quantum APIs. The IETF TLS work around ML-KEM for TLS 1.3 is active in 2026.
+This is how infrastructure changes usually arrive: not as a dramatic cutover, but as a series of quiet defaults.
+One day your cloud provider supports the new thing. Then one SDK has a flag. Then a browser negotiates it by default. Then the CDN can talk to your origin with it. Then an old middlebox, payment partner, service mesh, Java runtime, or certificate workflow becomes the weird part of the graph.
+That is the migration.
+Not "is quantum real?"
+"Can we prove which of our production paths can tolerate the new TLS behavior?"
+The narrow technical change is not magic.
+In TLS, clients and servers already negotiate how to agree on shared keys. Today, that usually means elliptic-curve Diffie-Hellman, with X25519 being common in modern TLS 1.3 deployments. Post-quantum TLS introduces key agreement based on algorithms designed to resist attacks from future quantum computers. In practice, the migration is often hybrid: keep a classical algorithm like X25519 and combine it with a post-quantum key encapsulation mechanism such as ML-KEM.
+The hybrid part matters. It means the connection is not betting everything on the new algorithm. The classical side still protects you if the post-quantum side has a surprise. The post-quantum side is there for the "harvest now, decrypt later" problem: encrypted traffic captured today and decrypted later if quantum attacks become practical against the old key agreement.
+The operational change is less elegant.
+Hybrid key exchange changes the handshake. It sends more data. It requires different TLS library support. It can expose bugs in deep packet inspection, firewalls, proxies, service meshes, load balancers, and clients that made assumptions about what a TLS ClientHello should look like.
+AWS puts real numbers around this for one of its KMS tests: moving from classical TLS key agreement to X25519 plus ML-KEM-768 added about 1,600 bytes to the TLS handshake and extra cryptographic work. In their benchmark, the impact was tiny with connection reuse and still modest without it. Good. That is exactly the kind of result you want.
+But "AWS measured a small impact on one path" is not the same as "your production graph is fine."
+Your graph has corporate proxies, sidecars, vendor SDKs, old Android devices, JVM options, certificate inspection appliances, private endpoints, payment processors, banking integrations, queue workers, batch jobs, and one forgotten service that still thinks TLS 1.2 is modern.
+That is where the real migration lives.
+One easy way to get confused is to treat "post-quantum TLS" as one migration.
+It is not one migration.
+Key agreement and authentication are different parts of TLS. Hybrid ML-KEM key exchange is about protecting confidentiality for the session key. Post-quantum signatures are about authentication: proving the server or client is who it says it is without relying only on classical signature schemes such as RSA or ECDSA.
+These two pieces move on different timelines and break different things.
+Cloudflare's documentation makes this split visible. For key agreement, it supports X25519MLKEM768 and has post-quantum hybrid key agreement on TLS 1.3 paths when both sides can negotiate it. For signatures, Cloudflare documents ML-DSA support on origin-facing features such as Authenticated Origin Pulls and Custom Origin Trust Store, with clear requirements around TLS libraries, certificate generation, trust stores, and downgrade behavior.
+That is a very different operational problem from enabling a client-side TLS group.
+Key exchange asks: can the client and server negotiate a new group, and can everything in the network path survive the handshake?
+Post-quantum certificates ask: can our certificate authority, issuance pipeline, storage, rotation process, mTLS configuration, trust store, scanners, HSM/KMS workflows, and verification code handle new signature algorithms and larger artifacts?
+Those should be planned together, but not collapsed into one ticket called "enable PQC."
+That ticket will lie to you.
+The reason this deserves attention now is not that every team must flip every post-quantum switch this quarter.
+The reason is that the defaults are moving.
+AWS is explicit about the direction: KMS, ACM, and Secrets Manager support ML-KEM hybrid post-quantum TLS, older CRYSTALS-Kyber support is being removed in favor of ML-KEM, and customers are responsible for updating clients and SDKs so ML-KEM can be offered. Their Java SDK path is concrete: use the AWS Common Runtime HTTP client and enable post-quantum TLS support. Rust has its own path through rustls feature flags.
+That is not a research paper. That is dependency management.
+Cloudflare's docs are also not abstract. They describe where post-quantum key agreement works, where it depends on the client, where it depends on the origin, and where ML-DSA certificates change origin authentication behavior. If you put an application behind a CDN, your TLS boundary is already split across multiple connections. Visitor to edge, edge to internal service, edge to origin. Each leg can have a different state of readiness.
+Microsoft's Windows work moves the same issue into platform support. When the OS crypto stack knows about ML-KEM hybrid TLS groups, applications eventually inherit that behavior through libraries and platform APIs. Some teams will actively choose it. Others will meet it because the platform under them changed.
+This is why I do not like treating post-quantum TLS as a security-team side quest.
+Security can explain the threat model and set policy. Cryptography teams can bless algorithms and libraries. But the migration path runs through platform engineering, SRE, networking, client teams, build pipelines, observability, vendor management, and whoever owns the payment integration that nobody wants to touch.
+If security owns the whole thing alone, the result will be a slide deck and a backlog label.
+The internet is not one deployment.
+The 2026 measurement work on post-quantum readiness looked at 32,011 domains and found the familiar shape of reality: modern protocols like TLS 1.3 and QUIC are gaining ground, but a meaningful share of domains, especially in critical sectors such as banking and government, still rely on TLS 1.2.
+That should not surprise anyone who has worked near financial infrastructure.
+Banking stacks are full of long-lived integrations. Some are well maintained. Some are wrapped in private network assumptions. Some are hidden behind managed gateways. Some have regulatory validation tied to specific libraries or appliances. Some use TLS termination patterns that were designed in a different era and then became too operationally important to casually change.
+This does not make banks negligent. It makes them normal.
+It also means "the provider supports PQ TLS" is the beginning of the work, not the end.
+In fintech, you rarely control the whole path. You call card processors, fraud vendors, identity providers, KMS endpoints, open banking APIs, webhook receivers, core banking adapters, document processors, analytics tools, and internal services that cross clouds and regions. Every one of those paths has a TLS client, a TLS server, a library, a proxy, a certificate story, a monitoring story, and a rollback story.
+If you cannot list those paths, you cannot migrate them.
+I am skeptical of any plan that starts and ends with "enable post-quantum TLS."
+Enable it where?
+For which clients?
+Through which proxies?
+With what minimum TLS version?
+Which negotiated group do you expect?
+How will you know it negotiated?
+How will you know it fell back?
+What breaks if a middlebox drops a larger ClientHello?
+Which dashboards will show the difference between "classical because unsupported" and "classical because something downgraded"?
+What is the rollback? Is rollback a feature flag, an SDK version rollback, a CDN setting, a JVM property, an origin certificate replacement, or a network exception?
+This is where platform teams can do useful work without panic.
+Start with the boring inventory:
+outbound clients and the TLS libraries they use
+inbound termination points, including CDNs, ingress controllers, API gateways, service meshes, and load balancers
+private links and service-to-service paths where TLS is terminated more than once
+KMS, secrets, certificate management, and signing paths
+mTLS flows and partner integrations
+mobile, desktop, embedded, and batch clients that may not share the same TLS stack as your backend
+anything crossing a corporate proxy, inspection box, or third-party gateway
+Then test the paths that matter.
+Not just the happy path from a laptop with a new OpenSSL build. Test the production-shaped path: same runtime, same container base image, same SDK, same outbound proxy, same region, same service mesh, same gateway, same vendor endpoint class.
+And instrument it properly.
+For post-quantum TLS, "request succeeded" is not enough. You want to know:
+negotiated TLS version
+negotiated key agreement group
+handshake failures by client, runtime, route, and proxy
+fallback rates
+handshake latency and connection reuse behavior
+ClientHello size related failures
+certificate chain and signature algorithm where authentication is part of the test
+differences between direct, CDN, mesh, and corporate-network paths
+If you cannot observe the negotiation, you are mostly guessing.
+The key exchange migration is the first visible operational step for many teams because it can be negotiated opportunistically. If both sides support the hybrid group, use it. If not, fall back.
+Certificate and signature migration is less forgiving.
+Post-quantum signatures affect certificate issuance, trust, compatibility, mTLS, scanning, rotation, storage, and sometimes hardware-backed key management. They also raise downgrade questions. If a verifier accepts both a post-quantum certificate and a classical certificate for the same trust relationship, have you actually improved the authentication story, or have you created a nice demo with the old risk still present?
+Cloudflare's origin documentation is a useful example because it says the quiet part clearly: presenting a post-quantum certificate is not enough if the verifying side still accepts classical certificates in the same authentication path.
+That is not a crypto detail. That is policy.
+Teams should separate the work:
+First, map and test hybrid key exchange for confidentiality.
+Second, identify where signatures actually matter: public web certificates, private PKI, mTLS between services, origin authentication, code signing, firmware signing, document signing, and any workflow where a classical signature compromise has long-term consequences.
+Third, decide which certificate paths can be experimental, which require vendor support, and which are blocked by compliance, hardware, or clients.
+Trying to solve all of that under one "PQC migration" umbrella is how the work becomes vague enough to never finish.
+This is not a call to panic. It is a call to stop treating post-quantum TLS as someone else's future problem.
+The small useful checklist looks like this:
+Inventory every TLS client you operate, not just public ingress.
+Identify which clients use platform TLS, OpenSSL, BoringSSL, AWS-LC, Java providers, rustls, Go crypto, or vendor SDK abstractions.
+Find the paths where TLS crosses proxies, service meshes, CDNs, inspection appliances, partner gateways, and private links.
+Enable hybrid post-quantum TLS in a controlled path to a provider that supports it, such as a non-critical AWS KMS test client or a staging origin behind a CDN.
+Record the negotiated group, TLS version, latency, failure rate, and fallback behavior as first-class metrics.
+Load test with and without connection reuse so the handshake cost is visible instead of assumed.
+Test from the ugly places: corporate networks, old base images, batch workers, mobile clients, partner-like network paths, and regions with different routing.
+Keep certificate and signature migration on a separate track with its own owners, trust-store plan, downgrade policy, and rollback procedure.
+Put the results somewhere boring and durable: an architecture decision record, a runbook, and dashboards people will actually look at during an incident.
+The teams that do this early will not look heroic. They will just have fewer surprises when the defaults move under them.
+That is the real post-quantum TLS story.
+Not hype. Not fear. Not a countdown to a quantum apocalypse.
+Just another piece of platform migration work that gets much easier if you start before the provider default changes and much uglier if you wait until a production path discovers the edge case for you.
+AWS Security Blog: ML-KEM post-quantum TLS now supported in AWS KMS, ACM, and Secrets Manager
+AWS KMS Developer Guide: Using hybrid post-quantum TLS with AWS KMS
+Cloudflare SSL/TLS docs: Post-quantum cryptography
+Cloudflare SSL/TLS docs: Post-quantum between Cloudflare and origin servers
+Microsoft Security Blog: New Windows Features to Secure Today's Data in a Post-Quantum World
+IETF Datatracker: ML-KEM Post-Quantum Key Agreement for TLS 1.3
+arXiv: Measurement Study of Post-Quantum Readiness of Internet: 2026
+To test my projects, I use Railway. If you want $20 USD to get started, use this link...."
+image: /img/blog/generated/operationalizing-post-quantum-tls-migration-in-cloud-infrastructure-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Operationalizing Post-Quantum TLS Migration in Cloud Infrastructure](/img/blog/generated/operationalizing-post-quantum-tls-migration-in-cloud-infrastructure-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### The Quantum Threat Landscape for Cryptographic Protocols
+
+As advancements in quantum computing continue to evolve, the cryptographic protocols that underpin secure communications face unprecedented risks. Algorithms like RSA and ECDSA, which have long been the backbone of digital security, are now vulnerable to quantum attacks. This reality necessitates an urgent migration towards post-quantum cryptography, particularly in cloud environments where data integrity and confidentiality are paramount. As cloud providers roll out support for post-quantum Transport Layer Security (TLS), infrastructure teams must proactively manage this migration, ensuring that their systems remain secure and compatible amidst these changes.
+
+### The Hybrid Key Exchange Paradigm
+
+Central to the transition to post-quantum TLS is the hybrid key exchange model, which integrates classical algorithms with post-quantum alternatives. For example, the ML-KEM (Module Learning with Errors Key Encapsulation Mechanism) is being paired with established protocols like X25519. This hybrid approach allows organizations to maintain a level of security while transitioning to new protocols, thereby reducing the risks associated with fully adopting untested post-quantum algorithms. Infrastructure teams must understand the operational implications of this hybridization, as it introduces new complexities in handshake processes and data transmission sizes.
+
+### Mapping Infrastructure Dependencies for Migration
+
+A successful migration to post-quantum TLS begins with a comprehensive mapping of critical infrastructure components that require attention. This includes a thorough audit of all TLS clients, servers, and intermediary devices such as load balancers and proxies. Teams must assess the compatibility of each component with the new hybrid key exchange mechanisms. A systematic approach to identifying these dependencies is essential; overlooking any critical path could lead to significant security vulnerabilities during the migration process.
+
+### Conducting a Detailed Inventory of TLS Clients
+
+Creating an exhaustive inventory of TLS clients and their associated libraries is a foundational step in the migration process. This inventory should capture essential information such as the version of the TLS library in use, supported cipher suites, and any known vulnerabilities. For instance, if a client relies on an outdated version of OpenSSL that does not support post-quantum algorithms, it will need an upgrade or replacement. Additionally, teams should document the runtime environments for these clients, as variations can significantly impact compatibility and performance during the migration.
+
+### Establishing a Controlled Testing Environment
+
+After completing the inventory, teams should set up a controlled testing environment that closely mirrors production conditions. This environment should replicate configurations, network conditions, and workloads to accurately assess the impact of the migration. Key metrics to evaluate include handshake latency, connection success rates, and fallback behaviors. For example, AWS reported an increase of approximately 1,600 bytes in TLS handshake size when transitioning to ML-KEM hybrid TLS, which could affect performance. Understanding these metrics allows teams to anticipate challenges and optimize their migration strategies effectively.
+
+### Monitoring Migration Impact: Key Metrics to Track
+
+Monitoring the impact of the migration on both performance and security is crucial. Infrastructure teams should implement robust observability practices to capture critical metrics throughout the transition. Key metrics to monitor include negotiated TLS versions, handshake failures, and fallback rates. For example, if a significant number of handshakes fall back to classical TLS due to compatibility issues, this indicates a need for further investigation into specific clients or network paths. Establishing a comprehensive monitoring strategy enables teams to identify and address issues proactively, ensuring a smoother migration process.
+
+### Clarifying Key Exchange vs. Signature Migration Strategies
+
+One common pitfall during the migration to post-quantum TLS is conflating key exchange and signature migration strategies. While hybrid key exchange mechanisms like ML-KEM focus on securing the confidentiality of session keys, post-quantum signatures address authentication concerns. These two components evolve on different timelines and introduce distinct challenges. For instance, migrating to post-quantum signatures may require adjustments in certificate authorities, trust stores, and verification processes. Teams should clearly delineate these migration paths to avoid confusion and ensure comprehensive coverage of both aspects.
+
+### Identifying and Mitigating Common Migration Pitfalls
+
+As teams embark on the migration journey, they must remain vigilant about common pitfalls that can undermine their efforts. One significant risk is oversimplifying the migration process, which can lead to security gaps. For example, neglecting to account for legacy systems that may not support new protocols can create vulnerabilities that attackers could exploit. Additionally, failing to monitor and measure the impact of changes could result in undetected issues that compromise system integrity. By maintaining a rigorous focus on these potential risks, teams can better navigate the complexities of the migration.
+
+### Preparing for Future Developments in TLS
+
+The migration to post-quantum TLS is not merely a one-time project; it is an ongoing process that demands vigilance and adaptability. As cloud providers continue to evolve their offerings, infrastructure teams must remain proactive in updating their systems to align with new defaults and standards. The landscape of TLS is dynamic, and staying informed about developments in post-quantum cryptography is crucial for maintaining security and compliance. Teams should cultivate a culture of continuous learning and adaptation to ensure they are prepared for future challenges.
+
+### Conclusion: Embracing the Migration Challenge
+
+In summary, the transition to post-quantum TLS presents a significant operational challenge for infrastructure teams. By proactively inventorying clients, establishing testing environments, and monitoring performance, teams can effectively navigate the complexities of this migration. Recognizing that this is not just a security concern but a comprehensive platform migration that requires collaboration across various teams and disciplines is essential. By embracing this challenge, infrastructure teams can ensure their systems remain secure and resilient in the face of emerging quantum threats. 
+
+### The Path Forward: A Checklist for Infrastructure Teams
+
+To facilitate a successful migration, infrastructure teams should consider the following checklist:
+
+1. **Inventory All TLS Clients**: Document every TLS client in use, including their libraries and versions.
+  
+2. **Identify Infrastructure Paths**: Map out where TLS is terminated, including proxies, CDNs, and service meshes.
+
+3. **Enable Hybrid Post-Quantum TLS**: Start with a controlled environment to test the ML-KEM hybrid TLS support.
+
+4. **Record Key Metrics**: Monitor negotiated TLS versions, handshake failures, and fallback behaviors.
+
+5. **Test Under Realistic Conditions**: Ensure testing reflects production environments, including all dependencies and configurations.
+
+6. **Separate Signature Migration**: Plan distinct strategies for migrating to post-quantum signatures, considering their unique requirements.
+
+7. **Establish Robust Monitoring**: Implement observability practices to capture critical metrics throughout the migration.
+
+8. **Document Findings**: Keep a detailed record of the migration process, including challenges faced and solutions implemented.
+
+By following this checklist, infrastructure teams can effectively manage the transition to post-quantum TLS and mitigate the risks associated with quantum threats.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/pvgomes/post-quantum-tls-is-a-platform-migration-not-a-crypto-project-4mbe)
+
+---
+
+<SocialShare title="Operationalizing Post-Quantum TLS Migration in Cloud Infrastructure" slug="operationalizing-post-quantum-tls-migration-in-cloud-infrastructure" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
