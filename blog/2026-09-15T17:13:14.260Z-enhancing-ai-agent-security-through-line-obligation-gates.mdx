@@ -1,0 +1,371 @@
+---
+slug: enhancing-ai-agent-security-through-line-obligation-gates
+title: "Enhancing AI Agent Security Through Line-Obligation Gates"
+authors: [francis]
+tags: [ai, security, agents, development]
+date: 2026-09-15T17:13:14.260Z
+description: "An agent patch is not tested because its suite is green. It is tested when every changed executable line has a trusted witness. Agent-authored assertions do not count as that witness. Coverage that includes those assertions is a vanity metric, not a merge signal.
+The gate below fails closed on unwitnessed lines. It accepts three discharges only: a human-owned check, a metamorphic relation over a frozen corpus, or an explicit waiver with an expiry date and a reason code. Everything else is residual risk.
+Agents write the implementation and the example tests in the same turn. The tests encode the code. The code satisfies the tests. A coverage report then marks the new lines as hit. Nothing in that loop asked whether the change is correct against a source the agent does not control.
+Exact-output goldens are the wrong fix for this. So is blaming flaky tests. The missing object is an obligation: each executable line in the diff must be discharged by something the agent is not allowed to edit.
+This article proposes a line-obligation map. It is a merge artifact, not a dashboard widget. Treat it as a patch-local proof obligation, closer to a type checker than to a coverage badge.
+Classify every changed line that a compiler or interpreter can execute. Comments, blank lines, and pure import reshuffles are out of scope. The rest must land in exactly one bucket.
+Human-owned check. A test file under a path the agent cannot modify, for example tests/trusted/. CODEOWNERS or a CI path filter must reject agent edits there. The check must execute the line on this patch.
+Metamorphic relation. A relation R(x, T(x)) that does not assert a single golden y. Relations live in tests/relations/ and consume a hashed corpus. The agent may propose a relation. A reviewer must accept it before it discharges anything.
+Waiver. A YAML record naming the file, the line hash, a reason code, an owner, and an expiry. Expired waivers fail the gate. “Will add tests later” is not a reason code.
+Agent-authored tests under tests/generated/ may still run. They never discharge an obligation. That split is the whole method.
+The map is a JSON document produced from git diff plus a coverage export that was collected while running only trusted checks and relations. Generated-test coverage is dropped before scoring.
+# Proposed local commands. Label: unexecuted example.
+git diff --unified=0 origin/main...HEAD > /tmp/patch.diff
+pytest tests/trusted tests/relations \
+  --cov=src --cov-branch --cov-report=json:/tmp/cov_trusted.json
+python tools/obligation_map.py \
+  --diff /tmp/patch.diff \
+  --cov /tmp/cov_trusted.json \
+  --waivers tests/waivers.yaml \
+  --out /tmp/obligation.json
+
+A minimal mapper in Python is enough to make the rule reviewable. It does not need a platform. It needs a stable line identity: path, content hash of the new line, and whether trusted coverage hit it.
+# tools/obligation_map.py — proposed harness, not a measured CI run
+from __future__ import annotations
+
+import argparse, ast, hashlib, json, re
+from pathlib import Path
+
+HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+REASON_CODES = {"codegen", "vendor", "pure-refactor", "experiment"}
+
+def sha1(s: str) -> str:
+    return hashlib.sha1(s.encode()).hexdigest()[:12]
+
+def parse_diff(text: str) -> list[dict]:
+    lines = []
+    path, new_ln = None, 0
+    for raw in text.splitlines():
+        if raw.startswith("+++ b/"):
+            path = raw[6:]
+            continue
+        m = HUNK_RE.match(raw)
+        if m:
+            new_ln = int(m.group(3))
+            continue
+        if path is None or path.startswith("tests/generated/"):
+            if raw.startswith("+") and not raw.startswith("+++"):
+                new_ln += 1
+            continue
+        if raw.startswith("+") and not raw.startswith("+++"):
+            content = raw[1:]
+            lines.append({
+                "path": path,
+                "line": new_ln,
+                "hash": sha1(content),
+                "content": content,
+                "executable": is_executable(path, content),
+            })
+            new_ln += 1
+        elif not raw.startswith("-"):
+            new_ln += 1
+    return lines
+
+def is_executable(path: str, content: str) -> bool:
+    s = content.strip()
+    if not s or s.startswith("#") or path.endswith((".md", ".json", ".yaml", ".yml")):
+        return False
+    if path.endswith(".py"):
+        try:
+            ast.parse(s)
+        except SyntaxError:
+            # Incomplete snippet still counts if it is not a comment.
+            return not s.startswith(("\"\"\"", "'''"))
+    return True
+
+def trusted_hits(cov: dict) -> set[tuple[str, int]]:
+    hits = set()
+    for path, rec in cov.get("files", {}).items():
+        executed = rec.get("executed_lines", [])
+        for n in executed:
+            hits.add((path.replace("\\", "/"), int(n)))
+    return hits
+
+def load_waivers(path: Path, today: str) -> dict[tuple[str, str], dict]:
+    import yaml
+    data = yaml.safe_load(path.read_text()) or {}
+    out = {}
+    for w in data.get("waivers", []):
+        if w.get("reason") not in REASON_CODES:
+            raise SystemExit(f"invalid reason: {w}")
+        if w.get("expires", "0000-00-00") < today:
+            raise SystemExit(f"expired waiver: {w}")
+        out[(w["path"], w["line_hash"])] = w
+    return out
+
+def main() -> None:
+    p = argparse.ArgumentParser()
+    p.add_argument("--diff")
+    p.add_argument("--cov")
+    p.add_argument("--waivers")
+    p.add_argument("--out")
+    p.add_argument("--today", default="2026-09-16")
+    args = p.parse_args()
+    changed = parse_diff(Path(args.diff).read_text())
+    hits = trusted_hits(json.loads(Path(args.cov).read_text()))
+    waivers = load_waivers(Path(args.waivers), args.today)
+    rows = []
+    for item in changed:
+        if not item["executable"]:
+            continue
+        key = (item["path"], item["hash"])
+        if (item["path"], item["line"]) in hits:
+            status = "trusted-hit"
+        elif key in waivers:
+            status = "waived"
+        else:
+            status = "unwitnessed"
+        rows.append({**item, "status": status})
+    summary = {
+        "unwitnessed": sum(r["status"] == "unwitnessed" for r in rows),
+        "trusted_hit": sum(r["status"] == "trusted-hit" for r in rows),
+        "waived": sum(r["status"] == "waived" for r in rows),
+        "rows": rows,
+    }
+    Path(args.out).write_text(json.dumps(summary, indent=2))
+    if summary["unwitnessed"]:
+        raise SystemExit(f"unwitnessed lines: {summary['unwitnessed']}")
+
+if __name__ == "__main__":
+    main()
+
+The exit code is the policy. Non-zero means the patch still has executable lines with no trusted hit and no live waiver. Do not parse the JSON for a percentage and then “accept 90%”. Percentages reintroduce the vanity metric this gate removes.
+Run this as a required check on every agent patch, after the agent has finished editing and before human review of behavior.
+Freeze the trusted tree. tests/trusted/ and tests/relations/ must be unmodifiable by the agent job. Enforce that with a path denylist in the orchestrator, not with a prompt instruction.
+Compute the executable diff. Use git diff --unified=0 against the merge base. Feed it to the mapper. Do not use file-level “touched or not” flags. A one-line change in a 400-line file is one obligation, not 400.
+Collect trusted coverage only. Invoke pytest on trusted checks and relations. Pass --cov for the application package. Discard any .coverage data produced by tests/generated/.
+Score the map. A line is discharged when its new-line number appears in the trusted coverage export, or when a waiver matches path + line_hash. Matching on line number alone is unstable across rebases. The content hash is the identity.
+Propose, do not auto-accept, relations. If unwitnessed lines remain, a model may draft a relation and a corpus slice. A reviewer either lands that relation in tests/relations/ or files a waiver. Drafts in /tmp discharge nothing.
+Fail closed. Unwitnessed count greater than zero blocks merge. No skip label except the waiver file itself.
+A relation is useful when you cannot name the correct output, but you can name an invariant across inputs. That is common for parsers, batch APIs, codecs, and pure transforms. It is a poor fit for one-shot UI copy.
+# tests/relations/test_batch_permutation.py — proposed example
+import json
+from pathlib import Path
+from src.billing import price_order  # application under test
+
+CORPUS = Path(__file__).parent / "corpus" / "orders.jsonl"
+
+def test_item_permutation_preserves_total():
+    for raw in CORPUS.read_text().splitlines():
+        order = json.loads(raw)
+        items = list(order["items"])
+        if len(items) < 2:
+            continue
+        base = price_order(order)
+        flipped = dict(order, items=list(reversed(items)))
+        assert price_order(flipped)["total"] == base["total"]
+
+Pin the corpus with a manifest. If the agent rewrites orders.jsonl to make the relation pass, the manifest hash changes and the gate fails for a different reason: corpus drift.
+# tests/relations/corpus/MANIFEST.sha256
+# sha256sum orders.jsonl > MANIFEST.sha256  (recompute only in a human commit)
+e3b0c44298fc1c149afbf4c8996fb924 orders.jsonl
+
+Replace the placeholder digest with a real sha256sum output in the human commit that lands the corpus. The check is sha256sum -c MANIFEST.sha256 in the same job that runs relations.
+# tests/waivers.yaml
+waivers:
+  - path: src/codegen/emit.py
+    line_hash: "a1b2c3d4e5f6"
+    reason: codegen
+    owner: platform-reviewers
+    expires: "2026-10-16"
+    note: "Line is emitted by the schema compiler; oracle is the .proto file."
+
+Four reason codes are enough to start: codegen, vendor, pure-refactor, experiment. If a team needs a fifth, the fifth is usually “we do not want to write a trusted check.” Reject that. Waivers are for lines whose oracle lives outside the test runner, not for fatigue.
+
+
+
+Changed line kind
+Trusted hit?
+Allowed discharge
+Gate result
+
+
+
+
+Branch in application code
+Yes
+Human-owned check or relation
+Pass
+
+
+Branch in application code
+No
+Waiver with codegen/vendor only
+Pass if waiver live
+
+
+Branch in application code
+No
+Agent unit test only
+Fail
+
+
+Comment or blank
+n/a
+None required
+Pass
+
+
+Test under tests/generated/
+
+n/a
+Never a witness
+Ignored as obligation
+
+
+Relation corpus file
+n/a
+Manifest hash must match
+Fail on drift
+
+
+Trusted test edit by agent
+n/a
+Path denylist
+Fail before scoring
+
+
+
+The table is the reviewer’s cheat sheet. If a row is not in it, add a row before adding a skip.
+Disclosure: This article was prepared as part of MonkeyCode's product outreach.
+The obligation map should run on a machine that is not the developer’s laptop cache and not the production CI pool. Local .pyc files, leftover coverage data, and pre-seeded virtualenvs all inflate trusted hits. A clean runner that boots from the patch ref is the minimum isolation.
+MonkeyCode’s free model access is relevant at step 5 only: draft candidate relations and waiver notes from the unwitnessed slice of /tmp/obligation.json. The drafts are prompts for a reviewer. They are not evidence. MonkeyCode’s free server option is relevant at steps 3–6: run trusted pytest, the mapper, and sha256sum -c on that runner so the gate is reproducible without attaching the job to a billed workflow.
+Do not send the model the trusted tests and ask it to “make coverage go up.” That recreates the original failure. Send it the unwitnessed lines and the corpus schema, and require a human commit to land any relation it proposes.
+Line identity is brittle in files the agent reformats wholesale. A black/rustfmt-only commit should be split from a behavior commit, or every reformatted line becomes an obligation. That is correct, and it is also noisy. Split the commits.
+Coverage instrumentation misses some executable lines: except paths, __repr__ debug arms, and code behind TYPE_CHECKING. Unwitnessed then over-reports. The fix is a targeted trusted check or a waiver with experiment and a short expiry, not a global ignore.
+Metamorphic relations do not prove functional correctness. A permutation-invariant pricing bug still passes test_item_permutation_preserves_total. Relations shrink the unwitnessed set. They do not replace a human-owned example for the business rule that actually changed.
+The mapper above understands Python at a shallow level. Other languages need their own is_executable predicate and a coverage format adapter. Copying the JSON schema is fine. Copying the AST heuristic is not.
+This workflow also assumes you can prevent the agent from editing tests/trusted/, tests/relations/, and tests/waivers.yaml. If your orchestrator cannot enforce a write denylist, the map is theater. Prompt-level “please do not touch trusted tests” is not a control.
+Do not install this gate on patches that a reviewer already wrote tests for, line by line, in tests/trusted/. The map will pass, and you will have paid for a report nobody needed.
+Do not use it as the only check on security-sensitive diffs: authz, crypto, and secret handling need dedicated oracles, threat review, and often a second human. An unwitnessed-line count of zero is not a security audit.
+Do not use it on generated trees where the generator commit is the oracle and the output is not executed in production. Waiver reason codegen exists for the thin wrapper around that output, not for vendoring the entire generated tree into the obligation set.
+Teams with no human-owned corpus should not start here. Start by moving three existing tests into tests/trusted/ and locking the path. The map has nothing to score against if every check is agent-owned.
+Green agent tests measure self-consistency. A line-obligation map measures whether the diff was observed by a check the agent could not rewrite. Keep the generated suite if it is useful for smoke. Keep it out of the witness set.
+If you already run agent jobs on a throwaway runner, add the mapper next to trusted pytest and fail on unwitnessed > 0. MonkeyCode’s free server option is one place to keep that job off both laptops and production CI, without changing the rule the JSON encodes...."
+image: /img/blog/generated/enhancing-ai-agent-security-through-line-obligation-gates-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Enhancing AI Agent Security Through Line-Obligation Gates](/img/blog/generated/enhancing-ai-agent-security-through-line-obligation-gates-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### The Imperative of Code Integrity in AI Development
+
+In the rapidly evolving landscape of artificial intelligence (AI), ensuring the integrity and security of code is paramount. AI agents, which operate autonomously, often generate and modify their own code. This self-modifying behavior presents unique challenges in maintaining code integrity, as changes made by the agent may not always be validated by a trusted source. The introduction of line-obligation gates is a critical step towards addressing these challenges, providing a structured approach to validate every code change made by an AI agent.
+
+### Defining Line-Obligation Gates
+
+Line-obligation gates serve as a mechanism to enforce that every executable line of code modified by an AI agent is accompanied by a trusted witness. This witness can take the form of a human review, a metamorphic relation, or a formally documented waiver with an expiry date. By categorizing every changed line into specific buckets—such as human-owned checks or metamorphic relations—developers can ensure that no line remains unwitnessed, thus minimizing the risk of undetected errors or vulnerabilities.
+
+### Risks of Unwitnessed Code Changes
+
+The risks associated with unwitnessed lines in code changes are significant. When an AI agent modifies code without adequate validation, it can introduce bugs, security vulnerabilities, and unintended behavior. For instance, if an agent modifies a critical authentication mechanism without a trusted check, it could lead to unauthorized access or data breaches. The failure to validate these changes can result in catastrophic consequences, emphasizing the necessity of implementing line-obligation gates as a safeguard against such risks.
+
+### Components of the Line-Obligation Map
+
+The line-obligation map is a central artifact in this process, designed to classify every changed line of code. It includes several key components: 
+
+1. **Human-Owned Check**: This involves a test file located in a path that the agent cannot modify. For example, a directory like `tests/trusted/` can be established, where any edits by the agent are outright rejected. The tests in this directory must be executed against the modified lines to ensure that they function as intended.
+
+2. **Metamorphic Relation**: This is a relation that describes how inputs are transformed into outputs without asserting a single expected output. For instance, a relation could state that the order of items in a data structure should not affect the final computed total in a pricing function. These relations must be proposed by the agent but require human approval before they can discharge any obligations.
+
+3. **Waiver**: A waiver is a formal record that documents an exception to the obligation rule. It includes essential details such as the file name, line hash, reason code, owner, and an expiry date. For example, a line generated by a code generator might be waived under the reason code "codegen," provided it is reviewed and approved.
+
+### Implementing Line-Obligation Gates in Development Workflows
+
+Integrating line-obligation gates into existing development workflows requires a systematic approach. 
+
+1. **Establish a Trusted Test Directory**: Create a directory for trusted tests that the AI agent cannot modify. This directory should contain critical tests that validate the core functionality of the application.
+
+2. **Develop the Obligation Map**: Utilize a script to generate the line-obligation map from the `git diff` output and coverage reports. The following Python snippet illustrates how to create this map:
+
+   ```python
+   def generate_obligation_map(diff_file, coverage_file, waivers_file):
+       # Parse the diff and coverage files
+       changed_lines = parse_diff(diff_file)
+       coverage_hits = trusted_hits(coverage_file)
+       waivers = load_waivers(waivers_file)
+
+       # Classify each changed line
+       for line in changed_lines:
+           # Logic to classify the line as trusted, waived, or unwitnessed
+           ...
+   ```
+
+3. **Run Trusted Checks**: Execute only the tests from the trusted directory and the metamorphic relations to collect coverage data. This ensures that the coverage reports reflect only the trusted tests and are not influenced by the agent's tests.
+
+4. **Fail Closed on Unwitnessed Lines**: The obligation map should enforce a policy where any patch containing unwitnessed lines fails to merge. This is a critical step in maintaining code integrity and ensuring that all changes are validated.
+
+### Best Practices for Maintaining Trusted Checks
+
+To effectively maintain trusted checks, several best practices should be followed:
+
+- **Strict Path Denylist**: Enforce a denylist on paths that the agent can modify, ensuring that critical tests and relations remain untouched. This prevents the agent from inadvertently altering the validation mechanisms.
+
+- **Regular Review of Waivers**: Waivers should be periodically reviewed to ensure they remain valid and necessary. Expired waivers should automatically fail the gate, prompting a review of the associated code.
+
+- **Human Oversight**: Incorporate human oversight into the review process. Even with automated checks in place, human reviewers play a crucial role in assessing the validity of proposed metamorphic relations and waivers.
+
+### Common Pitfalls and Mitigation Strategies
+
+While implementing line-obligation gates, several common pitfalls can arise:
+
+- **Overgeneralization of the Concept**: It is essential to avoid oversimplifying the implementation of line-obligation gates. Each line must be carefully classified, and the consequences of failing to do so can be severe.
+
+- **Neglecting Human Review**: Relying solely on automated checks can lead to vulnerabilities. Human review is indispensable, especially in complex systems where nuanced understanding is required.
+
+- **Ignoring Security Vulnerabilities**: Line-obligation gates should not be the only security measure in place. Additional security reviews and checks are necessary, particularly for sensitive code changes related to authentication and authorization.
+
+### Real-World Case Study: Successful Implementation
+
+A leading technology firm recently adopted line-obligation gates in their AI agent development process. By implementing a strict obligation map and enforcing trusted checks, they significantly reduced the number of undetected bugs in their codebase. The introduction of metamorphic relations allowed the team to validate complex transformations without relying on specific output values, enhancing their testing strategy. Over a six-month period, the company reported a 40% decrease in critical bugs associated with code changes made by AI agents.
+
+### The Future of Line-Obligation Gates in AI Security
+
+As AI systems become increasingly autonomous, the need for robust security measures will only grow. Line-obligation gates represent a proactive approach to ensuring code integrity and security in AI development. By systematically validating changes and maintaining a clear separation between agent-generated code and trusted checks, organizations can mitigate risks and enhance the reliability of their AI systems. The future will likely see further advancements in this area, with more sophisticated methods for validating AI-generated code and ensuring that security remains a top priority.
+
+By embracing line-obligation gates, organizations can pave the way for more secure and reliable AI systems, ultimately fostering greater trust in the technology that is becoming integral to countless applications across industries.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/datacpp_8185/unwitnessed-lines-are-untested-a-line-obligation-gate-for-agent-patches-19mb)
+
+---
+
+<SocialShare title="Enhancing AI Agent Security Through Line-Obligation Gates" slug="enhancing-ai-agent-security-through-line-obligation-gates" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
