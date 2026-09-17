@@ -1,0 +1,266 @@
+---
+slug: enhancing-technical-documentation-consistency-with-vale
+title: "Enhancing Technical Documentation Consistency with Vale"
+authors: [francis]
+tags: [vale, documentation, ai, linting]
+date: 2026-09-17T10:36:51.664Z
+description: "When I started learning more seriously about documentation for AI systems, I noticed something I had probably been ignoring for a long. A lot of documentation problems are not really writing problems but are consistency problems.
+The API is PlatformClient on one page and _platformClient _in an example on another. If you write technical documentation, you can relate to this.
+In my docs, one feature is called Form Filling in the navigation, form filling in the body, and Form-Filling somewhere else.
+Someone writes:
+You might need to create a session before calling the API.
+But the session is actually required. None of these things would make me reject a documentation page.
+You might even read the page, understand what it means, and move on. But when you maintain a large documentation set, these small differences start showing up everywhere, and now that the same documentation is also being used by AI assistants and RAG systems, you need to start paying more attention to them.
+Not because I think documentation should be written for AI. It should or shouldn’t, but if we can make the documentation clearer and more consistent for people, we also give machines cleaner information to work with.
+That is where Vale comes in.
+Technical writers love style guides, and my docs also have one. We create them for everything like:
+Capitalization
+
+
+Product names
+
+
+API terminology
+
+
+Headings
+
+
+Voice
+
+
+Sentence length, etc.
+
+
+
+Eventually, it becomes a large document which is hard to maintain, and something a person has to remember.
+You can tell another writer:
+Always use PlatformClient
+Six months later, someone writes Platform Client
+You can tell everyone not to use vague language in instructions.
+Another writes you might need to.... This is normal when you have multiple writers, hundreds of pages, and documentation that keeps changing. Therefore, instead of putting a lot of rules in a document and hoping everyone remembers them, I started thinking about which rules could simply be checked automatically.
+That is where I used Vale. Vale is a prose linter. It can run against Markdown and MDX and lets you define your own writing rules. It is basically the same idea as linting code it just that you are linting documentation here.
+Don’t start by creating 100 Vale rules. This is what most beginners do. Instead, the first rule is to protect information. Let’s understand this. Product names, API identifiers, important terminology- these are the things that should be written in a specific way.
+For example, imagine that the official feature name is:
+Form Filling
+I don't want this appearing randomly across the documentation:
+Form filling
+form filling
+Form-Filling
+
+
+Sometimes lowercase form filling might be correct in body text, which is fine, but a good Vale rule should understand the context, not the rule itself.
+For example, I might want Form Filling in a title but allow **form filling **in normal prose. Vale lets me create such rules instead of relying entirely on manual review.
+A simple rule could look like this:
+extends: existence
+
+message: "Use 'Form Filling' in titles."
+level: error
+
+nonword: '\bForm filling\b'
+
+scope: title
+
+It is a very small rule. But that is the point. I don't need Vale to understand my entire documentation strategy; it just needs to catch the things I already know are wrong.
+There is another category that I find interesting in vale
+Words like:
+maybe
+might
+could
+often
+seems
+
+These words are not automatically bad. Sometimes "might" is exactly the right word. But technical documentation has plenty of places where we use these words because we haven't been precise enough.
+For example:
+You might need to create a session before sending audio.
+If the session is required, why say "might"?
+Just say:
+Create a session before sending audio.
+So I can use Vale to flag words like might or could:
+extends: existence
+
+message: "Avoid vague language. Be specific."
+level: warning
+
+nonword: '\b(maybe|might|could|often|seems)\b'
+
+scope: text
+
+Notice that I used warning. I don't want the build to fail every time someone writes "could”, instead, I want the writer to stop for a second and decide whether the sentence can be made more precise, and this distinction matters a lot.
+I am much stricter with API identifiers. If the actual SDK class is:
+PlatformClient
+then I want the documentation to say exactly that.
+Not:
+platformClient
+Platform Client
+platform client
+
+The same goes for parameters:
+emr_encounter_id
+session_id
+
+These aren't style preferences but are identifiers. If I get the capitalisation of a normal sentence wrong, nobody's application breaks, but if I get an API identifier wrong in a copy-paste example, there is a much bigger problem.
+This is also where AI-generated code makes consistency more important. If an AI system gets PlatformClient from one page and platformClient from another, I would much rather have caught that inconsistency in the source documentation than try to fix the generated answer later.
+Sentence length is another thing Vale can check. I like shorter sentences in technical documentation not because every sentence needs to be short, but because long sentences often contain several instructions that should have been separated.
+For example:
+Before calling the endpoint, make sure the session exists, that it is active, and that the session ID returned when you created it is the same ID you use in the request.
+There are several pieces of information here.
+I would probably write:
+Create a session before calling the endpoint. The session must be active. Use the session_id returned when you create the session.
+Much easier to scan, maintain, and reuse as individual pieces of information. I would still make sentence length a warning. I don't want a linter forcing writers to write unnatural prose just to make a number happy.
+For me, Vale makes the most sense when it becomes part of the normal documentation workflow. As a tech writer, I can get feedback in the editor itself. The same checks can run before committing, and then CI can run them again when the documentation goes through a pull request.
+A simple GitHub Actions job looks like this:
+name: Vale
+
+on: [pull_request]
+
+jobs:
+  vale:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: errata-ai/vale-action@v1
+        with:
+          files: '**/*.mdx'
+
+When you work with Vale, be careful about what blocks a PR. An incorrect API identifier might be an error, or a vague word should probably be a warning. A style suggestion might just be a suggestion. If everything becomes an error, you will eventually start treating Vale as noise, and this gets frustrating over time.
+I don't think Vale makes documentation "AI readable" in some special technical sense. What it does is help remove some of the mess from documentation, like consistent terminology, correct identifiers, etc.
+My workflow has changed a bit with Vale. Now I also think about how another system might consume the same page. Developers might understand that Form Filling and form filling refer to the same thing. A documentation search system may still have to deal with the difference. But an AI assistant may retrieve several pieces of documentation and use them as context. Using value makes your source material less ambiguous to deal with. That is the real reason why linting is important in the AI world.
+I have always thought of documentation quality as something that comes from many small decisions. Like:
+Writing the right sidebar for an API.
+A clear heading that is easy to search and makes sense as per that page's topics. Vale doesn't replace any of that work. It just lets you automate some of the decisions we keep making manually over time, and as your documentation grows and gets consumed by AI systems, I think that is worth doing...."
+image: /img/blog/generated/enhancing-technical-documentation-consistency-with-vale-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Enhancing Technical Documentation Consistency with Vale](/img/blog/generated/enhancing-technical-documentation-consistency-with-vale-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### The Imperative of Consistency in AI Documentation
+
+In the development and deployment of AI systems, the quality of technical documentation plays a pivotal role. Inconsistent documentation can lead to misunderstandings that not only confuse human users but also impair the performance of AI systems that rely on this documentation for training and inference. As AI applications become more complex, maintaining clarity and uniformity in documentation is essential. A well-structured documentation set serves as a reliable reference point, ensuring that both users and AI models can effectively interpret the information presented.
+
+### Common Pitfalls: Terminology and Style Inconsistencies
+
+Technical writers frequently encounter pitfalls related to inconsistencies in terminology and style. For instance, an API might be referred to as `PlatformClient` in one section and `_platformClient_` in another. Such discrepancies not only confuse human readers but also hinder AI systems that depend on standardized inputs. Furthermore, vague language can introduce ambiguity. Phrases like "you might need to create a session" can mislead users regarding the necessity of certain actions, particularly when the action is mandatory. Addressing these inconsistencies is vital for maintaining high-quality documentation that serves its intended purpose.
+
+### Introducing Vale: The Prose Linter for Enhanced Documentation
+
+Vale is a powerful prose linter designed to address the challenges of inconsistent documentation. By allowing writers to define their own rules for style and terminology, Vale automates the enforcement of these standards. This automation is particularly beneficial in collaborative environments where multiple writers contribute to a single documentation set, reducing the cognitive load on writers to remember every stylistic guideline. Vale operates similarly to code linters, providing immediate feedback on documentation changes and ensuring that inconsistencies are caught early in the writing process.
+
+### Setting Up Vale: A Step-by-Step Guide
+
+Integrating Vale into your documentation workflow is a straightforward process that can yield significant benefits. To begin, install Vale on your local machine and configure it according to your documentation needs. This involves creating a `.vale.ini` file where you specify the rules that Vale should enforce. For example, you can set rules for API identifiers, capitalization, and specific terminology. Once Vale is set up, you can run it locally to provide immediate feedback on documentation changes, ensuring that inconsistencies are addressed before they become entrenched.
+
+### Crafting Effective Vale Rules for Terminology Consistency
+
+Creating tailored Vale rules is crucial for achieving consistency in documentation. For instance, if your documentation uses the term `Form Filling` as a feature name, you can create a rule that flags any instance of `form filling` or `Form-Filling` in titles or headings. Here’s an example of such a rule:
+
+```yaml
+extends: existence
+
+message: "Use 'Form Filling' in titles."
+level: error
+
+nonword: '\bForm filling\b'
+
+scope: title
+```
+
+This rule ensures that the specific term is used consistently, preventing variations that could confuse readers. Vale’s flexibility allows for context-sensitive rules, enabling writers to maintain clarity without sacrificing the nuances of language.
+
+### Flagging Vague Language to Enhance Clarity
+
+Vague language can significantly detract from the quality of technical documentation. Vale can be configured to flag terms such as "might," "could," or "often," prompting writers to reconsider their phrasing. For example, a rule that warns against vague language might look like this:
+
+```yaml
+extends: existence
+
+message: "Avoid vague language. Be specific."
+level: warning
+
+nonword: '\b(maybe|might|could|often|seems)\b'
+
+scope: text
+```
+
+By using warnings rather than errors, Vale encourages writers to reflect on their language choices without imposing overly strict constraints. This balance is critical in maintaining a human-centric approach to writing while leveraging automation for quality control.
+
+### Integrating Vale into CI/CD Pipelines for Continuous Quality
+
+To ensure ongoing documentation quality, integrating Vale into Continuous Integration/Continuous Deployment (CI/CD) pipelines is a powerful strategy. Automating the linting process ensures that any documentation changes are checked against your Vale rules before being merged. A simple GitHub Actions configuration might look like this:
+
+```yaml
+name: Vale
+
+on: [pull_request]
+
+jobs:
+  vale:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: errata-ai/vale-action@v1
+        with:
+          files: '**/*.mdx'
+```
+
+This setup allows for real-time feedback during the pull request process, ensuring that any inconsistencies are flagged before they make their way into the main documentation set. However, it is essential to carefully manage what constitutes an error versus a warning to prevent overwhelming writers with false positives. Striking the right balance is crucial; overly strict rules may lead to writer frustration, while too lenient rules may compromise document quality.
+
+### The Trade-offs of Strict Linting in Documentation
+
+While Vale provides powerful tools for maintaining documentation quality, there are risks associated with overly strict linting rules. If every deviation from established rules is treated as a critical error, writers may become frustrated, leading to decreased morale and productivity. It is vital to strike a balance between maintaining high standards and allowing flexibility for creative expression. Not every stylistic choice needs to be enforced rigidly; some may simply be suggestions that enhance readability. For example, while it is critical to enforce consistent terminology, allowing some flexibility in stylistic choices can foster a more engaging writing environment.
+
+### Real-World Impact: Case Study of Documentation Improvement
+
+Consider a technical team that adopted Vale for their API documentation. Initially, their documentation was riddled with inconsistencies, leading to frequent confusion among users and developers. After integrating Vale, the team established a set of clear rules for terminology and style, significantly reducing the number of discrepancies. Within one month, they reported a 40% decrease in support tickets related to documentation issues, demonstrating the tangible benefits of a consistent approach. This case study exemplifies how Vale not only improves documentation quality but also enhances user experience and reduces the workload of support teams.
+
+### The Long-Term Benefits of Using Vale for Documentation Quality
+
+Implementing Vale in your documentation process offers long-term benefits that extend beyond immediate quality control. By fostering a culture of consistency, you create a more reliable foundation for both human users and AI systems that rely on your documentation. As AI technologies continue to evolve, the need for clear, unambiguous documentation will only grow. Vale helps to ensure that your documentation remains relevant and effective, reducing the likelihood of errors and misunderstandings. 
+
+### Embracing Automation for Documentation Quality
+
+In conclusion, integrating Vale into the technical documentation workflow represents a significant advancement in how we approach writing for AI systems. By automating the enforcement of consistency and clarity, Vale not only enhances the quality of documentation but also prepares it for future AI applications. Embracing tools like Vale is essential for maintaining high standards in technical communication, ultimately leading to improved user experience and more reliable AI outputs. This proactive approach to documentation quality is a strategic investment for any organization aiming to succeed in the rapidly evolving field of AI.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/meharshit/linting-technical-docs-for-ai-readability-using-vale-3b12)
+
+---
+
+<SocialShare title="Enhancing Technical Documentation Consistency with Vale" slug="enhancing-technical-documentation-consistency-with-vale" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
