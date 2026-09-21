@@ -1,0 +1,152 @@
+---
+slug: bridging-the-gap-real-world-evaluations-for-ai-agents
+title: "Bridging the Gap: Real-World Evaluations for AI Agents"
+authors: [francis]
+tags: [ai, agent-evaluation, testing, infrastructure]
+date: 2026-09-21T11:18:58.588Z
+description: "An agent eval suite's outcome can only be trustworthy if it's operating in an environment similar to production. You can have the best grading logic in the world, but if the agent is calling mocked databases and fake APIs, you're not testing how it behaves in the real world, you're testing how it behaves in the mocks you built. That gap is what we dug into on September 15, when we sat down with Dor Cohen, AI Engineering Director at monday.com, for an interview and demo on how his team architected running agent evals against a live staging cluster instead of mocks.
+If you missed the session, here's the recap: what agent evals actually need to check, why mocks fall short compared to the agent calling real systems, and how monday.com built their agent evals infrastructure.
+Testing an agent isn't the same as testing a model. An agent is a package: the model, the tools it calls, and the dependencies behind those tools. Unlike a unit test, where you know exactly what output to expect, an agent is non-deterministic, as it can pick a different tool or path on every run. So the eval has to check the full trajectory it takes to get there, not just whether the final answer sounded right.
+Dor shared an example of why testing the full chain matters. They had an agent that was asked to retrieve 600 items. It called the right tools, formatted a confident, well-structured answer, and returned a response that read as correct. Except it had only processed about 500 of them. Every individual tool call worked. The final answer looked fine, but the task wasn't actually done. An eval that only grades the final answer would have passed it but an eval that checks trajectory and completeness catches it.
+One very important part in the agent eval chain we discussed above is the dependencies your agent calls. The default way to run evals is against mocks because they're lightweight, fast to set up, and isolated, and for a lot of testing that's exactly what you want. But for an agent that's calling real databases, services, and APIs in production, mocks introduce three problems.
+They drift: a mock has to be kept in sync with your production environment by hand, and it never is.
+The data isn't real either, synthetic rows present in mocks are cleaner and thinner than what actually lives in your database, so they can't expose the edge cases production will.
+And mocks can't represent state. When an agent reads data and takes a downstream action, a mock either forgets the write happened or fakes it, so you can't actually tell what the agent left behind.
+Staging doesn't have any of those problems by construction. It stays current with production because it's the last stop before it. It runs on real data, at close to production scale, with all the variety and mess that comes with that. And because the agent's actions actually land, you can check the real end state, not a simulated one. Fidelity to production is what makes or breaks the quality of your agent evals.
+The objection to running evals against staging (or other pre-prod environments) is reasonable, though: it's not lightweight, not isolated, and not easy to wire up. That's the problem monday.com solved with mirrord.
+mirrord connects a process running locally, in a CI job, or in an eval runner, to a real Kubernetes cluster, so it behaves as if it's deployed there: real traffic mirrored or stolen from a live pod, real env vars and secrets imported straight from the target, real reads and writes on the remote filesystem. DB branching and queue splitting isolate each eval session's writes, so multiple runs, from different engineers or different CI jobs, can hit the same cluster at the same time without stepping on each other's data.
+There's no separate deploy step as well, you just wrap your existing eval command and run it with mirrord:
+mirrord exec --target deployment/orders-api \
+    -- pytest evals/agent_suite.py
+
+And in CI you can just use mirrord ci start instead of mirrord exec, with the same arguments. When a model, a prompt, or a tool changes, your CI job runs the suite against real dependencies before the change reaches a merge gate.
+monday.com runs 700+ microservices behind its agents, with the usual sprawl that comes with that scale: authentication, feature flags, permission layers, and a long list of third-party integrations. Mocking these dependencies or setting them up each time in an ephemeral environment would've been a huge investment for them in terms of both time and money. Their estimate for a dedicated evaluation environment came out to about a month of setup, plus ongoing maintenance across 700+ services just to keep it in sync. Obviously, they ended up going the more practical route of pointing their evals at staging with mirrord, which their developers were already using for local development.
+The difference shows up in the day-to-day now: agent eval suites run in minutes instead of hours, the added infrastructure cost is close to zero since monday.com already pays for staging, and they get an output that they can actually trust.
+monday.com treats a model upgrade the same way it treats any other version change to the agent: it runs the full eval suite against the new model before switching. When the team tested Sonnet 5 against their existing default model, goal completion dropped by about 10%, and agent correctness dropped by about the same. The suite failed to cross the pass threshold.
+This was great for the team as it gave them a clear signal that the upgrade wasn't safe to ship as-is, pointed to specific failure points in tool selection and prompt adherence, and gave them a concrete direction for what to adjust before trying again. Without a suite running against real dependencies, this is the kind of regression that tends to surface only after a customer hits it.
+Dor shared that their eval pipeline isn't just limited to CI pipelines, it's the same underlying infrastructure triggered from three different places, all producing consistent results through mirrord and LangSmith.
+From Claude Code, a developer working locally can invoke an offline evals skill right after making a change. It asks for the eval scope, all cases or a specific category, connects to dependencies living in staging through mirrord, and runs the suite. Results land in LangSmith with input, reference output, actual output, and a score per metric.
+From Slack, monday.com has an internal Claude-based evaluation agent, nicknamed "Eevee," that can be asked to run evals with specific parameters, like swapping in a different model for a test run. It uses the same infrastructure, produces the same LangSmith output, and posts a summary back in Slack. This is actually how the team caught the ~10% drop in goal completion during the Sonnet 5 test.
+From CI, eval results show up alongside regular checks on the pull request, each with a score and a mode: observed, which is informational, or blocked, which prevents the merge, depending on the severity of the change and the product it's touching.
+monday.com runs these "offline evals" alongside "online" ones. Offline evals run against their staging environment with controlled datasets, gating changes before they ship. Online evals grade live agent behavior continuously after it is shipped to production. When something surfaces in production that the offline dataset didn't cover, it gets pulled into that dataset for future regression testing, closing the loop between what ships and what gets tested next.
+monday.com's base eval pipelines track six metrics:
+Goal completion: did the agent finish the whole task, not just appear to
+Agent correctness: was the answer factually and logically right
+Tool precision: did it pick the correct tools for the task and call them in the correct sequence
+Trajectory: was the path taken the expected one
+Groundedness: are the agent's claims backed by evidence it actually had
+Intercompleteness: did it gather everything it needed before answering
+Some of these are fully deterministic, like whether the required tool got called. Others need an LLM-as-judge, for things like whether the agent understood the goal or stayed in scope. And individual product teams at monday.com add their own domain-specific evaluators on top of the base set, because what counts as a passing score depends entirely on the product and the use case.
+A few things worth carrying away from the session:
+Agent evals should test more than just the final output: tools picked, dependencies used, trajectory taken, and completeness all matter.
+Mocks drift, and synthetic test data can't replicate the variety and edge cases that live in production.
+Most teams already have the right environment for running agent evals properly. Staging is current with production by definition. Building a dedicated eval environment from scratch is usually more expensive and slower than pointing your suite at the one you already run.
+Online and offline evals reinforce each other. Edge cases from production belong in your offline dataset, so the two tracks compound over time instead of drifting apart.
+If you'd like to see the full webinar recording including the demo Dor showed, you can get it here. And if you want to set up a 1:1 session with one of our engineers who'll walk you through how to connect your agent evals to real dependencies with mirrord, you can book a demo with us...."
+image: /img/blog/generated/bridging-the-gap-real-world-evaluations-for-ai-agents-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Bridging the Gap: Real-World Evaluations for AI Agents](/img/blog/generated/bridging-the-gap-real-world-evaluations-for-ai-agents-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### The Imperative of Trustworthy AI Evaluations
+
+Evaluating AI agents is crucial for ensuring their effectiveness in real-world applications. As AI systems become more integrated into business processes, the stakes for accurate evaluations rise. A reliable evaluation strategy must extend beyond theoretical metrics and simulated environments, demanding a robust methodology that reflects actual operational conditions. This necessity underscores the importance of transitioning from mocked environments to real-world dependencies in AI evaluations.
+
+### The Limitations of Mock Environments in AI Testing
+
+Mock environments are often favored for their convenience and speed, but they come with significant drawbacks. These environments typically lack the complexity of live systems, leading to evaluations that may not accurately reflect how an AI agent will perform under real-world conditions. For instance, mocked databases can drift from production, resulting in discrepancies that can mislead developers about an agent's true capabilities. Additionally, synthetic data cannot replicate the varied and unpredictable nature of real-world data, which may contain edge cases that are critical for comprehensive testing.
+
+### The Concept of Real Dependencies in Evaluations
+
+Real dependencies refer to the actual data, services, and APIs that an AI agent interacts with in a production environment. Evaluating agents against these dependencies is essential for capturing their performance accurately. For example, an AI agent designed to access a database must interact with the live database to understand its behavior under load, how it handles concurrent requests, and how it responds to various data states. This fidelity to real-world conditions is vital for assessing an agent's operational readiness and effectiveness.
+
+### Case Study: monday.com and the mirrord Tool
+
+monday.com has effectively addressed the challenge of evaluating AI agents against real dependencies by utilizing a tool called mirrord. This innovative solution allows local processes to connect directly to a real Kubernetes cluster, enabling AI agents to operate in an environment that closely mirrors production. By leveraging mirrord, monday.com can run agent evaluations against a staging environment that reflects the complexities of real-world interactions. This approach not only accelerates the evaluation process but also enhances the reliability of the results.
+
+### Key Metrics for Evaluating AI Agent Performance
+
+To ensure comprehensive evaluations, monday.com employs a set of six key metrics that assess various aspects of an AI agent's performance:
+
+1. **Goal Completion**: Did the agent successfully complete the entire task?
+2. **Agent Correctness**: Was the final output factually and logically accurate?
+3. **Tool Precision**: Did the agent select and use the correct tools in the appropriate order?
+4. **Trajectory**: Was the path taken by the agent consistent with expectations?
+5. **Groundedness**: Are the agent's claims supported by evidence from the data?
+6. **Intercompleteness**: Did the agent gather all necessary information before providing an answer?
+
+These metrics provide a holistic view of an agent's performance, ensuring evaluations are thorough and reflective of real-world scenarios.
+
+### Implementing Real-World Testing in CI/CD Pipelines
+
+Integrating real-world testing into Continuous Integration/Continuous Deployment (CI/CD) pipelines is essential for maintaining the quality of AI agents. Tools like mirrord facilitate this integration by allowing teams to run evaluations against live dependencies as part of their CI processes. For instance, a CI job can execute an evaluation suite against real dependencies before merging any changes into the main branch. This proactive approach helps identify regressions early, reducing the risk of deploying faulty agents.
+
+### Challenges in Transitioning to Real Dependencies
+
+Transitioning from mocked environments to real dependencies presents several challenges. One major concern is the potential overhead associated with running evaluations against live systems, which can introduce variability and complexity. Additionally, organizations must consider the impact on production systems, such as increased load or unintended side effects. To mitigate these risks, teams can implement strategies like database branching and queue splitting, which isolate evaluation sessions and ensure that multiple tests can run concurrently without interference.
+
+### Operational Benefits of Real-World Evaluations
+
+The operational implications of adopting real-world evaluations are significant. For monday.com, using mirrord has dramatically reduced the time required for evaluations, allowing them to run in minutes instead of hours. This efficiency not only accelerates development cycles but also ensures that the evaluations yield trustworthy results. The insights gained from real-world evaluations enable teams to make informed decisions regarding model upgrades and feature enhancements, ultimately leading to better-performing AI agents.
+
+### The Synergy of Online and Offline Evaluations
+
+monday.com employs both offline and online evaluations to reinforce their evaluation strategy. Offline evaluations run against controlled datasets in the staging environment, allowing for rigorous testing before changes are deployed. Conversely, online evaluations continuously monitor agent behavior in production, catching issues that may not have been apparent during offline testing. This dual approach ensures that agents are consistently performing at their best, with feedback loops that enhance future testing scenarios.
+
+### Actionable Steps for Implementing Real-World Testing
+
+To effectively transition to real-world testing, teams should consider the following actionable steps:
+
+1. **Assess Current Infrastructure**: Evaluate existing staging environments to determine their readiness for real-world testing. Identify any necessary adjustments to facilitate seamless integration with tools like mirrord.
+
+2. **Integrate mirrord into CI/CD**: Implement mirrord within CI/CD pipelines to enable evaluations against real dependencies. This can be achieved by wrapping existing evaluation commands with mirrord, ensuring that tests run in a production-like environment.
+
+3. **Define Comprehensive Metrics**: Establish a set of metrics that capture the full spectrum of agent performance. Utilize the key metrics outlined by monday.com as a foundation, but customize them to fit specific use cases and operational requirements.
+
+4. **Implement Isolation Techniques**: Utilize techniques such as database branching and queue splitting to isolate evaluation sessions, minimizing the impact on production systems while allowing for concurrent testing.
+
+5. **Monitor and Iterate**: Continuously monitor the results of real-world evaluations and iterate on testing strategies based on insights gained. Incorporate feedback loops that allow for adjustments to be made in response to observed performance.
+
+### Conclusion: The Path Forward for AI Agent Evaluations
+
+As AI systems evolve, the methodologies for evaluating AI agents must also advance. The emphasis on real-world dependencies is not just a trend; it is a critical necessity for ensuring the reliability and effectiveness of AI agents. By adopting practices that prioritize fidelity to production, organizations can build trust in their AI systems and deliver superior user experiences. The journey toward robust AI agent evaluations is ongoing, but the integration of real dependencies marks a significant step forward in achieving that goal.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/metalbear/how-mondaycom-runs-agent-evals-against-real-dependencies-webinar-recap-41ge)
+
+---
+
+<SocialShare title="Bridging the Gap: Real-World Evaluations for AI Agents" slug="bridging-the-gap-real-world-evaluations-for-ai-agents" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
