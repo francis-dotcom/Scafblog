@@ -1,0 +1,169 @@
+---
+slug: reconstructing-legacy-systems-lessons-from-ai-failures
+title: "Reconstructing Legacy Systems: Lessons from AI Failures"
+authors: [francis]
+tags: [ai, legacy-systems, software-engineering, verification]
+date: 2026-09-24T17:14:52.982Z
+description: "Four reconstructions, four kinds of missing documentation, and the defects landed in the same place every time.
+In HAL/S it was the characters the scanner destroyed. In the Nautilus simulator it was the parameters Verne never wrote down. In Wikicarta it was the desktop window no headless harness can open. In the compressor it was the part of the input space the corpus never sampled.
+Different projects, different languages, different failure symptoms. One shape: the defects clustered wherever no automated check could reach, and in every case the code looked fine. Tests green, types satisfied, output plausible.
+These weren't four projects that happened to be about old software. They were one experiment with a controlled variable: how degraded is the source of truth the model works from, and can it be caught being wrong?
+
+
+
+arm
+source of truth
+oracle
+outcome
+
+
+
+
+HAL/S
+degraded formal spec + preserved code
+strong, independent
+faithful reconstruction; 12/12 preserved programs run
+
+
+Nautilus
+a novel
+none — one was built
+5 findings; the legend fails on every axis
+
+
+Wikicarta
+memory of a product
+none — human judgement
+shippable app; every defect at the runtime seam
+
+
+compressor
+behaviour only, key sealed
+strong, opened after freeze
+decoder 100%, encoder 8.3%
+
+
+
+The intuition going in was that performance would degrade smoothly as the source got worse. It didn't. Something else predicted the results, and it cut across all four.
+The reconstruction quality tracked whether the available evidence determines the answer — not how difficult the task was.
+The compressor makes this measurable, because both halves ran under identical conditions. The decoder recovered the bitstream format at 100%, because a format is one-way determined: if you want to decode the stream, exactly one answer works. The encoder scored 8.3% on the same format, because its heuristics — match-finder strategy, tie-breaking, greedy versus lazy — are choices that leave no trace in the decompressed bytes. Same model family, same oracle, same week. A 12× gap, entirely explained by whether the evidence pinned the answer.
+The other three say the same thing in their own terms:
+HAL/S. The 485 grammar productions were determined by the page images, and the reconstruction got them. The characters the scan physically destroyed were determined by nothing, and no amount of model capability recovers them. That limit is information-theoretic. Better OCR narrows it and never closes it.
+Nautilus. The physics is determined; the equations produce the same crush depth for anyone. The parameters Verne omitted are determined by nothing, so submerged endurance ranges across 6 to 211 hours — a 35× spread — and battery capacity across 100×. Those spreads aren't noise around a finding. They are the finding.
+Wikicarta. Parsing, backoff, cache naming and database ordering are determined by their inputs, and compiled correct on the first or second attempt, consistently. Whether the category wheel feels like Encarta is determined by nothing you can write down, and stayed a human call from start to finish.
+The practical version: before handing a legacy task to a model, ask whether the evidence you have actually pins the answer. If it does, expect the model to find it and build a cheap mechanical check to confirm. If it doesn't, expect a confident, plausible, unmarked invention — and note that the model will not tell you which mode it's in, because from the inside they feel identical.
+The compressor was built to demonstrate that a strong oracle masks confabulation. It mostly refuted that.
+The reconstruction's central error — assigning Huffman code lengths by symbol index rather than in heap-extraction order — failed the byte-match test loudly. The oracle caught it. What the oracle did hide were two mechanisms the corpus never triggered: a block-splitting path that needs inputs larger than 8 KiB to fire, and a match-finder chain cap that needs input more self-similar than anything tested.
+So the masking risk is not a property of the oracle's strength. It's a property of the input space you sampled. A strong checker over a narrow corpus hides precisely the mechanisms your corpus never exercises, and hides them silently, because everything it can see is green.
+Strengthening the checker does nothing for this. Widening the corpus does.
+That generalises past compression. It's the same failure as a test suite with excellent coverage of the paths anyone thought to write a test for.
+I expected to spend supervision effort reviewing code. Across all four projects, almost none of it went there. The load-bearing human contributions were:
+HAL/S — deciding not to vote between OCR engines, and then reading 485 grammar productions against page images by eye.
+Nautilus — signing the invariants and making them append-only, so the model could patch the physics but was structurally unable to weaken the checks that judge it.
+Wikicarta — being the runtime. Clicking the button in the real window, on the real WebKit build, where the blocking dialog freeze and the cross-realm instanceof failure lived.
+compressor — holding the seal. Not reading the answer key until the reconstruction was frozen at a tag.
+Two categories, and neither is code review. One is supplying what no code can check — an eye on a page image, a hand on a mouse. The other is designing the checks that are possible and then putting them structurally out of the model's reach.
+The OCR decision is the sharpest of the four, because it's a judgement call that separates a good result from a worthless one that looks identical. Running three OCR engines and taking the majority is the obvious move and it is wrong: the errors are correlated, so a vote launders error rather than cancelling it, and no fusion can recover a character that no engine produced. Survivable in prose, fatal in a grammar where the metacharacters are the content. Take the vote and you get a clean, plausible, silently corrupt grammar — and every downstream artifact inherits it.
+The Nautilus invariant signing is the most reusable. Twelve invariants live in version control with a manifest checksum only a human re-signs. When the fuzzer finds a violation, the repair workflow requires patching the core and forbids touching the invariant. An agent optimising against a check it can also edit is not being checked.
+Ranked by how much verification apparatus existed before the real work started, the four projects come out in the same order as how much I trust their conclusions.
+Nautilus had determinism, golden-stream replay and malformed-input fuzzing green in its check harness before a single equation was written, plus a frozen protocol and a rule that every spec parameter traces to either a sourced claim or a documented gap range. Its numbers are the most defensible in the series. The compressor's seal, cold-recall protocol, freeze tag and grading harness are most of that repository; the reconstruction is the small part. HAL/S inherited an independent interpreter, which is a luxury and which is why it is the easiest arm.
+Wikicarta had none of this available, and it shows — its conclusions are qualitative, argued from patterns across features rather than measured. They're still the most immediately useful findings in the series, and they're the least provable. Both things are true because of the same missing oracle.
+There's a specific trap worth naming. A verification harness that finds nothing is indistinguishable from a broken one. Nautilus's 24-hour soak ran 879,643 ticks and found zero invariant violations, which is only meaningful because the harness was first validated against a deliberately poisoned invariant — which it caught, minimised from seven commands to two, and packaged. Test the test.
+A series that only reports confirmations is a demo reel. These four produced three clean refutations, and they were the most informative outputs:
+The compressor predicted the classic overfitting curve — strong on trained data, weak on held-out. It came out inverted, 8% trained against 71% held-out, because the split tracked difficulty rather than seen-versus-unseen.
+It also predicted the oracle would mask confabulation. The oracle caught the main error; a narrow corpus hid the rest.
+Nautilus's fuzzer was built to find physics exploits. It found none. The only finding in the whole loop was a flaw in the experiment design — the genetic algorithm had been optimising survival rather than performance, because the controller pinned its own objectives.
+Each of those changed the conclusion. None would have surfaced from reasoning about the problem.
+Four projects, one operator, no control group. There is no human-only reconstruction to compare against, so nothing here says AI was faster or better than the alternative — only what it did and did not manage. The projects were chosen partly for being interesting, which is a selection effect. Model versions moved during the work. Three of the four are Rust, which is a small language sample.
+The one number I'd most like and don't have is a like-for-like human baseline on the same corpus. That would need someone to transcribe 485 productions and reconstruct an encoder without a model, which is a real cost for a comparison nobody has funded yet.
+Handing legacy code to a model works, and it works well enough that the interesting question is where to spend your own attention. Four projects say:
+Not on the code. The logic was right nearly every time. Spend it at the host, runtime and OS boundary, where every real defect in the desktop project lived and where no harness reached.
+On knowing which mode you're in. Where the evidence determines the answer, expect success and build the cheap mechanical check — production numbering, reference integrity, a verbatim grounding gate. Where it doesn't, expect confident invention, and force it into the open: a divergence log, a gap inventory with plausible ranges, an ambiguity recorded rather than resolved inline. Every one of these projects has a file whose entire job is holding the things that were not derivable, and those files are what make the rest credible.
+On the checks the model can't edit. Sign them, hash them, make weakening them require a human.
+On widening the input space rather than tightening the oracle. The gaps that survive strong testing are exactly the ones your corpus never triggers.
+All four repositories are public, with the divergence logs, gap inventories, transcription artifacts and grading harnesses included — those are the parts worth reading, more than the reconstructions themselves.
+space-shuttle-sdk · nautilus-sim · wikicarta · compressor..."
+image: /img/blog/generated/reconstructing-legacy-systems-lessons-from-ai-failures-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Reconstructing Legacy Systems: Lessons from AI Failures](/img/blog/generated/reconstructing-legacy-systems-lessons-from-ai-failures-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### The Intricacies of Legacy Systems
+
+Legacy systems are often repositories of complex knowledge, embodying decades of technical evolution and accumulated technical debt. The challenge of reconstructing these systems is compounded by the degradation of documentation, which can range from incomplete to entirely absent. When leveraging artificial intelligence (AI) for reconstruction, it is critical to recognize that the efficacy of these initiatives is heavily influenced by the quality of the source documentation. Poor documentation can lead to misinterpretations and flawed reconstructions, as AI lacks the contextual understanding required to fill in the gaps left by inadequate records. This highlights the necessity for engineers to engage in thorough documentation practices throughout the lifecycle of a system.
+
+### The HAL/S Case Study: Documentation as a Double-Edged Sword
+
+The HAL/S case study serves as a compelling illustration of the pivotal role that documentation plays in AI-driven reconstruction. The AI was tasked with reconstructing a set of programs based on a degraded formal specification and preserved code. The success of this reconstruction hinged on the clarity and completeness of the original documentation, which allowed the AI to faithfully reconstruct all 12 preserved programs. However, the scanning process resulted in the loss of certain characters, highlighting an information-theoretic limitation of AI: when no clear evidence exists to inform reconstruction, even the most capable AI systems struggle to compensate for this lack of information. This case exemplifies the importance of maintaining robust documentation as a foundation for any AI-assisted project. Engineers must ensure that documentation is not only comprehensive but also regularly updated to reflect changes in the system.
+
+### The Nautilus Simulator: The Perils of Missing Parameters
+
+In stark contrast, the Nautilus simulator case study underscores the catastrophic consequences of missing documentation. The AI faced significant hurdles due to the absence of critical parameters that were never documented by the original creator, Verne. The reconstruction yielded a wide variance in simulation outcomes, with endurance ranges fluctuating between 6 to 211 hours. This discrepancy illustrates the necessity of a robust source of truth; without it, the AI cannot effectively determine the parameters necessary for accurate reconstruction. The failure to capture these essential details resulted in a fundamentally flawed reconstruction, reinforcing the notion that AI's capabilities are inherently limited by the quality and completeness of the information it receives. Engineers must prioritize identifying and documenting all parameters, even those that may seem trivial, to avoid such pitfalls in future projects.
+
+### Wikicarta: The Indispensable Role of Human Oversight
+
+The Wikicarta case study further emphasizes the critical need for human oversight in AI-driven reconstruction processes. The AI produced a shippable application, but every defect emerged at the runtime seam, revealing the limitations of automation in verifying outputs. This case highlights that while AI can generate plausible outputs, it may overlook critical nuances that only a human can discern. The involvement of a human operator in the runtime environment proved crucial for identifying defects that the AI could not catch, reiterating the necessity for a collaborative approach between human expertise and AI capabilities. The human element becomes indispensable in scenarios where automated checks fall short, particularly in complex environments. For instance, human operators can apply domain-specific knowledge to assess whether the AI's outputs align with expected behaviors, thus enhancing the overall reliability of the reconstruction process.
+
+### Compressor: Dissecting the Dichotomy of Evidence and Invention
+
+The Compressor case study offers a quantifiable perspective on the relationship between evidence quality and AI performance. The AI successfully recovered the bitstream format at an impressive 100% accuracy for decoding, as the format is one-way determined. However, the encoder's performance plummeted to just 8.3%, highlighting a critical gap in the AI's ability to generate outputs when the evidence is ambiguous or incomplete. This stark contrast illustrates that if the evidence can determine the answer, AI can be remarkably effective; if not, it risks producing confident yet erroneous inventions. This insight is crucial for engineers when deciding whether to trust AI outputs without human verification, emphasizing the need for a nuanced understanding of AI's capabilities and limitations. Engineers should implement rigorous testing protocols to evaluate AI performance across varying evidence quality levels, ensuring that confidence in AI outputs is appropriately calibrated.
+
+### Human Oversight: The Safety Net for AI Processes
+
+Human oversight emerges as a fundamental component in the AI reconstruction process. Across all four case studies, the most significant contributions from human operators were not in code review but in providing context and validation that the AI could not achieve alone. For instance, in HAL/S, the human operator's decision-making regarding the selection of optical character recognition (OCR) engines was pivotal. In Nautilus, signing invariants ensured that the AI could not compromise the structural integrity of the checks. These examples demonstrate that human judgment is indispensable in areas where AI lacks the ability to discern critical details, underscoring the need for engineers to maintain an active role in AI-assisted projects. By fostering a culture of collaboration between AI and human expertise, organizations can enhance the effectiveness of their reconstruction efforts.
+
+### The Imperative of a Strong Source of Truth
+
+The concept of a strong source of truth is paramount in the context of AI and legacy systems. A well-defined and comprehensive source of truth enables AI to operate effectively, while a weak or absent source leads to unreliable outcomes. The case studies collectively illustrate that when evidence is robust and well-documented, AI can produce valuable reconstructions. Conversely, when documentation is lacking, the AI's outputs may be plausible yet fundamentally flawed. Engineers must prioritize the establishment and maintenance of accurate documentation as a foundational element of any legacy system reconstruction project. This includes not only technical specifications but also the rationale behind design decisions, which can provide critical context for AI systems during reconstruction.
+
+### Strategies for Enhancing AI Reconstruction Outcomes
+
+To improve AI reconstruction outcomes, several strategies can be employed. First, engineers should focus on enhancing the quality of source documentation, ensuring that all critical parameters and specifications are well-documented and accessible. This may involve revisiting legacy systems to extract information that may have been overlooked or poorly recorded. Second, implementing robust verification processes that include human oversight is essential. This can involve establishing clear protocols for validating AI outputs against known benchmarks or invariants. Finally, engineers should consider widening the input space rather than tightening the oracle, as a broader corpus can help uncover hidden mechanisms that may not be triggered by a narrow input set. By fostering an iterative feedback loop between AI outputs and human review, organizations can continually refine their reconstruction processes.
+
+### Recommendations for Future AI and Legacy System Projects
+
+For future projects involving AI and legacy systems, several recommendations emerge from the insights gained through the case studies. First, prioritize comprehensive documentation efforts to ensure that all critical information is captured before initiating AI reconstruction. Second, establish a verification framework that includes both automated checks and human oversight to validate AI outputs effectively. This dual approach can help mitigate the risks associated with overconfidence in AI-generated results. Lastly, engineers should remain vigilant about the limitations of AI and maintain a clear understanding of when human intervention is necessary to ensure the integrity of the reconstruction process. By embedding these practices into project workflows, organizations can enhance the reliability and effectiveness of their AI-driven initiatives.
+
+### Balancing AI Capabilities with Human Judgment
+
+In conclusion, while AI presents exciting opportunities for reconstructing legacy systems, its effectiveness is inherently tied to the quality of documentation and the presence of human oversight. The case studies of HAL/S, Nautilus, Wikicarta, and Compressor illustrate the nuanced interplay between AI capabilities and the need for human judgment in the reconstruction process. By acknowledging these limitations and implementing strategies to enhance documentation and verification, engineers can harness the power of AI while safeguarding against its potential pitfalls. The path forward lies in striking a balance between leveraging AI's strengths and recognizing the indispensable role of human expertise in navigating the complexities of legacy systems. This balanced approach will not only improve reconstruction outcomes but also foster a more resilient and adaptable technological landscape.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/jlmartel/i-rebuilt-four-dead-systems-with-ai-the-failures-all-landed-in-the-same-place-38pa)
+
+---
+
+<SocialShare title="Reconstructing Legacy Systems: Lessons from AI Failures" slug="reconstructing-legacy-systems-lessons-from-ai-failures" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
