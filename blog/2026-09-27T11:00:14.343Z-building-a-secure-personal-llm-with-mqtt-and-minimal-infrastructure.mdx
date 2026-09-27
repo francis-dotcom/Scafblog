@@ -1,0 +1,318 @@
+---
+slug: building-a-secure-personal-llm-with-mqtt-and-minimal-infrastructure
+title: "Building a Secure Personal LLM with MQTT and Minimal Infrastructure"
+authors: [francis]
+tags: [ai, mqtt, llm, security]
+date: 2026-09-27T11:00:14.343Z
+description: "I have a PC in my home office with an Nvidia GPU and Ollama on it, and I wanted to ask it questions from my phone while I am out. Every guide I found said roughly the same thing: run something in Docker, put a reverse proxy in front of it, forward a port on the router or install a VPN, provision TLS, add an auth layer, and keep it patched. All of that works. It is also more moving parts than I want between me and a chat box — and if I hand that list to an AI agent, most of its effort goes into YAML rather than into the thing I actually wanted.
+So I asked for something different: the smallest possible surface. What we ended up with is a browser page, a small service on the PC, and one rented Linux box running an MQTT broker. Neither the page nor the PC accepts an incoming connection from the internet. Nothing in my house has a port open. Here's what it looks like:
+
+MQTT is a publish/subscribe message bus. Clients connect to a broker, subscribe to topics, and receive whatever is published to those topics. It is a decades-old piece of infrastructure with excellent servers, and it has a property I wanted: it is a meeting point that both ends can reach without either end being reachable.
+   phone / laptop                    broker                    PC with the model
+  ┌──────────────┐            ┌──────────────────┐          ┌──────────────────────┐
+  │ the page     │  ask ─────▶│                  │─────────▶│ mqttchat-server.as   │
+  │ (static)     │            │  <topic>/chat    │          │  └ as_chat.py        │
+  │              │  ◀─ chunks │                  │◀────────��│     └ Ollama         │
+  └──────────────┘            └──────────────────┘          └──────────────────────┘
+        wss://443                     tls://8883                    http://11434
+
+The phone publishes a question. The PC, which subscribed, is handed it, asks Ollama, and publishes the answer back chunk by chunk — so it types out as the model produces it. The only thing on the internet that knows my house exists is the broker, and all it does is pub/sub.
+Being fair to the alternatives: Tailscale would also have given me zero open ports, and it is free. What tipped it for me is that it needs a client on every device — I wanted to hand someone a URL, not an app install — and I wanted the phone's traffic to go through machinery I already understood. Cloudflare Tunnel is free and needs no client either, but it exposes an HTTP service, so I would have been building the authentication layer myself rather than relying on broker accounts and an ACL. Port forwarding plus a reverse proxy also works, but puts the thing that is actually precious — the GPU box — on the internet, which is the part I did not want.
+This is the bit that surprised me, so it's the bit I would check first if I were you.
+
+
+
+
+
+
+
+
+
+The page (UI, streaming, token handling, PWA)
+
+420 lines, of which 252 are code
+
+
+The service on the PC
+
+94 lines, of which 46 are code
+
+
+A Python plugin (token, Ollama, GPU hand-back)
+
+536 lines, comments included
+
+
+Everything the web server serves
+
+10 files, 71 KiB — of which 51 KiB is icons
+
+
+All the broker's own configuration
+
+15 lines, plus one 6-line nginx location
+
+
+The server
+less than the price of a takeaway per month
+
+
+
+That is the whole system. There is no container in it, no reverse proxy in front of the app, no auth service, no database, and nothing to port-forward. The infrastructure I rent runs mosquitto and nginx, and it does several other jobs for me besides this one. I'm not paying for this project; I'm paying for a small server I keep finding uses for.
+Disclosure, because it belongs at the top of the argument rather than hidden at the bottom: this project is written in AllSpeak, a language designed to work efficiently with AI, where code is meant to read as English and every section carries prose explaining why it exists. I did not choose it to sell you anything — I wanted a chat box, and this is the language I build in — but you should read this post with that bias in mind. The line counts above are the honest argument: the parts that are usually painful (a mobile UI that streams, a service that hands the GPU back when it detects intensive work such as video editing happening on the PC, token handling) came out short enough to review in one sitting.
+I wrote very little of this by hand. I pointed my agent at a repository and reviewed what came back — the workflow this language is designed around, where every section of code carries a doc block saying why it exists, and the prose gets reviewed by a human who does not have to trust the code. Three things went wrong in interesting ways, and they are the reason I would not publish a "clean" tutorial version of this post:
+The broker silently ate my test messages. AllSpeak's MQTT plugin frames every MQTT payload — !last!<total> <json> when it fits in one chunk, !part!<n> <total> <json> for all but the last when it does not — and the receiver drops anything unframed while warning loudly in its log. My hand-rolled test publisher sent bare JSON, so for twenty minutes the system looked broken when it was working perfectly. If you test this by hand with mosquitto_pub, frame your payload — or you will chase a bug that is not there.
+The PC's sshd refused my key for an hour, without telling the client why. The home directory was mode 777, and OpenSSH's StrictModes silently ignores every key in a home directory that other users can write to. The client just says "Permission denied (publickey,password)". The server knows why; journalctl -u ssh says Authentication refused: bad ownership or modes. If you have ever shared a home directory over Samba, you may well have seen this problem too.
+Some conditions in the AllSpeak runtime do not mean what they look like. The test is object never holds for a dictionary, and a clear on a text variable leaves the boolean false rather than an empty string — so an early draft of the answer panel began with the word "falseHello". Both were caught by tests rather than by reading, which is the point I would make to anyone doing this: the agent writes quickly, so the verification is where your attention belongs. Ours is a headless harness that runs the page against a stubbed DOM, MQTT and network; unit tests for the plugin with a fake Ollama; and a live end-to-end run against the real broker with a stub model, which is how my agent knew the answer path worked before a single browser was involved.
+The page's MQTT credentials are public. The page has to connect to the broker itself, so anyone who loads it can read the username and password out of the traffic. This is fine because of two decisions:
+the page's broker account is fenced by an ACL to exactly one topic namespace — four lines of configuration — so if those credentials leak, they are not a skeleton key to everything else on that broker;
+the thing that actually stops a stranger using my GPU is a separate access token, checked on the PC for every question, which is typed into the page once per device and saved in private browser storage.
+Rotating that token cuts off a device. Rotating the page's broker password cuts off a leaked copy of the page. Neither of those is a substitute for thinking about it, but it is a much smaller thing to think about than an exposed inference service.
+Also, to be straight about the limits: one question at a time, one shared token rather than logins, and the model is a 4B one on a 6 GB GPU because that is what fits and answers in a fraction of a second. It is a personal tool, not a product.
+The repository — https://github.com/easycoder/mqttchat — is written to be handed to an agent rather than to a reader: a SETTING-UP.md that explains MQTT in plain terms, why a free public broker is the wrong choice, the two-account ACL arrangement, and a checklist of exactly what the agent will need to ask you for — broker hostname, topic prefix, the page's MQTT account, the access token, and which model Ollama has pulled.
+Point your agent at it, answer its questions, and expect it to be done in an afternoon. That is what happened here.
+Everything this post leans on, in one place:
+AllSpeak — the language this is written in: https://allspeak.ai/
+
+
+Its reference material and idioms — 20 reference files and 15 idiom files: https://allspeak.ai/learn/contents.md (https://allspeak.ai/learn for human readers) 
+The workflow this post describes — AI writes, the human validates: https://allspeak.ai/learn/idioms/12-working-with-ai.md
+
+
+AllSpeak repository — https://github.com/easycoder/allspeak.ai
+
+
+AllSpeak on PyPI — pip install allspeak-ai: https://pypi.org/project/allspeak-ai/
+
+
+Eclipse Mosquitto — the broker, and the ACLs that make the fencing work: https://mosquitto.org/
+
+
+MQTT — the protocol: https://mqtt.org/
+
+
+Ollama — the local model runner: https://ollama.com/, model library at https://ollama.com/library
+
+
+The alternatives this post measures itself against — Tailscale: https://tailscale.com/; Cloudflare Tunnel: https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/
+
+
+MqttChat starter repository — Apache-2.0: https://github.com/easycoder/mqttchat
+
+
+
+Title photo by Kelly Sikkema on Unsplash..."
+image: /img/blog/generated/building-a-secure-personal-llm-with-mqtt-and-minimal-infrastructure-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Building a Secure Personal LLM with MQTT and Minimal Infrastructure](/img/blog/generated/building-a-secure-personal-llm-with-mqtt-and-minimal-infrastructure-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### The Appeal of Personal LLMs in a Data-Driven World
+
+The emergence of personal Large Language Models (LLMs) represents a significant shift in how individuals can interact with AI. Unlike conventional cloud-based models, personal LLMs empower users to retain control over their data, fostering a sense of privacy and security. This autonomy is particularly crucial in an era where data breaches and privacy concerns are prevalent. However, the complexity of deploying these models often deters less experienced users. This article outlines a streamlined method for establishing a personal LLM client/server architecture utilizing MQTT (Message Queuing Telemetry Transport) to facilitate secure communication while minimizing exposure to the internet.
+
+### Understanding MQTT's Role in Secure Communication
+
+MQTT is a lightweight messaging protocol optimized for low-bandwidth and high-latency networks. Its publish/subscribe model allows devices to communicate asynchronously, which is particularly advantageous for secure applications. In our architecture, MQTT acts as a conduit between the local LLM, hosted on a personal machine, and client devices such as smartphones. The broker serves as a centralized hub that manages message exchanges while ensuring that neither the client nor the server is directly exposed to the internet. This design significantly reduces the attack surface, a critical factor when dealing with sensitive data.
+
+### Step-by-Step Guide to Setting Up the MQTT Broker
+
+To initiate the deployment, the first task is to set up an MQTT broker. For this example, we will use Mosquitto, a widely adopted open-source MQTT broker. 
+
+1. **Installation**: On a Linux server, you can install Mosquitto using the following commands:
+
+   ```bash
+   sudo apt update
+   sudo apt install mosquitto mosquitto-clients
+   ```
+
+2. **Configuration**: After installation, configure Mosquitto to accept secure connections. Edit the configuration file located at `/etc/mosquitto/mosquitto.conf` to include:
+
+   ```conf
+   listener 8883
+   protocol mqtt
+   allow_anonymous false
+   password_file /etc/mosquitto/pwfile
+   ```
+
+   Create a password file for user authentication:
+
+   ```bash
+   sudo mosquitto_passwd -c /etc/mosquitto/pwfile <username>
+   ```
+
+3. **Enable TLS**: To secure the communication channel, enable TLS by adding the following lines to the configuration file:
+
+   ```conf
+   tls_version tlsv1.2
+   certfile /etc/mosquitto/certs/server.crt
+   keyfile /etc/mosquitto/certs/server.key
+   ```
+
+   Ensure you have valid certificates for your broker to establish secure connections. You can obtain certificates from a trusted Certificate Authority (CA) or create self-signed certificates for testing purposes.
+
+4. **Start the Broker**: Finally, start the Mosquitto service:
+
+   ```bash
+   sudo systemctl start mosquitto
+   sudo systemctl enable mosquitto
+   ```
+
+This setup ensures that the broker is prepared to handle secure connections from clients without exposing the local LLM server directly to the internet.
+
+### Crafting the Client Interface for LLM Interaction
+
+The client interface, which can be a simple web application, facilitates user interaction with the LLM. The interface should connect to the MQTT broker and publish messages (questions) to a designated topic while subscribing to another topic for responses. 
+
+Here is a basic example of a client implemented in JavaScript:
+
+```javascript
+const mqtt = require('mqtt');
+
+const client = mqtt.connect('mqtts://<broker_address>:8883', {
+  username: '<username>',
+  password: '<password>',
+});
+
+client.on('connect', () => {
+  console.log('Connected to MQTT broker');
+  
+  // Subscribe to the response topic
+  client.subscribe('llm/response', (err) => {
+    if (!err) {
+      console.log('Subscribed to response topic');
+    }
+  });
+});
+
+// Function to send a question to the LLM
+function sendQuestion(question) {
+  client.publish('llm/question', question);
+}
+
+// Listen for responses from the LLM
+client.on('message', (topic, message) => {
+  console.log(`Received message: ${message.toString()}`);
+});
+```
+
+### Implementing Server-Side Logic for Processing Requests
+
+The server-side logic is responsible for receiving messages from the MQTT broker, processing them with the LLM, and publishing the responses back. This can be accomplished using Python, leveraging libraries like `paho-mqtt` for MQTT communication and `Ollama` for LLM inference.
+
+Here’s a simplified example of the server-side code:
+
+```python
+import paho.mqtt.client as mqtt
+import json
+from ollama import Ollama
+
+# Initialize the LLM model
+model = Ollama(model='your_model_name')
+
+# Callback for when a message is received
+def on_message(client, userdata, msg):
+    question = msg.payload.decode()
+    print(f"Received question: {question}")
+    
+    # Process the question with the LLM
+    answer = model.generate(question)
+    
+    # Publish the answer back
+    client.publish("llm/response", json.dumps(answer))
+
+# Set up the MQTT client
+client = mqtt.Client()
+client.username_pw_set('<username>', '<password>')
+client.on_message = on_message
+
+client.connect('<broker_address>', 8883)
+client.subscribe("llm/question")
+client.loop_forever()
+```
+
+### Enhancing Security: Managing Access Tokens and Credentials
+
+While the architecture minimizes exposure, security should remain a paramount concern. Here are best practices for managing access tokens and credentials:
+
+1. **Utilize Short-Lived Tokens**: Implement short-lived access tokens that expire after a defined period. This limits the window of opportunity for unauthorized access.
+
+2. **Regular Credential Rotation**: Periodically change your MQTT credentials and access tokens. This practice helps mitigate risks associated with credential leakage.
+
+3. **Implement Access Control Lists (ACLs)**: Use ACLs in the MQTT broker configuration to restrict access to specific topics based on user roles. This ensures that even if credentials are compromised, the damage is contained.
+
+4. **Secure Token Storage**: Store access tokens in secure storage mechanisms, such as browser local storage with encryption, to prevent unauthorized access.
+
+5. **Monitor for Anomalies**: Implement monitoring tools to detect unusual access patterns or failed login attempts, enabling proactive responses to potential security breaches.
+
+### Testing the Setup and Addressing Common Issues
+
+Once the client and server are implemented, thorough testing is essential. Here are common issues to look out for:
+
+1. **Connection Failures**: Ensure that the MQTT broker is operational and accessible from the client. Check firewall settings and broker logs for connection errors.
+
+2. **Message Formatting Issues**: When publishing messages, ensure they conform to the expected format. For instance, if the server anticipates JSON-formatted messages, sending plain text will lead to failures.
+
+3. **Authentication Errors**: If authentication fails, verify that the username and password are correctly configured in both the client and server.
+
+4. **Utilizing Logs for Debugging**: Employ logging in both the client and server to trace the flow of messages and identify points of failure.
+
+5. **Testing with Different Clients**: Use various client implementations to ensure compatibility and robustness in handling messages across different platforms.
+
+### Future Enhancements for Personal LLM Systems
+
+The current setup provides a robust foundation for a personal LLM. However, several enhancements can be considered for future iterations:
+
+1. **Scaling the Architecture**: As usage increases, consider deploying multiple instances of the LLM to handle concurrent requests, potentially using a load balancer to distribute traffic effectively.
+
+2. **Advanced User Interfaces**: Develop more sophisticated client interfaces, possibly integrating voice recognition or natural language processing to enhance user interaction.
+
+3. **Analytics and Monitoring**: Implement analytics to monitor usage patterns and performance metrics, allowing for informed decisions on scaling and optimization.
+
+4. **Integration with External Services**: Explore integrations with other services or APIs to enrich the capabilities of the LLM, such as accessing real-time data or incorporating external knowledge bases.
+
+5. **User Feedback Mechanism**: Introduce a feedback loop where users can rate responses, helping to improve the model's performance over time.
+
+### Conclusion: Embracing a Secure Future with Personal LLMs
+
+Deploying a personal LLM using MQTT offers a compelling alternative to traditional cloud-based solutions, emphasizing security and simplicity. By minimizing the exposure of critical infrastructure and leveraging established protocols, users can enjoy the benefits of AI while maintaining control over their data. With careful attention to security, including the management of access tokens and credentials, and robust testing to address common issues, this minimalist approach can serve as a model for future deployments in the ever-expanding landscape of AI and distributed systems. As technology evolves, the potential for personal LLMs will only grow, paving the way for innovative applications across various domains.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/gtanyware/i-asked-my-ai-agent-for-a-private-llm-clientserver-it-built-one-out-of-mqtt-and-1000-lines-34gg)
+
+---
+
+<SocialShare title="Building a Secure Personal LLM with MQTT and Minimal Infrastructure" slug="building-a-secure-personal-llm-with-mqtt-and-minimal-infrastructure" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
