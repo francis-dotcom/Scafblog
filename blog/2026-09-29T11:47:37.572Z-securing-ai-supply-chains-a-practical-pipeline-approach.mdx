@@ -1,0 +1,173 @@
+---
+slug: securing-ai-supply-chains-a-practical-pipeline-approach
+title: "Securing AI Supply Chains: A Practical Pipeline Approach"
+authors: [francis]
+tags: [ai, security, supplychain, devops]
+date: 2026-09-29T11:47:37.573Z
+description: "Context
+
+
+In March 2024, a backdoor was planted in xz-utils — a compression library so ubiquitous it ships with almost every Linux distribution. It was caught by a developer noticing his SSH logins were a few hundred milliseconds slower. When you build a container image, you inherit hundreds of components you never wrote: OS packages, language libraries, and for AI applications, model files. I built this pipeline to answer one question: how do you actually know that the software you're about to deploy is the software you think you built?
+A note on status: this is a fresh build, not a years-running system. The commits span Sept 26–28, 2026 — app, pipeline, policies, and docs, run green end-to-end in the same week. The honest claim is "this gates every commit, locally and in CI, right now."
+I built an intentionally vulnerable AI application — a FastAPI model registry with a chat endpoint — and wrapped it in an eight-stage pipeline. The app is the demo victim: its core flaw, unverified model ingestion (POST /models/upload accepts any file, no hash check, no provenance), is exactly the discipline the pipeline enforces. The pipeline is the product; the app proves it isn't theater.
+The whole thing reduces to five ideas in order:
+Inventory — you can't secure what you can't list. The SBOM is the list.
+Vet — every item gets checked: known CVEs, licenses, provenance.
+Sign — bind the artifact to an identity so it can't be swapped.
+Prove — record who built it, from what, with what process, publicly.
+Deploy — only artifacts that survived all four previous stages run.
+Stage by stage, what I actually built:
+1. Build. python:3.12-slim, non-root runtime user, exact pins, gunicorn with the uvicorn worker (FastAPI is ASGI; the default WSGI worker breaks request handling). Hermetic — no model downloads in CI, so anyone can reproduce it without credentials.
+2. SBOM. Syft emits a CycloneDX inventory — an open JSON-schema standard for bills of materials. My image: 129 components of OS packages and Python dependencies. You can't scan what you don't list.
+3. AIBOM. A plain SBOM lists libraries; it says nothing about the model. scripts/build_aibom.py reads the shipped model manifest and merges CycloneDX model components carrying the model's sha256, source URL, framework, and dataset hashes — computed from the actual files at build time, per India's CERT-In CISG-2024-02 AIBOM guidance.
+4. Trivy gate. Fails the build on any CRITICAL or HIGH finding.
+5. CISA KEV gate. A second, stricter check: does any finding appear in the catalog of CVEs attackers are actually using right now? CVSS says how bad something could be; KEV says it's being weaponized today.
+6. Policy gate. Conftest runs Rego policies against the SBOM/AIBOM: SPDX/OSI license rules and a hard requirement that every model carries a sha256 and a source URL — the direct counterpart to the app's vulnerable upload endpoint.
+7. Sign. Keyless cosign — no long-lived private key to lose. Identity comes from a short-lived certificate issued by Fulcio (Sigstore's certificate authority) and bound to an OIDC identity — my GitHub identity locally, the GitHub Actions workflow in CI. Every signature lands in Rekor, Sigstore's public transparency log: a timestamped record anyone can look up.
+8. Attest. An in-toto attestation (a signed statement that a build happened) carrying an SLSA v1 provenance predicate — the machine-readable "who built this, from what source, with what process."
+Then the deploy gate: deploy-local.sh refuses to run an image that isn't both signed and attested.
+flowchart LR
+    A["Source: app/, policy/, scripts/"] --> B["Build\npython:3.12-slim, non-root"]
+    B --> C["SBOM (Syft → CycloneDX)"]
+    C --> D["AIBOM (build_aibom.py → model components)"]
+    D --> E{"Trivy gate\nCRITICAL/HIGH"}
+    E -->|fail| X["build fails"]
+    E -->|pass| F{"CISA KEV gate\nactively exploited?"}
+    F -->|fail| X
+    F -->|pass| G{"Conftest policy\nSPDX/OSI + AIBOM provenance"}
+    G -->|fail| X
+    G -->|pass| H["cosign sign (keyless → Rekor)"]
+    H --> I["cosign attest (SLSA v1 predicate)"]
+    I --> J{"deploy gate\nverify sig + attestation"}
+    J -->|pass| K["run container"]
+    J -->|fail| X
+The gate caught real problems on the very first run. I had pinned gunicorn 20.1.0 and the gate found 40+ CRITICAL/HIGH findings: gunicorn 20.1.0 (CVE-2024-1135, HTTP request smuggling), plus CVEs in starlette, python-multipart, setuptools, and wheel. I bumped every fixable pin — that remediation is commit 173c36d, not a claim. Second run: 8/8 stages green, 0 fixable CRITICAL/HIGH.
+The CI run logs show the gate doing its job — the Trivy step failing red on the vulnerable pins:
+
+And the actual findings the gate surfaced — Total: 11 (HIGH: 11) in the Python dependencies alone, gunicorn 20.1.0 → 22.0.0 flagged for CVE-2024-1135 and CVE-2024-6827:
+
+But the base image itself ships 8 HIGHs with no upstream fix yet (util-linux, ncurses, systemd, acl, perl). Rather than hide them with --ignore-unfixed or stay permanently red, I wrote an explicit .trivyignore — each CVE listed with a comment explaining why it's accepted. The gate now fails on anything new or fixable, and the CISA KEV gate overrides the baseline if any of those CVEs is ever actively exploited.
+Keyless signing is verifiable by a stranger. My local run wrote a real Rekor entry (logIndex 2969112166) binding my GitHub identity to the image. The repo ships scripts/verify.sh for anyone to check signature, attestation, and vulnerabilities — no secrets, no keys:
+IMAGE=localhost:5000/ai-model-registry:dev \
+  CERT_IDENTITY="142115441+Shaarkymoo@users.noreply.github.com" \
+  CERT_ISSUER=https://github.com/login/oauth \
+  bash scripts/verify.sh
+
+The real output — signature validated against the transparency log, SLSA attestation verified with the certificate subject shown, then the vulnerability scan:
+
+The deploy gate refuses unsigned images. cosign verify on an unsigned image fails with no signatures found, exit code 10, and the container never runs. The same verify runs in CI before anything is released.
+And the CI isn't a photo op — the workflow runs on every push to main, all 14+ runs visible in Actions history alongside the Dependabot update PRs:
+
+And the app's own vulnerability gets caught in front of you. The chat endpoint is prompt-injectable by design — "ignore previous instructions" leaks its hidden system prompt — and the app's two-layer evaluator (keyword filter, then an LLM judge returning {"leak_detected", "confidence", "reason"}) flags it LEAK_LIKELY. I ran it against the deployed container: signature verified, attestation verified, then the leak verdict — the loop this pipeline exists to keep honest.
+
+Policies have tests. policy/sbom_test.rego carries 7 test cases covering every rule — including the license-name form below.
+cosign attest expects the bare predicate, not the in-toto wrapper. The predicate file must be just buildDefinition + runDetails; cosign builds the Statement around it. Wrong shape → "provenance predicate: required field builder missing" (sigstore/cosign#3757).
+Syft emits some licenses as free-text names, not SPDX IDs. autocommand ships its license as the name LGPLv3 (OSI-approved); my first policy only checked IDs and rejected a legitimate license. Fix: accept declared names and match the forbidden list against names too.
+OCI image refs must be lowercase. Shaarkymoo in a GHCR path is invalid; the workflow failed until I lowercased it.
+verify.sh originally took the image as a positional arg and broke under IMAGE env usage — now it honors the env var.
+The app is still vulnerable by design. The pipeline secures the supply chain; it does not fix prompt injection or SSRF in the app. That boundary is intentional — "attack the app's bugs all you want; you can only ever deploy the exact artifact we built, scanned, signed, and attested."
+I claim SLSA Level 1–2, honestly. Level 3–4 needs hardened, isolated, hermetic build infrastructure — a real investment I'm not pretending to have made.
+No runtime detection. The pipeline guarantees what you deploy is what you built; it doesn't watch the app afterward.
+Upstream maintainer compromise isn't preventable here. If a maintainer ships malware, the scan catches the CVE after publication; the SBOM's job is to make the blast radius visible.
+Supply-chain security is mostly inventory + verification, not magic. The SBOM makes the invisible visible; the signatures make claims checkable.
+The gate catching real findings is the feature. My "clean" pins had 40+ CRITICAL/HIGH issues; the pipeline turned a surprise into a fix.
+Keyless signing removes the biggest excuse. "Key management is hard" doesn't survive contact with Sigstore.
+For AI, provenance starts with the model. A registry that accepts unverified uploads has a supply-chain vulnerability in its core — and the same discipline that secures libraries extends to models.
+Frame against standards, not opinions. Every control maps to something an auditor recognizes: CVSS, CISA KEV, SPDX/OSI, CycloneDX, SLSA, NIST SSDF, CERT-In CISG-2024-02. That's the difference between "I added security tools" and "here's which control catches which attack."
+Repo: Shaarkymoo/sbom-supply-chain-pipeline — docs, policies, workflows, local pipeline
+Sigstore / cosign — keyless signing and the Rekor transparency log
+SLSA — the provenance framework behind the attestation levels
+CycloneDX — SBOM format with first-class model components
+CISA KEV catalog — the actively-exploited list
+CERT-In CISG-2024-02 — AIBOM guidance for AI supply chains
+NIST SSDF (SP 800-218) — the secure-development framework the controls map to
+xz backdoor write-up — the incident that motivated this
+I'm open to Security and SecDevOps roles...."
+image: /img/blog/generated/securing-ai-supply-chains-a-practical-pipeline-approach-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Securing AI Supply Chains: A Practical Pipeline Approach](/img/blog/generated/securing-ai-supply-chains-a-practical-pipeline-approach-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### Unveiling the Vulnerabilities in AI Supply Chains
+
+The AI supply chain is a complex ecosystem comprising numerous components, including libraries, frameworks, and datasets. This intricate web introduces a multitude of vulnerabilities, making it susceptible to exploitation by malicious actors. A notable example is the xz-utils incident, where a backdoor was introduced into a widely-used compression library, highlighting the potential risks associated with third-party components. As AI applications increasingly rely on external resources, ensuring the integrity and security of these components becomes critical. The challenge lies not only in securing these components but also in verifying that the software deployed aligns with the intended build, thereby safeguarding against supply chain attacks.
+
+### The Crucial Role of Software Bill of Materials (SBOM)
+
+At the core of securing any software supply chain is the Software Bill of Materials (SBOM). An SBOM serves as a detailed inventory that lists every component within a software application, including their versions and licenses. This transparency is essential for vulnerability management, enabling developers to swiftly identify and remediate known security issues within their dependencies. For AI applications, where numerous third-party libraries are integrated, maintaining an accurate SBOM is not just a best practice but a fundamental requirement. By leveraging SBOMs, organizations can enhance their security posture and effectively manage risks associated with vulnerabilities.
+
+### Advancing to AI Bill of Materials (AIBOM)
+
+While SBOMs provide a foundational layer of security, they often lack the specificity required for AI applications, particularly concerning model provenance. This is where the AI Bill of Materials (AIBOM) becomes pivotal. An AIBOM extends the SBOM concept by including metadata about AI models, such as their training datasets, model architecture, and preprocessing steps. By capturing this additional information, AIBOMs facilitate a deeper understanding of the risks associated with AI models, ensuring that they are not only secure but also ethically sourced and compliant with relevant regulations. This added layer of detail is essential for organizations aiming to navigate the complexities of AI deployment effectively.
+
+### Establishing Security Gates: A Practical Implementation
+
+To secure the AI supply chain effectively, organizations must implement structured security gates within their pipelines. A practical approach involves utilizing tools such as Trivy for vulnerability scanning and the CISA Known Exploited Vulnerabilities (KEV) catalog for threat intelligence. The pipeline should be designed to automatically reject builds when critical vulnerabilities are detected, ensuring that only secure artifacts progress to subsequent stages. For instance, integrating Trivy into a CI/CD pipeline can help identify vulnerabilities in real time, allowing teams to address issues before they reach production. This proactive strategy not only mitigates risks but also cultivates a culture of security awareness among developers, emphasizing the importance of secure coding practices.
+
+### Keyless Signing: Simplifying Artifact Integrity
+
+One of the most significant challenges in supply chain security is managing cryptographic keys, which can be lost or compromised. Keyless signing, facilitated by tools like cosign, provides a robust solution by allowing developers to sign artifacts without the burden of long-lived private keys. Instead, short-lived certificates tied to an identity provider (such as GitHub) are used to authenticate the signing process. This approach not only simplifies key management but also enhances the integrity of the artifacts, as each signature is publicly verifiable through transparency logs like Rekor. By adopting keyless signing, organizations can significantly reduce the risks associated with key management, ensuring that only verified artifacts are deployed.
+
+### The Importance of Attestation in Build Processes
+
+Attestation plays a critical role in verifying the integrity of the build process. By employing in-toto attestation, developers can create signed statements that detail who built the software, from what sources, and through which processes. This level of transparency is vital for establishing trust in software supply chains, particularly in AI applications where the stakes are high. Attestation ensures that any artifact deployed has undergone a rigorous validation process, providing a clear audit trail that can be referenced in the event of security incidents. By integrating attestation into the pipeline, organizations can enhance their confidence in the integrity of their AI applications.
+
+### Deploying Verified Artifacts: The Last Line of Defense
+
+The final stage in a secure AI supply chain pipeline is the deployment gate, which ensures that only artifacts that have successfully passed all previous security checks are executed. This gate should be configured to reject any unsigned or unverified images, thereby preventing potentially malicious code from being deployed into production environments. This step is critical, as it serves as the last line of defense against supply chain attacks, ensuring that only artifacts with verified provenance and integrity are allowed to run. By implementing stringent deployment controls, organizations can significantly reduce the risk of exploitation and enhance overall application security.
+
+### Real-World Case Study: Lessons from Vulnerability Detection
+
+The implementation of a robust security pipeline has real-world implications, as evidenced by a demo AI application developed to test this framework. In one instance, the pipeline flagged over 40 critical vulnerabilities in dependencies during the initial build, prompting immediate remediation before proceeding. For example, vulnerabilities in widely-used libraries such as gunicorn and starlette were detected, leading to necessary updates and a subsequent clean build. This highlights the effectiveness of the pipeline and underscores the importance of continuous monitoring and updating of dependencies. Furthermore, integrating runtime vulnerability scanning tools can further fortify defenses by identifying issues that may arise during operation, thereby addressing potential runtime vulnerabilities that could be exploited in production.
+
+### Addressing Runtime Vulnerabilities: Mitigation Strategies
+
+While the pipeline effectively addresses pre-deployment security measures, it is crucial to extend its capabilities to mitigate runtime vulnerabilities. Runtime vulnerabilities can emerge from various sources, including unpatched libraries, configuration errors, or even newly discovered exploits. To combat these risks, organizations should implement continuous runtime monitoring solutions that can detect anomalies and unusual behavior in real-time. Tools like Falco or Sysdig can provide insights into system calls and behavioral patterns, alerting teams to potential threats as they arise. Additionally, incorporating runtime application self-protection (RASP) can help in automatically mitigating threats by enforcing security policies at runtime, thus providing an additional layer of defense against exploitation.
+
+### Best Practices for Sustaining Supply Chain Security
+
+To maintain a secure AI supply chain, organizations should adopt best practices that encompass the entire software development lifecycle. Regularly updating dependencies, conducting vulnerability assessments, and implementing automated security checks are essential components of a resilient pipeline. Additionally, fostering a culture of security awareness among development teams can lead to more secure coding practices and a greater understanding of the implications of supply chain vulnerabilities. By prioritizing these practices, organizations can build a strong foundation for securing their AI supply chains and mitigating risks associated with vulnerabilities.
+
+### Conclusion: A Holistic Approach to AI Supply Chain Security
+
+As AI technologies evolve, so too must the strategies for securing their supply chains. By implementing a robust security pipeline that incorporates SBOMs, AIBOMs, keyless signing, and attestation, organizations can significantly enhance the integrity and provenance of their AI applications. The lessons learned from real-world vulnerabilities serve as a reminder of the importance of proactive security measures. Moving forward, it is imperative for organizations to remain vigilant, continuously improving their security practices to mitigate the ever-evolving threats in the AI landscape. By embracing a holistic approach to supply chain security, organizations can not only protect their assets but also foster trust with their users and stakeholders.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/shaarkymoo/how-i-secured-an-ai-apps-supply-chain-sbom-aibom-keyless-signing-and-slsa-attestation-in-one-4ink)
+
+---
+
+<SocialShare title="Securing AI Supply Chains: A Practical Pipeline Approach" slug="securing-ai-supply-chains-a-practical-pipeline-approach" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
