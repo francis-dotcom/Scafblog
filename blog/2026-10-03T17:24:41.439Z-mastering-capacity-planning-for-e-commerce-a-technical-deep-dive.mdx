@@ -1,0 +1,212 @@
+---
+slug: mastering-capacity-planning-for-e-commerce-a-technical-deep-dive
+title: "Mastering Capacity Planning for E-Commerce: A Technical Deep Dive"
+authors: [francis]
+tags: [capacityplanning, ecommerce, docker, devops]
+date: 2026-10-03T17:24:41.439Z
+description: "I am the tech lead for an influencer e-commerce team. We were preparing for a traffic event expected to receive approximately 1,000× normal traffic. A previous event had saturated the primary database, so we could not treat this as a routine scaling exercise.
+The difficult part was not setting up k6 or listing bottlenecks. It was deciding what to test locally and in staging, estimating the infrastructure cost before scaling the environment, and turning the findings into a remediation plan that multiple teams could execute. The work also required tracing a request from the frontend through the backend and into the database and infrastructure.
+
+Scaling staging close to production capacity costs money for every hour it runs. I first used a LocalStack-based local environment to evaluate queries, indexes, transaction boundaries, and single-task throughput.
+We ran the actual application image with MySQL and replaced external APIs with deterministic stubs. Instead of copying production data, we generated synthetic data with similar table sizes and index cardinality. For single-task tests, Docker CPU and memory limits matched production.
+I separated single-endpoint tests from mixed-flow tests based on traffic patterns observed during the previous incident. A simplified mixed-flow scenario looked like this:
+export const options = {
+  scenarios: {
+    flows: {
+      executor: 'constant-arrival-rate',
+      rate: Number(__ENV.RATE),
+      timeUnit: '1s',
+      duration: __ENV.DURATION,
+    },
+  },
+};
+
+export default function () {
+  pickByWeight([
+    [__ENV.READ_WEIGHT, readEndpoint],
+    [__ENV.WRITE_WEIGHT, writeEndpoint],
+    [__ENV.CALLBACK_WEIGHT, asyncCallback],
+    [__ENV.AUTH_WEIGHT, authEndpoint],
+  ])();
+}
+
+MySQL ran with long_query_time=0, and the slow query log was cleared before each run. I compared query counts, rows examined, execution plans, and connection hold time—not only response latency.
+This exposed missing indexes, duplicate queries, unnecessary data fetching, and long transactions. In one case, the expensive query was not the SQL under investigation but a full scan triggered by an ORM relationship.
+The staging test required temporarily scaling the database, container workloads, cache, load generators, and an external-service stub. I estimated the hourly cost, expected duration, and spending cap before provisioning them, then agreed on the plan with the engineers responsible for the environment.
+Because the test occupied staging, I also coordinated a window that would not block development or QA. Longer runs were scheduled outside normal working hours, with the start time, affected features, and rollback plan shared in advance.
+This preparation mattered as much as the test script. It made the cost explicit and allowed the team to repeat tests when a fix needed verification.
+Each k6 virtual user represented one isolated client with its own token and test data. We modelled two traffic groups:
+Authenticated clients repeatedly exercising the read path before the traffic event
+New clients arriving at the start, authenticating, and entering the write path
+The simplified flow was:
+export function sustainedTraffic() {
+  pollReadPathUntilStart();
+  executeWritePath();
+}
+
+export function newSessionTraffic() {
+  authenticate();
+  executeWritePath();
+}
+
+function executeWritePath() {
+  createResource();
+  enterAdmissionControl();
+  pollUntilAdmitted();
+  submitWrite();
+}
+
+The scenario covered read-heavy requests, session creation, admission control, state-changing requests, and asynchronous callbacks. The external-service stub also emitted callbacks with realistic retry intervals.
+An HTTP 200 was not enough to call a run successful. We reconciled k6 application errors, callback state, and persisted records, including domain-invariant checks.
+k6 ran on dedicated EC2 instances in the staging environment. The instances and related IAM and network resources were provisioned with Terraform. We selected their size from the target concurrency and iteration duration, adjusted operating-system limits, and saved the dashboard and summary from every run.
+
+The largest issue was in the write-path transaction. It held a primary connection while waiting for a reader connection, exhausting the database connection pool even when the database itself still had capacity. Adding more application tasks gave little improvement. Moving the read before the transaction removed most of the errors under the same load.
+Other improvements crossed the frontend/backend boundary. We traced each client action through browser requests, API calls, SQL, and infrastructure metrics. We removed redundant requests from the read-heavy client path and reduced duplicate backend calls.
+We also avoided direct database reads where short-lived data did not require them. Admission-control state was cached briefly in Valkey, while signed URLs were reused from an in-memory cache inside each ECS task.
+Finally, I increased ECS tasks and EKS pods and nodes step by step to measure the throughput of each configuration. From the database connection limit, I created a connection budget that included rolling deployments and scheduled jobs. This established the safe horizontal-scaling ceiling and the prescale configuration for the event.
+I worked as an individual contributor on the transaction, query, cache, and request-flow changes. But the scope was larger than one engineer or one codebase.
+I grouped the remaining findings by request path and failure mode, then created remediation issues containing the test evidence, proposed change, and expected impact. I shared the plan with the frontend, backend, and infrastructure owners and led prioritisation across the request path.
+During each test, I also showed the engineers how client behaviour translated into request volume, admission-control progress, and error conditions. This let us discuss application behaviour and technical limits using the same evidence.
+The traffic event completed with a low error rate and stable request latency, without the database saturation seen previously.
+The most useful output was not a single maximum request number. It was a shared plan that separated problems requiring code changes from capacity that should be reserved through prescaling—and assigned each change to an owner.
+Delivering that plan required working from frontend behaviour through backend transactions to infrastructure capacity, implementing critical fixes myself, and leading the remaining work across teams.
+I am currently looking for software engineering opportunities in Canada and the UK. I am authorised to work in both Canada and the UK.
+If you are hiring for full-stack engineering, cloud infrastructure, SRE, performance engineering, or developer productivity, please get in touch through my portfolio or X...."
+image: /img/blog/generated/mastering-capacity-planning-for-e-commerce-a-technical-deep-dive-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Mastering Capacity Planning for E-Commerce: A Technical Deep Dive](/img/blog/generated/mastering-capacity-planning-for-e-commerce-a-technical-deep-dive-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### The Imperative of Preemptive Capacity Planning
+
+In the realm of e-commerce, capacity planning is not merely a best practice but a critical necessity. The stakes are particularly high during major sales events, where traffic can surge to levels 1,000 times greater than normal. A failure to adequately prepare for such spikes can lead to catastrophic outcomes, including service outages and significant revenue loss. Thus, a deep understanding of backend systems, database performance, and API efficiency becomes essential for ensuring that e-commerce platforms can handle unprecedented loads.
+
+### The Complexity of Scaling for Extreme Traffic
+
+Scaling an application to handle an extreme traffic spike is fraught with challenges. It is not sufficient to simply add more servers; one must also consider the intricate interactions between various components of the system. For instance, during a previous high-traffic event, our database became saturated, leading to downtime that could have been avoided with better foresight. This incident underscores the importance of a holistic approach to capacity planning, which involves monitoring metrics such as CPU usage, memory allocation, and database connection limits to anticipate and mitigate potential bottlenecks.
+
+To provide actionable insights, it is crucial to implement proactive monitoring solutions like Prometheus or Grafana. These tools can visualize system metrics in real-time, enabling teams to set up alerts for any anomalies that may indicate impending bottlenecks, thereby allowing for timely interventions.
+
+### Leveraging Docker for Local Testing Environments
+
+One of the most effective ways to prepare for capacity events is by creating a local testing environment that closely resembles production. Docker, in conjunction with LocalStack, provides a robust solution for simulating cloud infrastructure. This setup allows engineers to evaluate SQL queries, assess transaction boundaries, and run load tests without incurring the costs associated with staging environments. By utilizing a Docker Compose file that includes services like the web application and MySQL database, teams can generate synthetic data that mirrors real-world conditions, thereby reducing the risk of unforeseen issues during peak traffic events.
+
+```yaml
+version: '3.7'
+services:
+  web:
+    image: my-ecommerce-app
+    ports:
+      - "8080:80"
+    depends_on:
+      - db
+  db:
+    image: mysql:5.7
+    environment:
+      MYSQL_ROOT_PASSWORD: example
+      MYSQL_DATABASE: ecommerce
+```
+
+This configuration allows for seamless integration testing in a controlled environment, enabling teams to iterate quickly and effectively. Furthermore, teams can use Docker volumes to persist data between tests, ensuring that they can analyze the impact of changes over time.
+
+### Crafting Effective Load Tests with k6
+
+Load testing is a vital component of capacity planning, and tools like k6 offer a flexible framework for simulating user behavior under various traffic patterns. By scripting scenarios that reflect expected user interactions—such as authenticated users performing read operations or new clients submitting data—teams can gather actionable performance metrics. A well-structured k6 script can help identify bottlenecks by measuring not just response latency but also connection hold times and query execution plans.
+
+```javascript
+export const options = {
+  scenarios: {
+    flows: {
+      executor: 'constant-arrival-rate',
+      rate: Number(__ENV.RATE),
+      timeUnit: '1s',
+      duration: __ENV.DURATION,
+    },
+  },
+};
+
+export default function () {
+  pickByWeight([
+    [__ENV.READ_WEIGHT, readEndpoint],
+    [__ENV.WRITE_WEIGHT, writeEndpoint],
+    [__ENV.CALLBACK_WEIGHT, asyncCallback],
+    [__ENV.AUTH_WEIGHT, authEndpoint],
+  ])();
+}
+```
+
+In addition to standard load tests, teams should also conduct stress tests that push the system beyond its expected limits. This approach not only helps identify breaking points but also allows for refinement of capacity planning strategies, ensuring that systems remain resilient under extreme conditions. For example, simulating a 10x traffic spike can reveal how well the application scales and whether it can maintain acceptable performance levels.
+
+### Tracing Requests to Uncover Bottlenecks
+
+Understanding how requests traverse through the system is crucial for identifying performance bottlenecks. By tracing requests from the frontend through the backend to the database, teams can pinpoint where delays occur. For example, if a slow API response is traced back to an unoptimized database query, immediate corrective action can be taken. This holistic view enables targeted optimizations, ensuring that all components of the architecture are aligned for optimal performance.
+
+Utilizing distributed tracing tools such as Jaeger or Zipkin can enhance this process by providing a visual representation of request flows, making it easier to identify latency issues across microservices. Implementing tracing can also facilitate root cause analysis, allowing teams to address issues before they escalate into larger problems.
+
+### Optimizing Database Performance: Indexing and Query Analysis
+
+Database performance is often the linchpin of overall application responsiveness, making query optimization and indexing strategies critical. Techniques such as analyzing execution plans and monitoring slow query logs can reveal inefficiencies. For example, setting `long_query_time=0` in MySQL captures all queries that exceed expected performance thresholds, allowing for a proactive optimization approach. Addressing issues like missing indexes or unnecessary data fetching can lead to significant reductions in query execution times, thereby enhancing overall throughput.
+
+Consider a scenario where a frequently executed query suffers from performance issues due to a lack of indexing. By analyzing the query execution plan, it may become evident that a full table scan is being performed. In this case, adding an index on the relevant columns can drastically reduce execution time, transforming a query that previously took seconds into one that executes in milliseconds. Additionally, implementing caching strategies, such as using Redis for frequently accessed data, can alleviate pressure on the database and improve response times.
+
+### The Role of Cross-Team Collaboration in Capacity Planning
+
+Capacity planning is inherently a cross-disciplinary effort that requires collaboration among engineers, product managers, and operations teams. This collaboration is vital for aligning on goals, sharing insights, and prioritizing tasks effectively. For example, when creating remediation plans that involve changes across the stack, grouping findings by request path and failure mode can facilitate clear communication and actionable items that are easily understood across different teams.
+
+Establishing regular cross-team meetings to discuss capacity planning progress and challenges fosters a culture of collaboration and ensures that all stakeholders are informed and engaged in the process. Additionally, using collaborative tools like Confluence for documentation and knowledge sharing can enhance team alignment and ensure that best practices are easily accessible.
+
+### Strategic Communication for Effective Execution
+
+Effective communication is paramount in the lead-up to a capacity planning event. Sharing the test plan, expected costs, and rollback strategies ensures that all stakeholders are aligned. Coordinating testing windows that do not interfere with ongoing development or QA processes is essential for maintaining productivity. For instance, scheduling longer test runs outside normal working hours can provide the necessary data without disrupting day-to-day operations.
+
+Moreover, utilizing project management tools like JIRA or Trello to track tasks and progress can enhance transparency and accountability among team members. Regular updates and check-ins can help identify potential roadblocks early, allowing teams to adapt their strategies as needed.
+
+### Learning from Experience: Establishing Best Practices
+
+The culmination of these efforts is not only a successful traffic event but also a set of best practices that can be applied in future scenarios. Documenting what worked, what didn’t, and why is crucial for continuous improvement. For instance, insights gained from managing database connections during peak loads can inform future architectural decisions, such as implementing connection pooling or caching strategies to alleviate pressure on the database.
+
+Conducting post-mortem analyses after significant events can provide valuable lessons that inform future capacity planning efforts, ensuring that teams are better prepared for the next major traffic spike. These analyses should focus on both technical outcomes and team dynamics, allowing for a comprehensive understanding of what contributes to successful capacity management.
+
+### Conclusion: A Comprehensive Approach to Capacity Planning
+
+In summary, effective capacity planning for e-commerce platforms necessitates a multifaceted approach that encompasses backend systems, database optimization, and API performance. By leveraging tools like Docker and k6, teams can create realistic testing environments and simulate user behavior to identify bottlenecks. Furthermore, fostering cross-team collaboration and maintaining clear communication channels are essential for executing a successful capacity plan. The lessons learned from these experiences will serve as a foundation for future growth and resilience against traffic spikes, ultimately ensuring a seamless experience for users and maximizing revenue opportunities. By continuously refining strategies and documenting best practices, e-commerce platforms can not only survive but thrive in high-traffic scenarios.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/eiji-kudo/how-i-led-capacity-planning-for-an-approximately-1000x-e-commerce-traffic-spike-32g5)
+
+---
+
+<SocialShare title="Mastering Capacity Planning for E-Commerce: A Technical Deep Dive" slug="mastering-capacity-planning-for-e-commerce-a-technical-deep-dive" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
