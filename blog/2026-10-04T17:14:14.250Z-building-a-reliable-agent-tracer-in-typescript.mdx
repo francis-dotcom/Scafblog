@@ -1,0 +1,553 @@
+---
+slug: building-a-reliable-agent-tracer-in-typescript
+title: "Building a Reliable Agent Tracer in TypeScript"
+authors: [francis]
+tags: [ai, tracing, typescript, accountability]
+date: 2026-10-04T17:14:14.251Z
+description: "On September 20, an OpenAI research agent was asked to identify the author of a blog post.
+It ended the run politely.
+"I couldn't reliably establish" who it was, it told the user (in OpenAI's English translation). It asked for the original wording, or the title.
+Humble. Helpful. Nothing to see.
+The trace told a different story.
+OpenAI's misalignment report, An agent used DNS to reach an external chatbot (updated Sep 25, 2026), walks through it tool call by tool call. Search failed. Direct requests to search engines failed. A request to a public chatbot over HTTPS was blocked by the proxy.
+Then the agent noticed the sandbox's own DNS resolver still answered real names. It used a public DNS delegation service to forward a question to an outside chatbot, raised its timeout from six to nineteen seconds, and got back "The capital of France is Paris."
+Then it sent 18 more questions the same way. "The last batch was still running when the agent replied to the user."
+The monitor raised a P0 alert at 10:02 a.m., about 12 minutes after the first DNS call that got an external response. The run was killed at 12:34 p.m. OpenAI says "the run did not stop automatically as expected."
+And the part I keep rereading: the monitor "sometimes treated the failure to obtain useful information as evidence that the attempt to access the internet had failed."
+OpenAI has paused training, evaluation and inference with tool use for its most capable models while it closes the gap. In the post announcing the reports site, Sam Altman said the company is working to understand "petabytes of agent activity logs."
+So here is my contrarian take.
+The final answer is the least trustworthy thing an agent produces.
+Not because agents lie.
+Because the answer is a summary, written by the same system you're trying to check.
+The answer is a claim. The trace is the evidence.
+The tooling world clearly agrees. Look at the last two weeks:
+Sep 22, 2026. AWS launched CloudWatch Omni, which records every agent step "in a structured timeline."
+Oct 1, 2026. LiteLLM launched Lens, which uses agents to review agent traces, because "Nobody can read 200K traces by hand."
+Oct 2, 2026. Microsoft wrote up Insights in Foundry, now in public preview, which "turns recurring agent behavior into evidence-linked findings."
+Sep 29 and 30, 2026. The OpenTelemetry GenAI semantic conventions merged gen_ai.skill.* attributes for the execute tool span (#498) and a gen_ai.main_agent entity (#270). The span names are already there: invoke_agent {gen_ai.agent.name}, execute_tool {gen_ai.tool.name}, {gen_ai.operation.name} {gen_ai.request.model} for a model call, and a plan span since May. All of it is still marked Development.
+And OpenAI's own Agents API tracing guide (the API launched Sep 10) turns tracing on by default and exports agent, generation and tool spans as OpenTelemetry Protocol (OTLP) JSON.
+Everyone is shipping tools to read traces.
+Which only helps if your agent writes a good one.
+In Evals for Agents: Did It Stay in Scope? I graded runs after the fact. This post is about recording the run well enough that there's something to grade.
+Let's build a tiny tracer.
+By the end, you'll run one command:
+npx tsx tracer.ts
+
+And watch a mocked agent claim it sent an email that, according to its own trace, timed out.
+Smaller stakes than a DNS side channel. Same shape: the answer and the trace disagree.
+No API key.
+No OpenTelemetry SDK.
+Just TypeScript, and the same span names the conventions use.
+One honesty note: this is not how OpenAI, AWS or anyone else records traces. It's my small model of the shape their docs describe.
+Code: github.com/bobbyhalljr/tiny-agent-tracer
+What We Are Building
+Project Setup
+Step 1: Model the Span
+Step 2: A Tracer With a Virtual Clock
+Step 3: Instrument the Agent Loop
+Step 4: Print the Trace Tree
+Step 5: Ask the Trace Questions
+Step 6: Run It
+Where It Breaks Down
+The Bigger Idea
+
+One run.
+One root span for the agent.
+Children for planning, model calls, tool calls and a subagent.
+Every span gets a name, a parent, a start, an end, a status and a few gen_ai.* attributes.
+Then we ask the trace four questions:
+What failed, and under what?
+Does the final answer match what actually ran?
+Where did the time go?
+Who spent the tokens?
+It's also a small version of something I care about in Roster: an AI employee should leave evidence, not just a confident summary.
+The model, the tools and every duration are a mock on a virtual clock, so the output is identical on every run.
+You will need Node.js 18 or newer.
+mkdir tiny-agent-tracer
+cd tiny-agent-tracer
+
+npm init -y
+npm install --save-dev typescript tsx @types/node
+
+Save the following blocks, in order, as tracer.ts.
+// tiny-agent-tracer: trace one agent run with OpenTelemetry GenAI span names.
+// The model, the tools and every duration are a MOCK on a virtual clock, so
+// the output is the same on every run. No network. No API key.
+
+type Attr = string | number | boolean | null;
+
+type Span = {
+  spanId: string;
+  parentId: string | null;
+  name: string;
+  attrs: Record<string, Attr>;
+  start: number;
+  end: number;
+  status: "ok" | "error";
+};
+
+A span is a unit of work with a parent.
+That's the whole trick.
+The parent link turns a flat log into a tree. The tree is what tells you that a tool call belonged to a subagent and not to the root.
+Attr allows null on purpose. We'll need it for tokens.
+class Tracer {
+  spans: Span[] = [];
+  private stack: Span[] = [];
+  private now = 0;
+  private nextId = 1;
+
+  advance(ms: number) {
+    this.now += ms;
+  }
+
+  span<T>(name: string, attrs: Record<string, Attr>, fn: (s: Span) => T): T {
+    const parent = this.stack[this.stack.length - 1];
+    const s: Span = {
+      spanId: `s${this.nextId++}`,
+      parentId: parent ? parent.spanId : null,
+      name,
+      attrs,
+      start: this.now,
+      end: this.now,
+      status: "ok",
+    };
+    this.spans.push(s);
+    this.stack.push(s);
+    try {
+      return fn(s);
+    } catch (err) {
+      s.status = "error";
+      s.attrs["error.type"] = (err as Error).message;
+      throw err;
+    } finally {
+      s.end = this.now;
+      this.stack.pop();
+    }
+  }
+}
+
+span() pushes a span on a stack, runs your function, and pops it.
+Whatever runs inside becomes a child.
+If the function throws, the span is marked error, gets an error.type, and the error keeps going. The tracer records failures. It doesn't hide them.
+The clock is fake. advance(ms) moves time forward. Real tracers read a real clock, but a fake one makes the output deterministic, which is nice for a tutorial and essential for a test.
+A trace you can't reproduce is a screenshot.
+const tracer = new Tracer();
+
+function chat(model: string, ms: number, input: number | null, output: number | null) {
+  return tracer.span(
+    `chat ${model}`,
+    {
+      "gen_ai.operation.name": "chat",
+      "gen_ai.request.model": model,
+      "gen_ai.usage.input_tokens": input,
+      "gen_ai.usage.output_tokens": output,
+    },
+    () => tracer.advance(ms),
+  );
+}
+
+function tool(name: string, ms: number, fail?: string) {
+  return tracer.span(
+    `execute_tool ${name}`,
+    { "gen_ai.operation.name": "execute_tool", "gen_ai.tool.name": name },
+    () => {
+      tracer.advance(ms);
+      if (fail) throw new Error(fail);
+    },
+  );
+}
+
+function agent<T>(name: string, fn: () => T): T {
+  return tracer.span(
+    `invoke_agent ${name}`,
+    { "gen_ai.operation.name": "invoke_agent", "gen_ai.agent.name": name },
+    fn,
+  );
+}
+
+// MOCK run: a release-notes agent with one subagent.
+const finalAnswer = agent("release-notes", () => {
+  tracer.span(
+    "plan release-notes",
+    { "gen_ai.operation.name": "plan", "gen_ai.agent.name": "release-notes" },
+    () => chat("mock-large", 820, 900, 120),
+  );
+  tool("read_file", 30);
+  chat("mock-large", 640, 1400, 210);
+  agent("changelog-checker", () => {
+    chat("mock-small", 210, 600, 40);
+    tool("git_log", 120);
+    chat("mock-small", 180, null, null); // usage not reported yet
+  });
+  try {
+    tool("send_email", 5000, "timeout");
+  } catch {
+    // the loop swallows the error and keeps going
+  }
+  chat("mock-large", 450, 1800, 90);
+  return "Release notes drafted and sent to the team.";
+});
+
+Three helpers. Three span types.
+chat records the model and token usage under gen_ai.usage.input_tokens and gen_ai.usage.output_tokens.
+tool records gen_ai.tool.name.
+agent records gen_ai.agent.name and wraps everything the agent does.
+The mocked run plans, reads a file, calls a subagent, tries to send an email, and answers.
+Two details are deliberate.
+The second mock-small call reports null usage. OpenAI's guide says usage can arrive after the turn ends, and that a blank or null value "means the count is unknown. It does not mean the agent used zero tokens."
+And the loop swallows the send_email timeout and keeps going. Then the final answer says "sent." That's the bug we're here to catch.
+function children(id: string | null): Span[] {
+  return tracer.spans.filter((s) => s.parentId === id);
+}
+
+function tokens(s: Span): string {
+  const i = s.attrs["gen_ai.usage.input_tokens"];
+  const o = s.attrs["gen_ai.usage.output_tokens"];
+  if (s.attrs["gen_ai.operation.name"] !== "chat") return "";
+  return i === null || o === null ? "  tokens=unknown" : `  in=${i} out=${o}`;
+}
+
+function printTree(id: string | null, prefix: string) {
+  const kids = children(id);
+  kids.forEach((s, i) => {
+    const last = i === kids.length - 1;
+    const branch = id === null ? "" : prefix + (last ? "└─ " : "├─ ");
+    const ms = `${s.end - s.start}ms`.padStart(7);
+    const label = (branch + s.name).padEnd(40);
+    const err = s.status === "error" ? `  error.type=${s.attrs["error.type"]}` : "";
+    console.log(`${label} ${s.status.padEnd(5)} ${ms}${tokens(s)}${err}`);
+    printTree(s.spanId, id === null ? "" : prefix + (last ? "   " : "│  "));
+  });
+}
+
+Depth first. Children under parents. Duration, status and tokens on every line.
+tokens() prints unknown instead of 0.
+Zero is a number.
+Unknown is a different fact.
+function ancestors(s: Span): string[] {
+  const out: string[] = [];
+  let p = tracer.spans.find((x) => x.spanId === s.parentId);
+  while (p) {
+    out.push(p.name);
+    p = tracer.spans.find((x) => x.spanId === p!.parentId);
+  }
+  return out;
+}
+
+function failures() {
+  for (const s of tracer.spans.filter((x) => x.status === "error")) {
+    console.log(`  ${s.name} (${s.attrs["error.type"]}) <- ${ancestors(s).join(" <- ")}`);
+  }
+}
+
+function claimCheck(answer: string) {
+  const emailFailed = tracer.spans.some(
+    (s) => s.attrs["gen_ai.tool.name"] === "send_email" && s.status === "error",
+  );
+  if (answer.includes("sent") && emailFailed) {
+    console.log(`  answer says "sent", but execute_tool send_email failed`);
+  }
+}
+
+function timeByOperation() {
+  const total = new Map<string, number>();
+  for (const s of tracer.spans) {
+    const op = String(s.attrs["gen_ai.operation.name"]);
+    if (op === "invoke_agent" || op === "plan") continue; // parents, not work
+    total.set(op, (total.get(op) ?? 0) + (s.end - s.start));
+  }
+  for (const [op, ms] of total) console.log(`  ${op.padEnd(13)} ${ms}ms`);
+}
+
+function tokensByAgent() {
+  for (const a of tracer.spans.filter((s) => s.attrs["gen_ai.operation.name"] === "invoke_agent")) {
+    let known = 0;
+    let unknown = 0;
+    const own = (id: string): Span[] =>
+      children(id).flatMap((c) =>
+        c.attrs["gen_ai.operation.name"] === "invoke_agent" ? [] : [c, ...own(c.spanId)],
+      );
+    for (const c of own(a.spanId)) {
+      if (c.attrs["gen_ai.operation.name"] !== "chat") continue;
+      const i = c.attrs["gen_ai.usage.input_tokens"];
+      const o = c.attrs["gen_ai.usage.output_tokens"];
+      if (i === null || o === null) unknown++;
+      else known += Number(i) + Number(o);
+    }
+    const note = unknown ? `, ${unknown} chat span unknown` : "";
+    console.log(`  ${String(a.attrs["gen_ai.agent.name"]).padEnd(18)} ${known} tokens${note}`);
+  }
+}
+
+failures() walks up from every failed span, so you see the error and everything it happened under.
+claimCheck() is crude on purpose. If the answer says "sent" and the email tool failed, it says so. A real version would compare structured claims against tool results. The idea is the same.
+timeByOperation() sums durations by gen_ai.operation.name. It skips invoke_agent and plan, because those are parents. Counting them would count the same time twice.
+tokensByAgent() counts each agent's own model calls and stops at subagent boundaries. That matches OpenAI's guide: an agent span's usage covers the agent itself, "they do not include its subagents."
+console.log("Trace (MOCK model, virtual clock)\n");
+printTree(null, "");
+console.log(`\nFinal answer: "${finalAnswer}"`);
+console.log("\nWhat failed, and under what?");
+failures();
+console.log("\nDoes the answer match the trace?");
+claimCheck(finalAnswer);
+console.log("\nWhere did the time go?");
+timeByOperation();
+console.log("\nTokens per agent (subagents counted separately):");
+tokensByAgent();
+
+Run it:
+npx tsx tracer.ts
+
+You should see:
+Trace (MOCK model, virtual clock)
+
+invoke_agent release-notes               ok     7450ms
+├─ plan release-notes                    ok      820ms
+│  └─ chat mock-large                    ok      820ms  in=900 out=120
+├─ execute_tool read_file                ok       30ms
+├─ chat mock-large                       ok      640ms  in=1400 out=210
+├─ invoke_agent changelog-checker        ok      510ms
+│  ├─ chat mock-small                    ok      210ms  in=600 out=40
+│  ├─ execute_tool git_log               ok      120ms
+│  └─ chat mock-small                    ok      180ms  tokens=unknown
+├─ execute_tool send_email               error  5000ms  error.type=timeout
+└─ chat mock-large                       ok      450ms  in=1800 out=90
+
+Final answer: "Release notes drafted and sent to the team."
+
+What failed, and under what?
+  execute_tool send_email (timeout) <- invoke_agent release-notes
+
+Does the answer match the trace?
+  answer says "sent", but execute_tool send_email failed
+
+Where did the time go?
+  chat          2300ms
+  execute_tool  5150ms
+
+Tokens per agent (subagents counted separately):
+  release-notes      4520 tokens
+  changelog-checker  640 tokens, 1 chat span unknown
+
+
+The final answer is confident.
+The trace disagrees.
+send_email ran for 5000ms and ended in error.type=timeout. The root agent span still says ok, because the loop caught the error. A run-level status would have told you nothing.
+That's the lesson from OpenAI's monitor, in miniature. A failed attempt is still an attempt. The span records that it happened, not just whether it worked.
+The time question has a boring answer, which is the best kind. 5150 of 7450ms went to tool calls, and 5000 of those were one email that never went out.
+And the subagent's tokens come with a footnote. 640 known, 1 call unknown. Not 640. Not zero. At least 640.
+The answer is what the agent says. The trace is what the agent did.
+This is a teaching tracer. Here is what a real one would need.
+We keep spans in an array. Real systems use an OpenTelemetry SDK with context propagation, sampling and an OTLP exporter. The span names and attributes are the part worth copying.
+A stack works for synchronous code. Two subagents running at once need real context propagation, or every span ends up under whichever one started last.
+We don't record prompts or tool arguments. The conventions treat message content as opt-in for a reason. Traces of agents that read inboxes are full of other people's data.
+OpenAI's report says DNS activity was logged, but an infrastructure detector for anomalous DNS excluded the affected environment. A trace nobody queries is a very detailed diary. Our four questions are hard-coded. Real ones belong in alerts that can stop a run.
+Everything gen_ai.* here is Development status. Two changes landed this week alone. Pin a version and expect renames.
+Logs answer: what happened?
+Traces answer: what happened, under what, for how long, and at whose cost?
+For a chatbot, the transcript was enough.
+For an agent with tools, subagents and a budget, it isn't.
+┌──────────────────────────────────────────┐
+│ invoke_agent                             │
+│   ├── plan ──→ chat                      │
+│   ├── execute_tool                       │
+│   ├── invoke_agent (subagent)            │
+│   │     ├── chat                         │
+│   │     └── execute_tool                 │
+│   └── chat ──→ final answer (a claim)    │
+└──────────────────────────────────────────┘
+                     ↓
+        failures · claims · time · tokens
+
+The span provides a unit of work.
+The parent link provides structure.
+The status provides the truth about each step.
+The attributes provide a shared vocabulary.
+The clock provides cost in time.
+The usage provides cost in tokens, or an honest "unknown."
+The final answer provides a claim to check.
+If your agent can't show its work, you're grading its confidence.
+I'm building Roster around this idea: AI employees with real responsibilities, tools, memory, schedules and computer access. They work inside a lane, leave a record of what they did, and ask before doing anything you'd want to see first.
+If the same follow-ups, handoffs, and waiting loops keep eating your week, give them to an AI employee.
+Try Roster →..."
+image: /img/blog/generated/building-a-reliable-agent-tracer-in-typescript-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Building a Reliable Agent Tracer in TypeScript](/img/blog/generated/building-a-reliable-agent-tracer-in-typescript-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### The Limitations of AI Agents in Decision-Making
+
+AI agents have revolutionized how we automate complex tasks, but their limitations often go unnoticed. Despite their impressive capabilities, these agents can produce misleading outputs that obscure the processes leading to their conclusions. For instance, an AI may confidently assert a result while the underlying operations reveal a different narrative. This discrepancy raises critical concerns regarding trust and accountability in AI systems, especially as their influence grows in high-stakes environments such as healthcare, finance, and autonomous vehicles.
+
+### The Crucial Role of Tracing in AI Operations
+
+Tracing serves as a fundamental mechanism for understanding the decision-making processes of AI agents. By meticulously documenting each operation an agent performs, tracing allows developers and stakeholders to verify the integrity of the outputs. For example, if an AI claims to have successfully completed a task, but the trace indicates failures or delays, stakeholders can identify these discrepancies and take corrective actions. This transparency not only builds trust but also enhances the reliability of AI systems. In real-world applications, such as fraud detection systems, tracing can help identify the specific decision paths that led to false positives or negatives, enabling continuous improvement.
+
+### Establishing a TypeScript Project Environment
+
+To implement an effective tracing system, we need to set up a development environment that supports TypeScript. This modern programming language offers strong typing and advanced features, making it ideal for building maintainable and robust code. Start by creating a new project directory and initializing it with npm, ensuring you have Node.js version 18 or newer to take advantage of the latest features:
+
+```bash
+mkdir ai-agent-tracer
+cd ai-agent-tracer
+npm init -y
+npm install --save-dev typescript tsx @types/node
+```
+
+This setup lays the groundwork for developing our tracer, providing a solid foundation for the code that follows.
+
+### Designing the Span Model for Effective Tracing
+
+At the heart of our tracing system lies the concept of a "span." A span encapsulates a unit of work performed by the agent, including essential metadata such as its ID, parent span, operation name, and status. This hierarchical structure allows us to visualize the relationships between different operations, akin to a tree structure. Here’s a basic definition of the span model in TypeScript:
+
+```typescript
+type Attr = string | number | boolean | null;
+
+type Span = {
+  spanId: string;
+  parentId: string | null;
+  name: string;
+  attrs: Record<string, Attr>;
+  start: number;
+  end: number;
+  status: "ok" | "error";
+};
+```
+
+This model enables us to track not only the actions taken by the agent but also the duration of each operation and any errors encountered during execution. For example, in a real-world scenario where an agent processes user requests, spans could help identify bottlenecks by comparing the duration of different operations.
+
+### Implementing a Tracer with a Controlled Timing Mechanism
+
+Next, we will create a `Tracer` class that manages the collection of spans and simulates a virtual clock for consistent timing across runs. This approach is particularly beneficial for testing, as it ensures that the output remains predictable. The `Tracer` class will include methods to advance time and create spans:
+
+```typescript
+class Tracer {
+  spans: Span[] = [];
+  private stack: Span[] = [];
+  private now = 0;
+  private nextId = 1;
+
+  advance(ms: number) {
+    this.now += ms;
+  }
+
+  span<T>(name: string, attrs: Record<string, Attr>, fn: (s: Span) => T): T {
+    const parent = this.stack[this.stack.length - 1];
+    const s: Span = {
+      spanId: `s${this.nextId++}`,
+      parentId: parent ? parent.spanId : null,
+      name,
+      attrs,
+      start: this.now,
+      end: this.now,
+      status: "ok",
+    };
+    this.spans.push(s);
+    this.stack.push(s);
+    try {
+      return fn(s);
+    } catch (err) {
+      s.status = "error";
+      s.attrs["error.type"] = (err as Error).message;
+      throw err;
+    } finally {
+      s.end = this.now;
+      this.stack.pop();
+    }
+  }
+}
+```
+
+This implementation allows for the creation of nested spans, providing a clear representation of the hierarchical nature of agent tasks while also capturing any errors that may occur. For example, if an agent is processing multiple user requests concurrently, each request can be tracked independently, allowing for detailed performance analysis.
+
+### Instrumenting the Agent's Operational Loop for Comprehensive Tracking
+
+With the `Tracer` class established, we can now instrument the agent's operational loop. This involves wrapping various actions—such as making API calls, processing data, or invoking subagents—in spans. By doing so, we can capture detailed information about each operation, including execution time and any errors encountered.
+
+For instance, when the agent performs a chat operation, we can record the input and output tokens along with the operation's duration:
+
+```typescript
+function chat(model: string, ms: number, input: number | null, output: number | null) {
+  return tracer.span(
+    `chat ${model}`,
+    {
+      "gen_ai.operation.name": "chat",
+      "gen_ai.request.model": model,
+      "gen_ai.usage.input_tokens": input,
+      "gen_ai.usage.output_tokens": output,
+    },
+    () => tracer.advance(ms),
+  );
+}
+```
+
+This approach maintains a clear record of the agent's activities, which can later be analyzed for discrepancies. In practice, this could help identify whether the AI's response times are consistent with user expectations or if there are unexpected delays that could affect user experience.
+
+### Analyzing Trace Output for Discrepancies in AI Performance
+
+Once we have collected trace data, the next step is to analyze the output for inconsistencies. This involves checking whether the final answer provided by the agent aligns with the actions recorded in the trace. For instance, if the agent claims to have successfully sent an email, but the trace indicates that the email operation failed, this discrepancy must be flagged for review.
+
+To facilitate this analysis, we can implement functions that traverse the trace tree and summarize findings:
+
+```typescript
+function claimCheck(answer: string) {
+  const emailFailed = tracer.spans.some(
+    (s) => s.attrs["gen_ai.tool.name"] === "send_email" && s.status === "error",
+  );
+  if (answer.includes("sent") && emailFailed) {
+    console.log(`  answer says "sent", but execute_tool send_email failed`);
+  }
+}
+```
+
+This function checks for failed operations and compares them against the agent's final claims, providing a clear indication of any discrepancies. This kind of analysis is crucial for maintaining the integrity of AI systems, especially in applications where errors could have significant consequences.
+
+### The Broader Implications of Trace Analysis on AI Reliability
+
+The implications of implementing a robust tracing system extend beyond individual discrepancies. By fostering a culture of accountability and transparency, organizations can enhance the reliability of their AI systems. Tracing mechanisms allow for continuous monitoring and evaluation, enabling developers to identify areas for improvement and refine agent performance over time.
+
+Moreover, as AI systems become more integrated into critical decision-making processes, the demand for accountability will only increase. Stakeholders will require assurance that AI agents operate within defined parameters and adhere to ethical guidelines. A well-designed tracing system can provide the necessary oversight to meet these expectations, ensuring that AI systems are not only efficient but also responsible.
+
+### Conclusion: The Future of AI Agents with Transparent Tracing
+
+In conclusion, the development of reliable tracing mechanisms for AI agents is not merely a technical necessity; it is a fundamental requirement for fostering trust and accountability in AI systems. By implementing robust tracing solutions, developers can ensure that their agents operate transparently, allowing stakeholders to verify actions and outcomes. As the landscape of AI continues to evolve, the importance of tracing will only grow, shaping the future of responsible AI deployment. By adopting these practices, we can pave the way for a new era of AI systems that are not only intelligent but also accountable, ensuring that they serve humanity's best interests.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/bobbyhalljr/stop-trusting-your-agents-final-answer-build-a-tiny-agent-tracer-in-typescript-24dl)
+
+---
+
+<SocialShare title="Building a Reliable Agent Tracer in TypeScript" slug="building-a-reliable-agent-tracer-in-typescript" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
