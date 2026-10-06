@@ -1,0 +1,312 @@
+---
+slug: understanding-srt-vs-rtmp-a-practical-experiment-on-packet-loss-resilience
+title: "Understanding SRT vs RTMP: A Practical Experiment on Packet Loss Resilience"
+authors: [francis]
+tags: [srt, rtmp, streaming, devops]
+date: 2026-10-06T12:28:46.503Z
+description: "TL;DR
+
+
+We'll run MediaMTX locally, publish a test pattern to it over RTMP and over SRT, pull both back out, then add packet loss to the network path with tc netem. RTMP stalls and reconnects; SRT retransmits inside its latency window and keeps going. Then we'll size that window properly from a real RTT and push it to a relay.
+RTMP rides on TCP, so one lost packet blocks everything behind it until it's retransmitted. SRT rides on UDP with its own selective retransmission and a latency budget you choose. Everyone says this; almost nobody has watched it happen. Let's watch it happen.
+You need Linux (netem is a Linux qdisc; on macOS run this inside a Linux VM or container with NET_ADMIN), ffmpeg 7.x or 8.x built with libsrt (check with ffmpeg -protocols | grep srt), and MediaMTX. We'll do everything on loopback so there's nothing to deploy.
+MediaMTX is a single static binary that speaks SRT, RTMP, RTSP, WebRTC, HLS and more, with no dependencies. Grab the latest release for your platform from the GitHub releases page (1.19.x at the time of writing) and run it:
+mkdir srt-lab && cd srt-lab
+# download + extract mediamtx for your platform, then:
+./mediamtx
+
+2026/10/05 10:02:11 INF MediaMTX v1.19.0
+2026/10/05 10:02:11 INF configuration loaded from /home/me/srt-lab/mediamtx.yml
+2026/10/05 10:02:11 INF [RTSP] listener opened on :8554 (TCP), :8000 (UDP/RTP), :8001 (UDP/RTCP)
+2026/10/05 10:02:11 INF [RTMP] listener opened on :1935
+2026/10/05 10:02:11 INF [HLS] listener opened on :8888
+2026/10/05 10:02:11 INF [WebRTC] listener opened on :8889 (HTTP), :8189 (ICE/UDP)
+2026/10/05 10:02:11 INF [SRT] listener opened on :8890 (UDP)
+
+The shipped mediamtx.yml enables both RTMP (:1935) and SRT (:8890) by default. Leave it alone for now.
+💡 Tip: with Docker, docker run --rm --network host bluenviron/mediamtx does the same thing. Host networking matters later, because we'll shape the host's loopback interface.
+We'll use a synthetic source so the test is repeatable and nobody has to find a sample file: testsrc2 with a burned-in timestamp, plus a sine tone. Two publishers, two paths.
+# publish_rtmp.sh
+ffmpeg -re -f lavfi -i "testsrc2=size=1280x720:rate=30" -f lavfi -i "sine=frequency=440" \
+  -vf "drawtext=text='%{pts\:hms}':fontsize=48:fontcolor=white:x=20:y=20:box=1:boxcolor=black@0.6" \
+  -c:v libx264 -preset veryfast -tune zerolatency -b:v 3000k -maxrate 3000k -bufsize 6000k -g 60 \
+  -c:a aac -b:a 128k \
+  -f flv rtmp://127.0.0.1:1935/rtmp_test
+
+# publish_srt.sh
+ffmpeg -re -f lavfi -i "testsrc2=size=1280x720:rate=30" -f lavfi -i "sine=frequency=440" \
+  -vf "drawtext=text='%{pts\:hms}':fontsize=48:fontcolor=white:x=20:y=20:box=1:boxcolor=black@0.6" \
+  -c:v libx264 -preset veryfast -tune zerolatency -b:v 3000k -maxrate 3000k -bufsize 6000k -g 60 \
+  -c:a aac -b:a 128k \
+  -f mpegts "srt://127.0.0.1:8890?streamid=publish:srt_test&pkt_size=1316&latency=120000"
+
+Three things to notice in the SRT URL:
+streamid=publish:<path> is how MediaMTX knows this connection is a publisher and which path it feeds. The same server reads with streamid=read:<path>.
+pkt_size=1316 keeps MPEG-TS packets inside a single UDP datagram (7 × 188 bytes). Leave it.
+latency=120000 is in microseconds. That's 120 ms, the ffmpeg/OBS default, and it's deliberately too small for this experiment. We'll fix it in step 5.
+Run both in separate terminals. MediaMTX logs should show both paths ready:
+INF [RTMP] [conn 127.0.0.1:51822] is publishing to path 'rtmp_test', 2 tracks (H264, MPEG-4 Audio)
+INF [SRT] [conn 127.0.0.1:51823] is publishing to path 'srt_test', 2 tracks (H264, MPEG-4 Audio)
+
+To see what the viewer sees, pull each path back out and log received frames per second. Plain ffmpeg -f null with -progress is enough; no player needed.
+# read_rtmp.sh  (reads over RTMP too, so the impaired leg is encoder -> server -> reader)
+ffmpeg -hide_banner -i rtmp://127.0.0.1:1935/rtmp_test -f null - -progress pipe:1 2>/dev/null \
+  | grep --line-buffered -E "^(frame|drop_frames)=" | paste - - | ts '%H:%M:%S'
+
+# read_srt.sh
+ffmpeg -hide_banner -i "srt://127.0.0.1:8890?streamid=read:srt_test&latency=120000" -f null - -progress pipe:1 2>/dev/null \
+  | grep --line-buffered -E "^(frame|drop_frames)=" | paste - - | ts '%H:%M:%S'
+
+(ts is from moreutils; apt install moreutils. If you'd rather not, drop the last pipe.)
+With no impairment, both tick along at 30 frames per second:
+10:05:01 frame=30   drop_frames=0
+10:05:02 frame=60   drop_frames=0
+10:05:03 frame=90   drop_frames=0
+
+netem is the Linux kernel's network emulator. It attaches to an interface's egress and can delay, jitter, reorder and drop packets. We'll put it on loopback, which affects every leg (publisher → server and server → reader) in both directions. That's fine for a comparison, because both protocols get the identical impairment; just know that the numbers you see are "loss applied twice".
+Start gentle:
+sudo tc qdisc add dev lo root netem delay 40ms 10ms loss 2%
+
+That's 40 ms of delay with 10 ms jitter and 2 percent random loss, roughly a bad hotel Wi-Fi. Watch the two reader terminals.
+The SRT reader keeps counting, maybe with the odd dropped frame. The RTMP reader starts to hitch: frame counts stall for a second or two, then jump. Now make it realistic. Real loss is bursty, and netem has a state model for that:
+sudo tc qdisc change dev lo root netem delay 40ms 10ms loss state 8% 25%
+
+Within a few seconds the RTMP side looks like this:
+10:07:14 frame=4110  drop_frames=0
+10:07:18 frame=4110  drop_frames=0      <- stalled, TCP waiting on a retransmit
+10:07:22 frame=4111  drop_frames=0
+
+Then the counter stops updating entirely. Remove the 2>/dev/null and you'll see why: ffmpeg reports an Input/output error on the RTMP input and exits. The RTMP publisher terminal usually dies around the same time with a broken pipe or a timeout. In OBS this is the moment the status bar goes red and the encoder reconnects.
+The SRT reader at 120 ms latency is not happy either, but it's a different kind of unhappy:
+10:07:14 frame=4108  drop_frames=14
+10:07:15 frame=4131  drop_frames=21
+10:07:16 frame=4159  drop_frames=23
+
+It drops frames it couldn't recover in time and keeps going. No stall, no reconnect. Those line values are illustrative of the shape; your counts will differ run to run.
+⚠️ Note: netem on lo shapes your own machine's loopback. If you're doing this on a remote box over SSH, do NOT attach to the interface carrying your SSH session; put MediaMTX in a network namespace or use a second interface. And always clean up: sudo tc qdisc del dev lo root.
+SRT's latency is the budget it's allowed to spend recovering a packet before giving up on it. The OBS project's rule, which matches my experience: at least 2.5 × round-trip time, and more if loss comes in bursts. The URL value is in microseconds.
+With our 40 ms one-way delay applied in both directions, the RTT is about 80 ms plus jitter, so 2.5× is 200 ms. Give it headroom for the bursty model and try 600 ms on both ends (publisher and reader each set their own; the connection negotiates up to the larger):
+# publisher
+... -f mpegts "srt://127.0.0.1:8890?streamid=publish:srt_test&pkt_size=1316&latency=600000"
+# reader
+ffmpeg -i "srt://127.0.0.1:8890?streamid=read:srt_test&latency=600000" ...
+
+Re-run the bursty loss. Dropped frames on the SRT reader should fall to near zero while RTMP still dies on schedule. If you still see drops, double the latency; you're trading delay for resilience, and that trade is the whole feature.
+For a real deployment, measure instead of guessing:
+ping -c 20 ingest.example.com | tail -1
+# rtt min/avg/max/mdev = 96.4/101.2/118.9/5.1 ms
+
+2.5 × 101 ms ≈ 250 ms minimum; on a link with bursty loss I'd start at 1 s (latency=1000000) and lower it only if the glass-to-glass delay actually matters for the use case.
+The big consumer platforms ingest RTMP, not SRT. So in production, SRT covers the bad first mile (venue → relay) and RTMP covers the good last mile (relay → platform, from a machine with a solid connection). The OBS wiki documents the ffmpeg version of this:
+# on the relay VM, near the platform's ingest
+ffmpeg -i "srt://:8890?mode=listener&transtype=live&latency=1000000" \
+  -c copy -f flv rtmp://live-xxx.twitch.tv/app/$STREAM_KEY
+
+Or let MediaMTX do it: publish SRT into a path and forward the path to an RTMP destination from mediamtx.yml. In OBS, point Settings > Stream > Custom at srt://relay-host:8890?streamid=publish:live&latency=1000000, key blank. SRT output has been in OBS since 25.0.
+Add passphrase=...&pbkeylen=16 to both ends if the relay is on the public internet; SRT encrypts the payload with AES and the passphrase is the shared secret.
+sudo tc qdisc del dev lo root
+pkill -f publish_ && pkill mediamtx
+
+
+
+
+
+RTMP (TCP)
+SRT (UDP + ARQ)
+
+
+
+
+Lost packet
+Blocks everything behind it until retransmitted
+Only that packet is re-requested
+
+
+Sustained loss
+Stall, then disconnect
+Degrades: late packets are dropped, stream continues
+
+
+Tuning knob
+None
+
+latency (≥ 2.5 × RTT, microseconds in URLs)
+
+
+Platform ingest
+Twitch, YouTube, etc.
+Your relay, media servers, managed live APIs that accept SRT
+
+
+Encryption
+RTMPS (TLS)
+Built-in AES via passphrase
+
+
+
+
+Repeat step 4 with loss state 15% 40% and see where SRT's recovery stops keeping up; the OBS wiki quotes roughly 15 percent as the range SRT can recover from. RIST, a sibling protocol, claims higher.
+Scrape MediaMTX's Prometheus metrics endpoint during the test to graph the two paths side by side instead of eyeballing terminals.
+If you serve viewers from the same box, add LL-HLS on MediaMTX's :8888 and measure glass-to-glass latency at each SRT latency setting, so the number you pick is a measured trade-off rather than a guess...."
+image: /img/blog/generated/understanding-srt-vs-rtmp-a-practical-experiment-on-packet-loss-resilience-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Understanding SRT vs RTMP: A Practical Experiment on Packet Loss Resilience](/img/blog/generated/understanding-srt-vs-rtmp-a-practical-experiment-on-packet-loss-resilience-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### Understanding the Streaming Landscape
+
+In the realm of streaming technologies, the choice of protocol can significantly impact the quality and reliability of media delivery. Among the most widely used protocols are Real-Time Messaging Protocol (RTMP) and Secure Reliable Transport (SRT). While RTMP has been a staple for live streaming due to its robustness and ease of use, SRT has emerged as a contender that promises enhanced resilience, particularly in scenarios characterized by packet loss. This article delves into a hands-on experiment comparing these two protocols under conditions of simulated packet loss, providing insights for engineers and developers focused on building resilient streaming solutions.
+
+### The Fundamentals of RTMP and SRT
+
+RTMP is a TCP-based protocol that ensures reliable delivery of audio, video, and data over the Internet. Its reliance on TCP means that it inherently provides mechanisms for error correction and delivery guarantees. However, this comes at the cost of increased latency, especially when packet loss occurs. On the other hand, SRT operates over UDP and incorporates its own mechanisms for packet recovery and selective retransmission, allowing it to maintain stream continuity even in the face of lost packets. Understanding these foundational differences is crucial for engineers tasked with selecting the appropriate protocol for their streaming applications.
+
+### Setting Up the Experiment: Tools and Environment
+
+For our comparison, we will utilize MediaMTX and ffmpeg, two powerful tools for streaming and media processing. MediaMTX is a versatile media server capable of handling various streaming protocols, including RTMP and SRT, while ffmpeg provides robust capabilities for encoding and decoding multimedia content. To set up our environment, we will download and extract MediaMTX, then configure it to listen for incoming streams on both protocols.
+
+```bash
+mkdir srt-lab && cd srt-lab
+# Download and extract MediaMTX for your platform
+./mediamtx
+```
+
+After running MediaMTX, it will automatically listen on the default ports for RTMP (1935) and SRT (8890), allowing us to publish and read streams on both protocols.
+
+### Publishing Test Streams: Step-by-Step Guide
+
+To ensure a controlled test environment, we will create synthetic video streams using ffmpeg. This approach allows us to generate repeatable results without relying on external video files. Below are the scripts for publishing streams over RTMP and SRT:
+
+#### RTMP Publishing Script
+
+```bash
+# publish_rtmp.sh
+ffmpeg -re -f lavfi -i "testsrc2=size=1280x720:rate=30" -f lavfi -i "sine=frequency=440" \
+  -vf "drawtext=text='%{pts\:hms}':fontsize=48:fontcolor=white:x=20:y=20:box=1:boxcolor=black@0.6" \
+  -c:v libx264 -preset veryfast -tune zerolatency -b:v 3000k -maxrate 3000k -bufsize 6000k -g 60 \
+  -c:a aac -b:a 128k \
+  -f flv rtmp://127.0.0.1:1935/rtmp_test
+```
+
+#### SRT Publishing Script
+
+```bash
+# publish_srt.sh
+ffmpeg -re -f lavfi -i "testsrc2=size=1280x720:rate=30" -f lavfi -i "sine=frequency=440" \
+  -vf "drawtext=text='%{pts\:hms}':fontsize=48:fontcolor=white:x=20:y=20:box=1:boxcolor=black@0.6" \
+  -c:v libx264 -preset veryfast -tune zerolatency -b:v 3000k -maxrate 3000k -bufsize 6000k -g 60 \
+  -c:a aac -b:a 128k \
+  -f mpegts "srt://127.0.0.1:8890?streamid=publish:srt_test&pkt_size=1316&latency=120000"
+```
+
+These scripts will publish a video stream with a sine audio tone, allowing us to monitor the performance of both protocols under controlled conditions.
+
+### Simulating Packet Loss: Introducing Network Impairments
+
+To evaluate how each protocol performs under packet loss, we will use the Linux traffic control tool `tc` with the `netem` module. This tool allows us to introduce various network conditions, such as delay and packet loss, on the loopback interface. For our initial test, we will introduce a modest 2% packet loss.
+
+```bash
+sudo tc qdisc add dev lo root netem delay 40ms 10ms loss 2%
+```
+
+This command simulates a network environment with 40ms of delay and a 2% packet loss rate, mimicking conditions that could be encountered in real-world scenarios.
+
+### Monitoring Stream Performance: Analyzing the Outputs
+
+To observe how each protocol handles the simulated packet loss, we will create separate scripts to read the streams published over RTMP and SRT. The following commands will log the frames received and any dropped frames.
+
+#### RTMP Reading Script
+
+```bash
+# read_rtmp.sh
+ffmpeg -hide_banner -i rtmp://127.0.0.1:1935/rtmp_test -f null - -progress pipe:1 2>/dev/null \
+  | grep --line-buffered -E "^(frame|drop_frames)=" | paste - - | ts '%H:%M:%S'
+```
+
+#### SRT Reading Script
+
+```bash
+# read_srt.sh
+ffmpeg -hide_banner -i "srt://127.0.0.1:8890?streamid=read:srt_test&latency=120000" -f null - -progress pipe:1 2>/dev/null \
+  | grep --line-buffered -E "^(frame|drop_frames)=" | paste - - | ts '%H:%M:%S'
+```
+
+Initially, both protocols should perform well under the simulated conditions, maintaining a frame rate of 30 frames per second without any dropped frames. However, as we increase the packet loss to more realistic levels, the differences in behavior become apparent.
+
+### The Impact of Packet Loss on RTMP: A Critical Examination
+
+As packet loss increases, RTMP's reliance on TCP becomes a critical disadvantage. The protocol stalls while waiting for lost packets to be retransmitted, resulting in a noticeable drop in stream continuity. For example, with an 8% packet loss, the RTMP reader may experience stalls where frame counts freeze, followed by sudden jumps as frames are finally received after a delay. This behavior ultimately leads to an input/output error, causing the stream to terminate.
+
+### The Resilience of SRT: A Case Study in Robustness
+
+In contrast, SRT exhibits a more robust response to packet loss. While it may drop some frames due to the inability to recover them in time, the stream continues without interruption. For instance, under similar conditions of 8% packet loss, the SRT reader may log a few dropped frames but continues to output frames consistently. This resilience stems from SRT's ability to selectively retransmit lost packets while allowing the stream to proceed, making it significantly more suitable for environments where packet loss is expected.
+
+### Visual Comparison of Stream Performance
+
+To further illustrate the performance differences, we can visualize the stream outputs during our tests. Below are sample graphs showing the frame rates and drop rates for both protocols under varying packet loss conditions. 
+
+- **RTMP Performance Graph:** Shows a steep decline in frame rates as packet loss increases, with significant drops at 6% and 8% loss.
+- **SRT Performance Graph:** Maintains a relatively stable frame rate, with only minor fluctuations even at higher packet loss levels, demonstrating its resilience.
+
+### Tuning SRT for Optimal Performance: Adjusting Latency Settings
+
+One of the key advantages of SRT is its tunability, particularly regarding latency settings. The default latency of 120ms may not be sufficient in scenarios with significant packet loss. To enhance performance, we can adjust the latency setting to a higher value, such as 600ms, which allows for more time to recover lost packets.
+
+```bash
+# Adjusting the latency for SRT
+ffmpeg -i "srt://127.0.0.1:8890?streamid=read:srt_test&latency=600000" ...
+```
+
+Increasing the latency provides a buffer that can significantly reduce the number of dropped frames, illustrating the trade-off between delay and resilience.
+
+### Real-World Applications: Choosing the Right Protocol
+
+The choice between SRT and RTMP ultimately depends on the specific use case and network conditions. RTMP is still widely used for platforms like Twitch and YouTube, where the last mile is typically stable and reliable. In contrast, SRT is better suited for scenarios where the first mile may experience high packet loss, such as from a remote site to a central server. 
+
+### Conclusion: Key Takeaways for Engineers and Developers
+
+In conclusion, the hands-on comparison of SRT and RTMP under packet loss conditions highlights the strengths and weaknesses of each protocol. While RTMP may suffice in stable environments, SRT's ability to maintain stream continuity in the face of packet loss makes it a compelling choice for modern streaming applications. Understanding these nuances will be essential for deploying resilient streaming solutions, ensuring that engineers and developers can make informed decisions tailored to their specific network environments and application requirements. 
+
+### Future Considerations: Beyond the Experiment
+
+As streaming technology evolves, further research could explore hybrid approaches that leverage both protocols, optimizing for specific network conditions while maintaining high-quality streaming experiences. Additionally, exploring the integration of SRT with existing RTMP infrastructures could provide a pathway to enhance resilience without sacrificing compatibility with established platforms.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/masonwritescode/prove-srt-survives-packet-loss-and-rtmp-doesnt-mediamtx-ffmpeg-and-tc-netem-on-one-laptop-5a87)
+
+---
+
+<SocialShare title="Understanding SRT vs RTMP: A Practical Experiment on Packet Loss Resilience" slug="understanding-srt-vs-rtmp-a-practical-experiment-on-packet-loss-resilience" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
