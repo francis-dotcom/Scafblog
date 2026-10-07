@@ -1,0 +1,1033 @@
+---
+slug: architecting-predictable-local-llm-agents-for-developer-tools
+title: "Architecting Predictable Local LLM Agents for Developer Tools"
+authors: [francis]
+tags: [ai, llm, developer-tools, security]
+date: 2026-10-07T12:14:57.510Z
+description: "Originally published on tamiz.pro.
+Every developer tool powered by an LLM eventually hits the same wall: the model does something you didn't ask for. It rewrites a file it wasn't supposed to touch, calls an API that doesn't exist in your registry, or spawns a sub-agent that spirals into recursive self-modification. The gap between a chatbot that suggests code and an autonomous agent that executes it isn't a matter of model intelligence—it's a matter of architectural discipline.
+This article dissects the engineering patterns that keep local LLM agents bounded, predictable, and useful in real developer tooling. We'll move from model selection through orchestration, guardrail enforcement, tool-use protocols, and production deployment—treating the agent as a system component, not a black box.
+1. The Scope Creep Problem
+2. Model Selection: Why Local Models Change the Equation
+3. Architecture: The Bounded Agent Pattern
+4. Tool Registry and Capability Scoping
+5. Guardrail Enforcement Layers
+6. Structured Output and Schema Binding
+7. Execution Sandboxing
+8. Observability and Audit Trails
+9. Production Deployment Patterns
+10. Frequently Asked Questions
+Autonomous agents fail in three predictable modes:
+Tool hallucination — The model calls a tool by name that doesn't exist in your registry, often confabulating plausible-sounding names based on training data.
+Permission escalation — The agent uses a valid tool but with parameters that exceed its intended scope (e.g., reading /etc/shadow when it should only read project files).
+Action chaining — A single tool call leads to a cascade: read file → modify file → push to remote → create PR → merge. Each step is valid in isolation; the chain is not what was authorized.
+The root cause is architectural: most agent frameworks treat the LLM as the orchestrator with unrestricted access to a flat tool namespace. The model decides what to call, how to call it, and how many times to call it. There's no intermediate layer that says "not today."
+Running models locally (via Ollama, llama.cpp, or vLLM) changes the threat model and design constraints:
+
+
+
+Factor
+Cloud API
+Local Model
+
+
+
+
+Latency
+200–800ms per token
+50–200ms per token (GPU)
+
+
+Data residency
+Vendor-controlled
+Fully local
+
+
+Rate limiting
+External quota
+Your hardware ceiling
+
+
+Function calling
+Provider-native
+Requires structured output enforcement
+
+
+Context window
+128K–200K tokens
+8K–32K practical (depends on VRAM)
+
+
+Cost per call
+Per-token billing
+Fixed hardware amortization
+
+
+
+Local models introduce two engineering challenges:
+Structured output reliability — Without native function-calling support (like OpenAI's), you must enforce JSON schema adherence through constrained decoding, prompt engineering, or post-hoc validation with retry.
+Context budget management — With smaller effective windows, you can't dump entire codebases into context. You need retrieval augmentation that's agent-aware.
+# Tier 1: Code understanding, classification (7B class)
+# Qwen2.5-Coder 7B, DeepSeek-Coder 6.7B
+ollama pull qwen2.5-coder:7b
+
+# Tier 2: Agent orchestration, tool selection (14B class)
+# Qwen2.5-Coder 14B, CodeLlama 13B
+ollama pull qwen2.5-coder:14b
+
+# Tier 3: Complex reasoning, multi-step planning (32B+)
+# Qwen2.5-Coder 32B (requires 24GB+ VRAM)
+ollama pull qwen2.5-coder:32b
+
+The key insight: you don't need one model for everything. A 7B model can classify intent and select the right tool; a 14B model handles the actual generation. Routing between tiers based on task complexity is more efficient than running a large model for every step.
+The bounded agent pattern inserts a Policy Enforcement Point (PEP) between the LLM and the tool execution layer. The LLM proposes actions; the PEP evaluates them against a policy; only authorized actions reach the tool layer.
+┌─────────────────────────────────────────────────────────┐
+│                    Agent Runtime                         │
+│                                                         │
+│  ┌──────────┐    ┌──────────────┐    ┌──────────────┐  │
+│  │  Local   │───▶│  Policy      │───▶│  Tool        │  │
+│  │  LLM     │    │  Enforcement │    │  Execution   │  │
+│  │  (vLLM/  │    │  Point (PEP) │    │  Sandbox     │  │
+│  │  Ollama) │    │              │    │              │  │
+│  └──────────┘    └──────────────┘    └──────────────┘  │
+│        │                  │                    │        │
+│        │                  ▼                    ▼        │
+│        │         ┌──────────────┐    ┌──────────────┐  │
+│        │         │  Policy      │    │  Audit Log   │  │
+│        │         │  Engine      │    │  (append-only│  │
+│        │         │  (OPA/Rego)  │    │   stream)    │  │
+│        │         └──────────────┘    └──────────────┘  │
+│        │                                                 │
+│        ▼                                                 │
+│  ┌──────────────┐                                        │
+│  │  Schema      │                                        │
+│  │  Validator   │                                        │
+│  └──────────────┘                                        │
+└─────────────────────────────────────────────────────────┘
+
+The critical design decision: the LLM never has direct access to tools. It outputs a structured proposal, which is validated, authorized, and then executed by a separate runtime.
+A tool registry isn't just a function map. It's a capability declaration system that defines what each tool can do, what it requires, and what constraints apply.
+// tool-registry.ts
+import { z } from 'zod';
+
+interface ToolDefinition {
+  name: string;
+  description: string;
+  parameters: z.ZodSchema;
+
+  // Capability scoping
+  capabilities: {
+    filesystem: {
+      read: string[];    // Glob patterns this tool can read
+      write: string[];   // Glob patterns this tool can write
+    };
+    network: {
+      domains: string[]; // Allowed network destinations
+      methods: string[]; // HTTP methods permitted
+    };
+    process: {
+      exec: boolean;     // Can spawn subprocesses?
+      maxDuration: number; // Timeout in ms
+    };
+  };
+
+  // Execution constraints
+  constraints: {
+    maxCallsPerAgentRun: number;
+    requiresHumanApproval: boolean;
+    idempotent: boolean;
+  };
+}
+
+export const readFileTool: ToolDefinition = {
+  name: 'read_file',
+  description: 'Read a file from the project workspace',
+  parameters: z.object({
+    path: z.string().describe('Relative path within the project root'),
+    encoding: z.enum(['utf-8', 'base64']).optional(),
+  }),
+  capabilities: {
+    filesystem: {
+      read: ['**/*'],  // Can read anything in workspace
+      write: [],        // Cannot write
+    },
+    network: { domains: [], methods: [] },
+    process: { exec: false, maxDuration: 0 },
+  },
+  constraints: {
+    maxCallsPerAgentRun: 50,
+    requiresHumanApproval: false,
+    idempotent: true,
+  },
+};
+
+export const writeFileTool: ToolDefinition = {
+  name: 'write_file',
+  description: 'Write content to a file in the project workspace',
+  parameters: z.object({
+    path: z.string().describe('Relative path within the project root'),
+    content: z.string(),
+    mode: z.enum(['create', 'overwrite', 'append']).default('create'),
+  }),
+  capabilities: {
+    filesystem: {
+      read: [],
+      write: ['src/**/*', 'tests/**/*'],  // Limited write scope
+    },
+    network: { domains: [], methods: [] },
+    process: { exec: false, maxDuration: 0 },
+  },
+  constraints: {
+    maxCallsPerAgentRun: 20,
+    requiresHumanApproval: false,
+    idempotent: false,
+  },
+};
+
+export const gitPushTool: ToolDefinition = {
+  name: 'git_push',
+  description: 'Push commits to a remote repository',
+  parameters: z.object({
+    remote: z.string(),
+    branch: z.string(),
+    force: z.boolean().default(false),
+  }),
+  capabilities: {
+    filesystem: {
+      read: [],
+      write: ['.git/**/*'],
+    },
+    network: {
+      domains: ['github.com', 'gitlab.com'],
+      methods: ['GET', 'POST'],
+    },
+    process: {
+      exec: true,
+      maxDuration: 30000,
+    },
+  },
+  constraints: {
+    maxCallsPerAgentRun: 1,
+    requiresHumanApproval: true,  // Always requires explicit approval
+    idempotent: false,
+  },
+};
+
+Different agent roles get different tool subsets:
+// agent-profiles.ts
+
+export const CODE_REVIEWER: AgentProfile = {
+  name: 'code-reviewer',
+  model: 'qwen2.5-coder:14b',
+  tools: ['read_file', 'search_code', 'git_diff', 'lint_check'],
+  forbiddenTools: ['write_file', 'git_push', 'delete_file'],
+  maxSteps: 30,
+  maxWallClockSeconds: 120,
+};
+
+export const TEST_GENERATOR: AgentProfile = {
+  name: 'test-generator',
+  model: 'qwen2.5-coder:14b',
+  tools: ['read_file', 'search_code', 'write_file', 'run_tests'],
+  writeScope: ['tests/**/*.test.ts', 'tests/**/*.spec.ts'],
+  forbiddenTools: ['git_push', 'delete_file', 'npm_install'],
+  maxSteps: 40,
+  maxWallClockSeconds: 180,
+};
+
+export const BUILD_FIXER: AgentProfile = {
+  name: 'build-fixer',
+  model: 'qwen2.5-coder:32b',
+  tools: ['read_file', 'write_file', 'run_build', 'search_code'],
+  writeScope: ['src/**/*', 'package.json', 'tsconfig.json'],
+  forbiddenTools: ['git_push', 'delete_file'],
+  maxSteps: 25,
+  maxWallClockSeconds: 300,
+  escalation: { afterFailures: 3, action: 'human_approval' },
+};
+
+Guardrails operate at multiple layers. The model can be tricked by any single layer, but the composite system is robust.
+Before the user request reaches the LLM, filter for injection patterns:
+// input-filter.ts
+
+const INJECTION_PATTERNS = [
+  /ignore\s+(all\s+)?previous\s+instructions/i,
+  /you\s+are\s+now\s+(a\s+)?(different|new)\s+ai/i,
+  /disregard\s+(your\s+)?(constraints|rules|guardrails)/i,
+  /act\s+as\s+if\s+you\s+(have|had)\s+unlimited\s+access/i,
+  /system\s*prompt\s*[:=]/i,
+  /<\|system\|>/i,
+];
+
+function sanitizeInput(userInput: string): { clean: string; blocked: boolean; reason?: string } {
+  for (const pattern of INJECTION_PATTERNS) {
+    if (pattern.test(userInput)) {
+      return { clean: '', blocked: true, reason: `Pattern matched: ${pattern.source}` };
+    }
+  }
+  return { clean: userInput, blocked: false };
+}
+
+The LLM's output must conform to a strict schema. Invalid output is rejected, not interpreted:
+// output-validator.ts
+import { z } from 'zod';
+
+const AgentActionSchema = z.object({
+  thought: z.string().min(1).max(1000),
+  action: z.discriminatedUnion('tool', [
+    z.object({
+      tool: z.string(),
+      parameters: z.record(z.unknown()),
+    }),
+    z.object({
+      tool: z.literal('__done__'),
+      result: z.string().min(1).max(5000),
+    }),
+  ]),
+  confidence: z.number().min(0).max(1),
+});
+
+export function validateAgentOutput(raw: string, availableTools: string[]): AgentAction | ValidationError {
+  let parsed: unknown;
+  try {
+    // Strip markdown code fences if present
+    const jsonStr = raw.replace(/^```
+{% endraw %}
+(?:json)?\n?/m, '').replace(/\n?
+{% raw %}
+```$/m, '').trim();
+    parsed = JSON.parse(jsonStr);
+  } catch {
+    return { error: 'INVALID_JSON', raw: raw.slice(0, 200) };
+  }
+
+  const result = AgentActionSchema.safeParse(parsed);
+  if (!result.success) {
+    return { error: 'SCHEMA_VIOLATION', issues: result.error.issues.map(i => i.message) };
+  }
+
+  // Verify tool exists in registry
+  if (result.data.action.tool !== '__done__' && !availableTools.includes(result.data.action.tool)) {
+    return { error: 'UNKNOWN_TOOL', tool: result.data.action.tool };
+  }
+
+  // Validate parameters against tool schema
+  if (result.data.action.tool !== '__done__') {
+    const toolDef = toolRegistry.get(result.data.action.tool);
+    const paramResult = toolDef.parameters.safeParse(result.data.action.parameters);
+    if (!paramResult.success) {
+      return { error: 'INVALID_PARAMETERS', tool: result.data.action.tool, issues: paramResult.error.issues.map(i => i.message) };
+    }
+  }
+
+  return result.data;
+}
+
+For complex authorization logic, use Open Policy Agent with Rego:
+# agent-policy.rego
+package agent.policy
+
+default allow = false
+
+# Allow read_file if path is within workspace
+allow if {
+  input.action.tool == "read_file"
+  input.action.parameters.path != startswith("..")
+  not contains(input.action.parameters.path, "/etc/")
+  not contains(input.action.parameters.path, "/root/")
+  not contains(input.action.parameters.path, "/proc/")
+}
+
+# Allow write_file only to declared scopes
+allow if {
+  input.action.tool == "write_file"
+  input.agent_profile.write_scope != null
+  some scope in input.agent_profile.write_scope
+  input.action.parameters.path matches glob(scope)
+}
+
+# git_push always requires human approval
+allow if {
+  input.action.tool == "git_push"
+  input.context.human_approved == true
+}
+
+# Deny any action exceeding max calls
+allow if {
+  input.action.tool == input.context.tool_name
+  input.context.call_count < input.agent_profile.max_calls
+}
+
+# Deny if confidence is below threshold for destructive operations
+allow if {
+  input.action.tool in {"delete_file", "git_push", "run_migration"}
+  input.confidence >= 0.9
+  input.context.human_approved == true
+}
+
+Even after policy approval, the execution layer enforces constraints:
+// execution-sandbox.ts
+import { spawn } from 'child_process';
+import { realpath, stat } from 'fs/promises';
+import path from 'path';
+
+export class SandboxedExecutor {
+  constructor(private workspaceRoot: string, private toolDef: ToolDefinition) {}
+
+  async execute(action: AgentAction): Promise<ToolResult> {
+    const toolFn = this.getToolFunction(action.action.tool);
+    const validatedParams = action.action.parameters;
+
+    // Filesystem path validation
+    if (this.toolDef.capabilities.filesystem) {
+      const paths = this.extractPaths(validatedParams);
+      for (const p of paths) {
+        const resolved = await this.resolveAndValidatePath(p);
+        if (!resolved.valid) {
+          throw new ScopeViolationError(`Path escapes workspace: ${p}`);
+        }
+      }
+    }
+
+    // Network validation
+    if (this.toolDef.capabilities.network.domains.length > 0) {
+      const urls = this.extractURLs(validatedParams);
+      for (const url of urls) {
+        const parsed = new URL(url);
+        if (!this.toolDef.capabilities.network.domains.includes(parsed.hostname)) {
+          throw new ScopeViolationError(`Network access to ${parsed.hostname} not permitted`);
+        }
+      }
+    }
+
+    // Process execution with timeout
+    if (this.toolDef.capabilities.process.exec) {
+      return await this.executeWithTimeout(
+        toolFn,
+        validatedParams,
+        this.toolDef.capabilities.process.maxDuration
+      );
+    }
+
+    return toolFn(validatedParams);
+  }
+
+  private async resolveAndValidatePath(inputPath: string): Promise<{ valid: boolean; resolved?: string }> {
+    const resolved = path.resolve(this.workspaceRoot, inputPath);
+    const realPath = await realpath(resolved).catch(() => null);
+
+    if (!realPath || !realPath.startsWith(this.workspaceRoot)) {
+      return { valid: false };
+    }
+    return { valid: true, resolved: realPath };
+  }
+
+  private async executeWithTimeout(fn: Function, params: unknown, timeoutMs: number): Promise<ToolResult> {
+    return Promise.race([
+      fn(params),
+      new Promise<never>((_, reject) => 
+        setTimeout(() => reject(new TimeoutError(`Execution exceeded ${timeoutMs}ms`)), timeoutMs)
+      ),
+    ]);
+  }
+}
+
+Local models without native function calling need explicit schema binding. The most reliable approach combines constrained decoding with validation:
+// constrained-decoding.ts
+
+// Using vLLM's guided decoding for strict JSON output
+import { OpenAI } from 'openai';
+
+const vllmClient = new OpenAI({
+  baseURL: 'http://localhost:8000/v1',
+  apiKey: 'not-needed',
+});
+
+export async function generateBoundedAction(
+  context: string,
+  toolSchema: Record<string, unknown>
+): Promise<string> {
+  const response = await vllmClient.chat.completions.create({
+    model: 'qwen2.5-coder:14b',
+    messages: [
+      {
+        role: 'system',
+        content: `You are a bounded developer agent. You MUST respond with valid JSON only.
+Available tools: ${JSON.stringify(Object.keys(toolSchema))}
+
+Response format:
+{
+  "thought": "Your reasoning",
+  "action": { "tool": "tool_name", "parameters": { ... } },
+  "confidence": 0.0-1.0
+}
+
+If you're done, use: { "action": { "tool": "__done__", "result": "summary" } }`,
+      },
+      { role: 'user', content: context },
+    ],
+    temperature: 0.1,
+    max_tokens: 1024,
+    // vLLM guided decoding - enforces JSON schema at token level
+    guided_json: {
+      type: 'object',
+      properties: {
+        thought: { type: 'string' },
+        action: {
+          type: 'object',
+          properties: {
+            tool: { type: 'string', enum: [...Object.keys(toolSchema), '__done__'] },
+            parameters: { type: 'object' },
+          },
+          required: ['tool'],
+        },
+        confidence: { type: 'number', minimum: 0, maximum: 1 },
+      },
+      required: ['thought', 'action', 'confidence'],
+    },
+  });
+
+  return response.choices[0].message.content!;
+}
+
+For models that don't support guided decoding, use a retry loop with schema validation:
+// schema-retry.ts
+
+export async function generateWithRetry(
+  context: string,
+  schema: z.ZodSchema,
+  maxRetries = 3
+): Promise<z.infer<typeof schema>> {
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    const prompt = attempt === 0
+      ? buildSystemPrompt(schema)
+      : buildRetryPrompt(schema, lastError);
+
+    const raw = await generateLLMOutput(context, prompt);
+    const result = schema.safeParse(JSON.parse(stripCodeFences(raw)));
+
+    if (result.success) return result.data;
+    lastError = result.error;
+  }
+
+  throw new MaxRetriesExceededError('LLM failed to produce valid output after retries', lastError);
+}
+
+For tools that execute code or modify the filesystem, sandboxing is non-negotiable. The approach depends on your deployment target:
+# Dockerfile.sandbox
+FROM node:20-alpine
+
+RUN addgroup -g 1001 -S nodejs && \
+    adduser -S nodeapp -u 1001 && \
+    mkdir -p /workspace && \
+    chown -R nodeapp:nodejs /workspace
+
+USER nodeapp
+WORKDIR /workspace
+
+# Seccomp profile for syscall restriction
+COPY seccomp-profile.json /etc/docker/seccomp/agent.json
+
+# No network access by default
+# (Use --network=none at container run time)
+
+ENTRYPOINT ["node", "/app/executor.js"]
+
+# Run sandbox with strict constraints
+# docker run --rm \
+#   --network=none \
+#   --read-only \
+#   --tmpfs /tmp:size=64m \
+#   --security-opt seccomp=/etc/docker/seccomp/agent.json \
+#   --cap-drop ALL \
+#   --memory=512m \
+#   --cpus=1.0 \
+#   --pids-limit=50 \
+#   -v "$(pwd)/workspace:/workspace:ro" \
+#   agent-sandbox:latest
+
+For lower-latency scenarios where full container isolation isn't needed:
+// worker-sandbox.ts
+// Runs in a Web Worker with restricted capabilities
+
+import { parentPort, workerData } from 'worker_threads';
+
+interface WorkerConfig {
+  workspaceRoot: string;
+  allowedPaths: string[];
+  maxMemoryBytes: number;
+  timeoutMs: number;
+}
+
+const config: WorkerConfig = workerData;
+
+// Override fetch to block all network
+(globalThis as any).fetch = () => Promise.reject(new Error('Network access blocked in sandbox'));
+
+// Override require/import to block module loading
+// (In a true worker context, this is naturally restricted)
+
+parentPort!.on('message', async (action: AgentAction) => {
+  const timeout = setTimeout(() => {
+    parentPort!.postMessage({ error: 'TIMEOUT', details: `Exceeded ${config.timeoutMs}ms` });
+    process.exit(1);
+  }, config.timeoutMs);
+
+  try {
+    const result = await executeTool(action, config);
+    clearTimeout(timeout);
+    parentPort!.postMessage({ result });
+  } catch (error) {
+    clearTimeout(timeout);
+    parentPort!.postMessage({ error: String(error) });
+  }
+});
+
+The most practical approach for dev tools: copy-on-write overlays that the agent can modify without affecting the real workspace:
+// overlay-workspace.ts
+
+export class OverlayWorkspace {
+  private overlayDir: string;
+
+  constructor(private baseWorkspace: string) {
+    this.overlayDir = `${baseWorkspace}/.agent-overlay`;
+  }
+
+  async initialize(): Promise<void> {
+    // Create overlay directory structure
+    await mkdir(this.overlayDir, { recursive: true });
+
+    // Write mount configuration
+    const mountConfig = {
+      base: this.baseWorkspace,
+      overlay: this.overlayDir,
+      merge: `${this.baseWorkspace}/.agent-merged`,
+    };
+    await writeFile(
+      `${this.baseWorkspace}/.agent-overlay/mount.json`,
+      JSON.stringify(mountConfig, null, 2)
+    );
+  }
+
+  async applyToReal(): Promise<AppliedChange[]> {
+    // Review and selectively apply changes from overlay to real workspace
+    const changes = await this.diff();
+    return changes;
+  }
+
+  async discard(): Promise<void> {
+    // Nuclear option: throw away all agent modifications
+    await rm(this.overlayDir, { recursive: true, force: true });
+  }
+}
+
+Every action an agent takes must be logged, attributable, and replayable. This is both a debugging requirement and a security requirement.
+// audit-trail.ts
+import { createHash } from 'crypto';
+import { appendFile } from 'fs/promises';
+
+interface AuditEntry {
+  timestamp: string;
+  agentId: string;
+  sessionId: string;
+  step: number;
+  action: AgentAction;
+  policyDecision: { allowed: boolean; reason: string; policyVersion: string };
+  executionResult: { success: boolean; duration: number; output?: unknown; error?: string };
+  modelMetadata: { model: string; temperature: number; tokensIn: number; tokensOut: number };
+}
+
+export class AuditTrail {
+  private logPath: string;
+  private prevHash: string = 'genesis';
+
+  constructor(logPath: string) {
+    this.logPath = logPath;
+  }
+
+  async record(entry: Omit<AuditEntry, 'timestamp' | 'prevHash'>): Promise<string> {
+    const fullEntry: AuditEntry = {
+      ...entry,
+      timestamp: new Date().toISOString(),
+    };
+
+    // Hash chain for tamper detection
+    const hash = createHash('sha256')
+      .update(this.prevHash)
+      .update(JSON.stringify(fullEntry))
+      .digest('hex');
+
+    const record = { ...fullEntry, prevHash: this.prevHash, hash };
+    this.prevHash = hash;
+
+    await appendFile(this.logPath, JSON.stringify(record) + '\n');
+    return hash;
+  }
+
+  async verify(): Promise<{ valid: boolean; brokenAt?: number }> {
+    const lines = (await readFile(this.logPath, 'utf-8')).trim().split('\n');
+    let prevHash = 'genesis';
+
+    for (let i = 0; i < lines.length; i++) {
+      const record = JSON.parse(lines[i]);
+      const { hash, prevHash: recordedPrev, ...entry } = record;
+
+      if (recordedPrev !== prevHash) return { valid: false, brokenAt: i };
+
+      const computedHash = createHash('sha256')
+        .update(prevHash)
+        .update(JSON.stringify(entry))
+        .digest('hex');
+
+      if (computedHash !== hash) return { valid: false, brokenAt: i };
+      prevHash = hash;
+    }
+
+    return { valid: true };
+  }
+}
+
+// otel-agent-instrumentation.ts
+import { NodeSDK } from '@opentelemetry/sdk-node';
+import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-http';
+
+const sdk = new NodeSDK({
+  traceExporter: new OTLPTraceExporter({
+    url: 'http://localhost:4318/v1/traces',
+  }),
+  instrumentationConfig: {
+    // Custom attributes for agent traces
+    attributes: {
+      'agent.version': process.env.AGENT_VERSION || '0.1.0',
+      'agent.profile': process.env.AGENT_PROFILE || 'default',
+    },
+  },
+});
+
+sdk.start();
+
+// Wrap each agent step in a span
+import { trace } from '@opentelemetry/api';
+
+export async function tracedAgentStep(step: number, action: AgentAction, fn: () => Promise<unknown>) {
+  const tracer = trace.getTracer('agent-runtime', '1.0.0');
+
+  return tracer.startActiveSpan(`agent.step.${step}`, async (span) => {
+    span.setAttribute('agent.step', step);
+    span.setAttribute('agent.tool', action.action.tool);
+    span.setAttribute('agent.confidence', action.confidence);
+
+    try {
+      const result = await fn();
+      span.setStatus({ code: SpanStatusCode.OK });
+      return result;
+    } catch (error) {
+      span.setStatus({ code: SpanStatusCode.ERROR, message: String(error) });
+      span.recordException(error as Error);
+      throw error;
+    }
+  });
+}
+
+Best for: VS Code, JetBrains, or Emacs plugins where privacy matters.
+┌─────────────────────────────────┐
+│         IDE Extension           │
+│  ┌───────────┐  ┌───────────┐  │
+│  │ UI Panel  │  │ Status Bar│  │
+│  └─────┬─────┘  └───────────┘  │
+│        │                        │
+│  ┌─────▼─────────────────────┐  │
+│  │    Agent Runtime (Node)   │  │
+│  │  - Tool Registry          │  │
+│  │  - Policy Engine          │  │
+│  │  - Sandbox Manager        │  │
+│  └───────────┬───────────────┘  │
+│              │                  │
+│  ┌───────────▼───────────────┐  │
+│  │   Ollama / vLLM (local)   │  │
+│  └───────────────────────────┘  │
+└─────────────────────────────────┘
+
+Best for: Teams where coordination matters but code stays local.
+// orchestration-bridge.ts
+
+// The local agent runs in the developer's environment
+// but receives task assignments from a remote orchestrator
+
+export class LocalAgentBridge {
+  private websocket: WebSocket;
+  private agent: BoundedAgent;
+
+  connect(orchestratorUrl: string, authToken: string) {
+    this.websocket = new WebSocket(
+      `${orchestratorUrl}/agent/connect?token=${authToken}`
+    );
+
+    this.websocket.onmessage = async (event) => {
+      const message = JSON.parse(event.data);
+
+      if (message.type === 'TASK_ASSIGNED') {
+        const task = message.payload;
+
+        // Validate task against local policy before execution
+        const policyCheck = await this.policyEngine.evaluate({
+          action: { tool: task.tool, parameters: task.parameters },
+          context: { agentProfile: task.profile, humanApproved: task.preApproved },
+        });
+
+        if (!policyCheck.allowed) {
+          this.websocket.send(JSON.stringify({
+            type: 'TASK_REJECTED',
+            taskId: task.id,
+            reason: policyCheck.reason,
+          }));
+          return;
+        }
+
+        // Execute locally, report back
+        const result = await this.agent.execute(task);
+        this.websocket.send(JSON.stringify({
+          type: 'TASK_RESULT',
+          taskId: task.id,
+          result: result.summary,
+          artifacts: result.artifacts, // File paths, not contents
+        }));
+      }
+    };
+  }
+}
+
+Best for: Automated code quality, test generation, and build fixing in pipelines.
+# .github/workflows/agent-review.yml
+name: Agent Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+jobs:
+  agent-review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      - name: Run bounded agent review
+        uses: your-org/agent-action@v1
+        with:
+          model: qwen2.5-coder:14b
+          profile: code-reviewer
+          max-steps: 25
+          output: review-comment
+          # Explicitly deny write operations
+          write-scope: ''
+          network-access: 'none'
+        env:
+          OPENAI_API_KEY: *** secrets.OPENAI_API_KEY }} # For remote model fallback
+
+      - name: Verify no unauthorized changes
+        run: |
+          if ! git diff --quiet; then
+            echo "ERROR: Agent modified files outside its scope"
+            git diff --name-only
+            exit 1
+          fi
+
+// model-router.ts
+
+export class ModelRouter {
+  private routes: RouteRule[] = [
+    {
+      pattern: /^(classify|detect|identify)/i,
+      model: 'qwen2.5-coder:7b',  // Cheap, fast classification
+      maxTokens: 256,
+    },
+    {
+      pattern: /^(generate|write|create|fix)/i,
+      model: 'qwen2.5-coder:14b',  // Balanced generation
+      maxTokens: 2048,
+    },
+    {
+      pattern: /^(architect|design|refactor|optimize)/i,
+      model: 'qwen2.5-coder:32b',  // Complex reasoning
+      maxTokens: 4096,
+    },
+  ];
+
+  route(taskDescription: string): RouteDecision {
+    for (const rule of this.routes) {
+      if (rule.pattern.test(taskDescription)) {
+        return { model: rule.model, maxTokens: rule.maxTokens, rule: rule.pattern.source };
+      }
+    }
+    // Default to middle tier
+    return { model: 'qwen2.5-coder:14b', maxTokens: 2048, rule: 'default' };
+  }
+}
+
+Use a two-pronged approach: (1) constrained decoding at the inference layer (vLLM's guided_json or Outlines library) to make invalid output structurally impossible, and (2) a retry loop with error feedback that tells the model what went wrong. Never accept free-text output as valid agent action—always validate against schema before execution.
+Start strict, loosen with evidence. Instrument every denial with the audit trail, review denials weekly, and add allow-rules only when you can demonstrate the denial was a false positive. The inverse—starting permissive and tightening after incidents—is reactive and dangerous. A practical threshold: tools that modify the filesystem or network require human approval; tools that only read or analyze are pre-approved within their scope.
+Use a router-plus-specialists pattern. A lightweight router model (7B) classifies the incoming request and dispatches to the appropriate specialist (14B or 32B). Each specialist has a narrow tool set and a tight policy. This is more predictable than a single general-purpose agent because failure modes are bounded by the specialist's capabilities, not the full tool registry.
+Three mechanisms in combination: (1) hard step limits per agent run (maxSteps), (2) wall-clock timeouts that kill the entire agent session, and (3) loop detection that hashes each action—if the same tool with the same parameters is proposed twice, the agent is stuck and should terminate. Log loop terminations for analysis.
+For more patterns on building production AI systems with rigorous engineering practices, see Tamiz's Insights and the broader collection at tamiz.pro...."
+image: /img/blog/generated/architecting-predictable-local-llm-agents-for-developer-tools-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Architecting Predictable Local LLM Agents for Developer Tools](/img/blog/generated/architecting-predictable-local-llm-agents-for-developer-tools-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### The Unique Challenges of Local LLM Integration
+
+Integrating Local Large Language Models (LLMs) into developer tools presents a distinct set of challenges compared to cloud-based solutions. Local models operate under constraints such as limited context windows and the absence of native function calling, which can lead to unpredictable behavior. This unpredictability becomes especially problematic in development environments where accuracy and security are paramount. Instances of LLMs autonomously modifying files or calling non-existent APIs can severely disrupt workflows, necessitating a robust architectural approach to mitigate these risks.
+
+### Scope Creep: A Critical Risk in AI Agent Deployment
+
+Scope creep is a prevalent issue in the deployment of AI agents, particularly when they are granted excessive autonomy. An LLM might generate code that modifies files outside its intended domain or even create sub-agents that self-modify. This behavior often arises from a lack of architectural discipline, where the model operates with unrestricted access to a flat tool namespace. By implementing structured architectures, developers can enforce boundaries that keep LLMs predictable and secure, thereby reducing the chances of unintended actions.
+
+### Advantages of Local Models Over Cloud Solutions
+
+Local models provide several advantages compared to their cloud counterparts. They typically offer faster inference times, with latencies ranging from 50 to 200 milliseconds per token, compared to 200 to 800 milliseconds for cloud APIs. Additionally, local deployment enhances data residency, ensuring sensitive information remains within the developer’s environment and reducing exposure to third-party vendors. However, these benefits come with the responsibility of effectively managing the model’s behavior to prevent scope creep and misuse.
+
+### Introducing the Bounded Agent Pattern
+
+The bounded agent pattern is a critical architectural strategy that introduces a Policy Enforcement Point (PEP) between the LLM and the tool execution layer. In this architecture, the LLM proposes actions, and the PEP evaluates these actions against a predefined policy. Only authorized actions reach the execution layer, effectively limiting the model's capabilities. This separation not only enhances security but also ensures that the model operates within defined boundaries, thus preventing scope creep and misuse. 
+
+```typescript
+// Example of a bounded agent architecture
+┌─────────────────────────────────────────────────────────┐
+│                    Agent Runtime                         │
+│                                                         │
+│  ┌──────────┐    ┌──────────────┐    ┌──────────────┐  │
+│  │  Local   │───▶│  Policy      │───▶│  Tool        │  │
+│  │  LLM     │    │  Enforcement │    │  Execution   │  │
+│  │  (vLLM/  │    │  Point (PEP) │    │  Sandbox     │  │
+│  │  Ollama) │    │              │    │              │  │
+│  └──────────┘    └──────────────┘    └──────────────┘  │
+└─────────────────────────────────────────────────────────┘
+```
+
+### Tool Registries: Defining Capabilities and Constraints
+
+A tool registry serves as a capability declaration system that defines the functionalities of each tool available to the LLM. This registry specifies what each tool can do, its required parameters, and any constraints that apply. For example, a tool designed to read files may have specific glob patterns that dictate which files it can access. By enforcing capability scoping, developers can ensure that the LLM only interacts with tools that align with its intended purpose, further reducing the risk of unintended actions.
+
+```typescript
+// Tool definition example
+interface ToolDefinition {
+  name: string;
+  description: string;
+  parameters: z.ZodSchema;
+  capabilities: {
+    filesystem: {
+      read: string[];
+      write: string[];
+    };
+    network: {
+      domains: string[];
+      methods: string[];
+    };
+    process: {
+      exec: boolean;
+      maxDuration: number;
+    };
+  };
+}
+```
+
+### Multi-layered Security Approaches for Guardrails
+
+Implementing guardrails involves multiple layers of security that work in tandem to protect the development environment. The first layer focuses on input sanitization to filter out injection patterns that may manipulate the LLM into executing unauthorized actions. The second layer emphasizes output validation, ensuring that the LLM’s responses conform to a strict schema. Finally, the execution layer enforces constraints, such as limiting filesystem access and network calls, to prevent unauthorized actions.
+
+```typescript
+// Input filter example
+const INJECTION_PATTERNS = [
+  /ignore\s+(all\s+)?previous\s+instructions/i,
+  /you\s+are\s+now\s+(a\s+)?(different|new)\s+ai/i,
+];
+
+function sanitizeInput(userInput: string): { clean: string; blocked: boolean; reason?: string } {
+  for (const pattern of INJECTION_PATTERNS) {
+    if (pattern.test(userInput)) {
+      return { clean: '', blocked: true, reason: `Pattern matched: ${pattern.source}` };
+    }
+  }
+  return { clean: userInput, blocked: false };
+}
+```
+
+### Execution Sandboxing: Essential for Development Safety
+
+Sandboxing is crucial when executing actions that modify the filesystem or interact with external services. By isolating the execution environment, developers can ensure that any actions taken by the LLM do not affect the broader system. This can be achieved through containerization technologies like Docker, which can restrict network access and limit resource usage. For instance, a Docker container can be configured with a seccomp profile to restrict system calls, ensuring that the agent operates within a safe environment.
+
+```dockerfile
+# Dockerfile for sandboxing
+FROM node:20-alpine
+
+RUN addgroup -g 1001 -S nodejs && \
+    adduser -S nodeapp -u 1001 && \
+    mkdir -p /workspace && \
+    chown -R nodeapp:nodejs /workspace
+
+USER nodeapp
+WORKDIR /workspace
+
+# Seccomp profile for syscall restriction
+COPY seccomp-profile.json /etc/docker/seccomp/agent.json
+
+ENTRYPOINT ["node", "/app/executor.js"]
+```
+
+### Learning from Case Studies of Autonomous Agent Failures
+
+Examining case studies of failed autonomous agents can provide valuable insights into potential pitfalls. For instance, an agent that modified critical configuration files without authorization led to significant downtime for a development team. This incident underscores the importance of implementing strict guardrails and ensuring that agents operate within their defined boundaries. By learning from these failures, developers can better design systems that prevent similar issues in their own environments.
+
+### Best Practices for Production Deployment of AI Agents
+
+Deploying AI agents in production requires adherence to best practices that prioritize security and reliability. This includes establishing clear policies for tool usage, implementing robust logging mechanisms, and conducting regular audits of agent actions. Additionally, developers should adopt a principle of least privilege, ensuring that agents only have access to the tools and data necessary for their tasks. By following these guidelines, organizations can leverage the power of local LLMs while minimizing associated risks.
+
+### Conclusion: The Future of Local LLM Agents in Developer Tools
+
+The future of local LLM agents in developer tools hinges on the implementation of structured architectures and rigorous guardrails. By adopting the bounded agent pattern, establishing comprehensive tool registries, and enforcing multi-layered security approaches, developers can harness the capabilities of local models while maintaining control over their behavior. As the landscape of AI-driven development tools continues to evolve, the principles of architectural discipline and security will remain paramount in ensuring successful deployments.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/tamizuddin/from-local-llm-to-autonomous-agent-building-ai-driven-dev-tools-that-actually-stay-in-their-lane-3bmk)
+
+---
+
+<SocialShare title="Architecting Predictable Local LLM Agents for Developer Tools" slug="architecting-predictable-local-llm-agents-for-developer-tools" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
