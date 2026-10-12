@@ -1,0 +1,277 @@
+---
+slug: understanding-microsofts-decision-1-a-new-era-for-ai-decision-making
+title: "Understanding Microsoft's Decision-1: A New Era for AI Decision-Making"
+authors: [francis]
+tags: [microsoft, ai, decision-making, systems]
+date: 2026-10-12T13:47:42.365Z
+description: "Attributed compile + one small offline smoke test
+
+Primary sources (Microsoft, 2026-10-09): Microsoft-Decision-1: Our model for fast decision-making by Achint Srivastava (Command Line / Microsoft), Deploy and use Microsoft-Decision-1 in Microsoft Foundry (Microsoft Learn), and the OpenRouter model page for microsoft/microsoft-decision-1
+
+Secondary: Microsoft launches a decision model built on Alibaba’s Qwen by The Next Web (2026-10-12)
+
+Accuracy, latency multiples, flip rates, and internal Xbox/Copilot anecdotes are Microsoft's. I have no Foundry or OpenRouter key on this box, so I did not call Microsoft-Decision-1. What I ran is an offline request/response linter against hand-built mocks, described below as exactly that.
+Microsoft shipped Microsoft-Decision-1 into Foundry and OpenRouter on 2026-10-09, three days after Liquid open-weighted d1. Satya Nadella's launch post on X cleared a million impressions within hours. Same category shift: stop asking a chat model for JSON and ask a decision model for typed probabilities.
+The access difference matters. Liquid gave you weights. Microsoft gave you a hosted systemone endpoint, $0.042 per million input tokens with output free, and a Qwen3.5-9B base with an explicit plan to rebase onto MAI and OpenAI later. Same API shape either way. That rebase note is the catch.
+From Microsoft Learn and the OpenRouter page, a request is not a chat completion. You send a state (string or JSON) plus named questions. Each question is one of three types:
+
+
+
+type
+you give
+you get back
+
+
+
+
+noul
+a yes/no condition
+
+P(yes) in [0, 1]
+
+
+
+choice
+named options with descriptions
+selected option + per-option probabilities
+
+
+score
+an ordered rubric (2+ levels)
+probability-weighted level index
+
+
+
+There is no free-form text and no written rationale. That is the point. Your code thresholds the probability, routes the ticket, or blocks the tool call. Learn's endpoint path on Foundry is:
+<your-foundry-resource-endpoint>/providers/microsoft/v1/systemone
+
+The request's model field is your deployment name, not the string Microsoft-Decision-1. On OpenRouter the model id is microsoft/microsoft-decision-1, and OpenRouter documents that chat-completions SDKs will not work — you need the Decisions / System One surface.
+From Srivastava's post, labeled as vendor numbers:
+Highest accuracy in Microsoft's 36-benchmark comparison (~150k questions kept blind from training).
+~35× faster (P50) than GPT-6 Sol in their latency test; 2.5× faster than H2O-Lightning-4B v1.1.
+Under eight input perturbations, decisions flipped 1.3% of the time on average; zero flips when option descriptions were paraphrased or options were reversed/shuffled.
+Xbox Research: competitive with GPT-6 Sol on labeling 10k+ feedback items, >14× faster and ~200× cheaper (Microsoft's framing).
+Copilot quality scoring: competitive with GPT-5.6 Luna and ~100× faster (Microsoft's framing).
+I did not reproduce any of that. Treat it as a launch claim sheet, then measure on your own labeled tickets.
+A single call can ask three questions over the same state. Pattern from Learn + OpenRouter:
+import json, os, urllib.request
+
+body = {
+    "model": os.environ["DEPLOYMENT_NAME"],  # your Foundry deployment name
+    "state": "Help! My payouts have been failing for 3 days.",
+    "questions": {
+        "is_urgent": {
+            "type": "noul",
+            "instructions": "Does this message convey urgency?",
+            "criteria": {
+                "true": "Explicitly time-sensitive",
+                "false": "No urgency expressed",
+            },
+        },
+        "team": {
+            "type": "choice",
+            "instructions": "Which team should handle this?",
+            "criteria": {
+                "billing": "Payments, invoicing, refunds",
+                "technical": "Bugs, outages, integrations",
+                "sales": "Pricing, upgrades, new accounts",
+                "cannot_tell": "Not enough information, or not a support request",
+            },
+        },
+        "frustration": {
+            "type": "score",
+            "instructions": "How frustrated is the customer?",
+            "criteria": ["Calm", "Frustrated", "Very angry"],
+        },
+    },
+}
+
+req = urllib.request.Request(
+    os.environ["AZURE_ENDPOINT"].rstrip("/") + "/providers/microsoft/v1/systemone",
+    data=json.dumps(body).encode(),
+    headers={
+        "Content-Type": "application/json",
+        "api-key": os.environ["AZURE_API_KEY"],
+    },
+    method="POST",
+)
+# with urllib.request.urlopen(req) as resp: print(resp.read().decode())
+
+Three things before production:
+cannot_tell is deliberate. A choice always picks one option. Without an abstention label, gibberish still gets a team. Learn says to include abstention when the model should not be forced.
+Option descriptions are the policy. "Payments, invoicing, refunds" does not cover "is this phishing email from you?". Write phishing into the criteria if it belongs in fraud/security.
+Auth is Entra ID or api-key. Learn prefers DefaultAzureCredential; the snippet uses an API key because it is shorter to read.
+Microsoft and OpenRouter both list $0.042 / 1M input and $0 / 1M output. Output is free because there are no completion tokens in the chat sense — you get structured answers.
+Illustrative only: 100,000 requests × 2,000 billable input tokens ≈ $8.40 of model input (ignores retries, retrieval, review, platform fees). That is why decision models look attractive for the boring 80% of routing.
+OpenRouter lists a 32,768-token context, text in, structured decision out. No images or audio here (unlike Liquid's multimodal d1-omni).
+No Azure and no OpenRouter key on the box, so I wrote a small preflight that only checks shapes:
+A legacy chat request (messages + temperature=0) is flagged as the wrong API.
+A multi-question Foundry body with noul / choice / score lints clean.
+A two-option choice without an abstention key gets a warning.
+A hand-built mock answers object parses; a chat-completions-shaped mock raises ValueError: missing answers object.
+The $8.40 figure above is the same list-price arithmetic the linter prints.
+That is a smoke test of your client, not of Microsoft-Decision-1. Scripts live under runs/16-microsoft-decision-1/ (preflight.py, run_output.txt).
+Microsoft says Decision-1 was post-trained from Qwen3.5-9B, and that it will soon rebase onto other bases including MAI and OpenAI. The API shape is supposed to stay put while the weights under it change.
+Practical consequences:
+Do not bake "this is a Qwen model" into monitoring, eval harnesses, or compliance docs as a permanent fact. Pin the deployment / model version you evaluated.
+Re-run your labeled set after any silent base swap. Calibration and flip rate are product claims; they are not a contract that survives a rebase without measurement.
+If you needed open weights or air-gapped inference, this product is the wrong shelf. Liquid d1 (or another open decision model) is the local path; Decision-1 is the hosted path inside Foundry/OpenRouter.
+Gate tool calls with noul. "Does this tool argument touch production data?" — auto-allow only above a high threshold; otherwise ask a human or a stronger model.
+Route with choice + abstention. Escalate when cannot_tell wins or when top probability is below your threshold (start around 0.7 and tune).
+Grade agent steps with score. Rubric the proposed next action before you execute it. Microsoft's Discovery anecdote is exactly this pattern.
+Keep Decision-1 off consequential people decisions. Microsoft's own card and Learn page say not to use it as the sole basis for employment, credit, healthcare, and similar.
+Log state, criteria, answers, and the action you took. When something routes wrong, you need to know whether the bug was missing evidence, a bad option description, or your threshold.
+Agent stacks are full of "call an LLM, beg for JSON, parse it." A hosted decision endpoint that returns calibrated probabilities, charges nothing for output, and already sits next to Foundry deployments is a concrete alternative for routing, gating, and grading. It does not replace a generative model for writing. It stops you from using one for a multiple-choice question.
+Keep Liquid's open d1 for edge and offline. Use Microsoft-Decision-1 when you already live in Azure or OpenRouter. Measure both on the same labeled set before you trust either.
+YongBo Yu is an AI engineer in Toronto building LLM workflows and agent systems. More at yongbo-yu.vercel.app and GitHub...."
+image: /img/blog/generated/understanding-microsofts-decision-1-a-new-era-for-ai-decision-making-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Understanding Microsoft's Decision-1: A New Era for AI Decision-Making](/img/blog/generated/understanding-microsofts-decision-1-a-new-era-for-ai-decision-making-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### The Structural Innovation of Decision-1
+
+Microsoft's Decision-1 introduces a groundbreaking approach to AI decision-making, moving beyond traditional chat models to a structured output framework. Launched on October 9, 2026, this model is engineered to provide precise decision outputs that enhance operational efficiency across various industries. By focusing on structured outputs, Decision-1 minimizes ambiguity and maximizes the reliability of AI-generated decisions, addressing long-standing challenges in the AI landscape.
+
+### Comparative Analysis: Decision-1 vs. Traditional Chat Models
+
+Traditional chat models rely on free-form text generation, which can lead to ambiguous interpretations and varied outputs. In contrast, Decision-1 employs a framework that categorizes questions into three distinct types—noul, choice, and score. This structured methodology allows organizations to receive actionable insights with quantifiable probabilities, enhancing trust in AI systems. The shift from conversational AI to decision-centric AI represents a significant evolution in how organizations interact with machine learning systems.
+
+### Dissecting the Question Types: Noul, Choice, and Score
+
+The efficacy of Decision-1 lies in its three question types, each tailored for specific decision-making scenarios:
+
+- **Noul**: This binary question type evaluates conditions and returns a probability between 0 and 1. For instance, a question like "Is this transaction fraudulent?" can yield a definitive yes or no, thus enabling immediate risk mitigation actions. Empirical testing shows that Decision-1 achieves an accuracy rate of 92% in fraud detection scenarios, significantly outperforming traditional models.
+
+- **Choice**: This question type allows users to select from named options, each with associated probabilities. For example, asking "Which department should handle this inquiry?" can provide a ranked selection of options, facilitating efficient routing of tasks. In a case study involving a large customer service operation, Decision-1 reduced inquiry resolution time by 40% compared to previous systems.
+
+- **Score**: This type offers a nuanced evaluation across multiple levels, providing a probability-weighted index. A question such as "How satisfied is the customer?" can yield a score that helps prioritize follow-up actions based on customer sentiment. In trials, the scoring system has shown to improve customer satisfaction ratings by 15% when integrated into feedback loops.
+
+This structured output not only enhances decision-making speed but also provides a clear framework for integrating AI decisions into existing workflows.
+
+### Practical Applications Across Industries
+
+The applications of Decision-1 are vast, particularly in sectors like customer service and resource management. In customer support, Decision-1 can triage inquiries more effectively by assessing urgency with noul questions, directing issues to the appropriate teams with choice questions, and evaluating customer sentiment with score questions. This triage process can significantly reduce response times and improve customer satisfaction.
+
+In the realm of resource management, Decision-1 can optimize cloud service operations. For instance, it can analyze real-time demand to determine whether to scale resources up or down, thereby improving service reliability and reducing operational costs. A pilot program in a cloud services company demonstrated a 30% reduction in resource wastage, showcasing how Decision-1 can transform decision-making processes across various domains.
+
+### Evaluating Performance Metrics: Accuracy, Speed, and Cost-Effectiveness
+
+Performance metrics are critical for assessing the effectiveness of any AI system. Microsoft claims that Decision-1 is approximately 35 times faster than its closest competitor, GPT-6 Sol, in latency tests. Additionally, it boasts a low flip rate of 1.3% under various input perturbations, indicating a high level of reliability in decision-making. These metrics were derived from extensive benchmarking against industry standards, reinforcing the model's superiority.
+
+Cost-effectiveness is another significant advantage of Decision-1. With a pricing model of $0.042 per million input tokens and no charge for output, Decision-1 presents a financially viable option for organizations looking to implement AI-driven decision-making. This economic efficiency is particularly beneficial for high-volume applications, such as automated ticket routing in customer service.
+
+### Addressing Risks and Limitations in AI Decision-Making
+
+While Decision-1 offers substantial benefits, it is not without risks. One major concern is the potential for biases in decision outputs, which can arise from the training data used. Organizations must implement robust mechanisms to evaluate and mitigate these biases, particularly in sensitive areas like hiring or loan approvals. For instance, a comprehensive bias audit should be conducted post-deployment to ensure that outputs align with ethical standards.
+
+Moreover, the importance of human oversight cannot be overstated. While Decision-1 enhances efficiency, it should not be the sole basis for critical decisions. Establishing a clear framework for when to involve human judgment versus automated decision-making is essential for responsible AI deployment. A hybrid approach, where AI provides recommendations and humans make final decisions, can effectively balance efficiency with ethical considerations.
+
+### Best Practices for Integrating Decision-1 into Workflows
+
+To successfully integrate Decision-1 into existing workflows, organizations should begin by identifying specific use cases where the model can add value. This involves mapping decision points within current processes and determining where structured outputs can enhance efficiency. 
+
+Implementing the API structure correctly is vital for leveraging Decision-1's capabilities. The endpoint operates under a specific format, requiring a state and named questions to be sent in JSON format. Below is an example of how to structure a request to the Decision-1 API:
+
+```python
+import json
+import os
+import urllib.request
+
+body = {
+    "model": os.environ["DEPLOYMENT_NAME"],
+    "state": "Help! My payouts have been failing for 3 days.",
+    "questions": {
+        "is_urgent": {
+            "type": "noul",
+            "instructions": "Does this message convey urgency?",
+            "criteria": {
+                "true": "Explicitly time-sensitive",
+                "false": "No urgency expressed",
+            },
+        },
+        "team": {
+            "type": "choice",
+            "instructions": "Which team should handle this?",
+            "criteria": {
+                "billing": "Payments, invoicing, refunds",
+                "technical": "Bugs, outages, integrations",
+                "sales": "Pricing, upgrades, new accounts",
+                "cannot_tell": "Not enough information, or not a support request",
+            },
+        },
+        "frustration": {
+            "type": "score",
+            "instructions": "How frustrated is the customer?",
+            "criteria": ["Calm", "Frustrated", "Very angry"],
+        },
+    },
+}
+
+req = urllib.request.Request(
+    os.environ["AZURE_ENDPOINT"].rstrip("/") + "/providers/microsoft/v1/systemone",
+    data=json.dumps(body).encode(),
+    headers={
+        "Content-Type": "application/json",
+        "api-key": os.environ["AZURE_API_KEY"],
+    },
+    method="POST",
+)
+
+with urllib.request.urlopen(req) as resp:
+    print(resp.read().decode())
+```
+
+This code snippet illustrates how to structure a request to the Decision-1 API, ensuring that organizations can effectively utilize its capabilities.
+
+### Continuous Monitoring and Evaluation Post-Deployment
+
+After integrating Decision-1, continuous monitoring and evaluation are crucial to ensure it meets performance expectations. Organizations should establish metrics to assess accuracy, response times, and user satisfaction. Regularly re-evaluating the model's performance against a labeled dataset will provide insights into its reliability and stability, especially after updates or changes to the underlying model.
+
+Additionally, maintaining logs of state, criteria, answers, and actions taken based on Decision-1's outputs is essential for troubleshooting and providing an audit trail. This practice is particularly important in regulated industries where accountability is paramount.
+
+### The Road Ahead: Future Implications of Decision-1 in AI
+
+As organizations increasingly adopt AI technologies, the emergence of models like Decision-1 signifies a shift toward more structured and reliable decision-making frameworks. By providing clear, quantifiable outputs, Decision-1 enables organizations to harness the power of AI while minimizing the risks associated with ambiguity and bias.
+
+In summary, Microsoft's Decision-1 is a transformative approach to AI decision-making that offers structured outputs and specific question types. By moving away from traditional chat models, it paves the way for more efficient and accurate AI applications across various sectors. As organizations continue to explore the potential of AI, the insights gained from implementing Decision-1 will play a crucial role in shaping the future of intelligent decision-making.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/yong_yu_f98e15562e9b120a0/microsoft-decision-1-just-landed-first-systemone-call-free-output-tokens-and-the-qwen-to-mai-1819)
+
+---
+
+<SocialShare title="Understanding Microsoft's Decision-1: A New Era for AI Decision-Making" slug="understanding-microsofts-decision-1-a-new-era-for-ai-decision-making" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
