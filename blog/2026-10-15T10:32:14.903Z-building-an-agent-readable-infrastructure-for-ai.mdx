@@ -1,0 +1,207 @@
+---
+slug: building-an-agent-readable-infrastructure-for-ai
+title: "Building an Agent-Readable Infrastructure for AI"
+authors: [francis]
+tags: [ai, infrastructure, capabilities, skills]
+date: 2026-10-15T10:32:14.903Z
+description: "Earlier this month I connected the reference server from my open-source demo repository to Mistral Vibe, an AI host I had never used it with. About five minutes later I asked it about our own office building and got its profile back, built from public government data, with the building on an interactive map. The map is an MCP App, and it behaved exactly as it does in Claude and ChatGPT. Nothing had been written for Mistral.
+Five minutes is a demo number, and that server is public, with none of our enterprise identity in front of it, so the test covered the protocol and the interface and not our permissions. What made it possible was the decision we had taken for our internal systems months earlier: put the domain capabilities outside the agent runtime.
+Many enterprise AI plans start with a platform decision. Which assistant, which agent framework, which vendor, and then which use cases to build on top. The plan is organised around the agent.
+I started from a different question: what would it take for any capable agent to understand and safely operate a growing part of this company? By agent I mean a general-purpose agent harness of the kind Claude, Codex and Mistral Vibe are: a model plus the runtime around it that plans, calls tools, asks for approval and keeps the conversation going. Answer that question, and the platform decision gets smaller. Those harnesses keep improving and changing hands; what they need from the company stays roughly the same. For a management team that changes what the AI budget buys: reusable capabilities, each with a named owner, which a change of AI platform does not require rebuilding.
+I call the destination the agent-readable company: one whose systems are exposed as capabilities that carry their meaning and their limits, whose ways of working are captured as procedures, and whose rhythm runs on schedules and events, so that a general agent can find, interpret and act across a growing part of it. "Readable" undersells it slightly, because acting is part of it. But reading correctly comes first, and most of the work is there.
+This post describes the architecture behind that, as it runs at Warmtebouw, a 350-person building services contractor. Some of it is in production and some of it is a thesis, and I will say which is which. The longer version, with each section labelled, is the capability architecture page in the demo repository.
+
+Systems of record stay the source of truth. Nothing is migrated into an AI platform, and no copy of the company is built for the model to search. An agent sees what a capability returns for the question at hand.
+Capabilities expose what a system can do: read this, calculate that, propose this change. Each one carries the meaning of its data along with it. In our case these are MCP servers, sixteen of them with 103 tools, built by a development team of five.
+Skills are written procedures. Find the active projects, pull the energy figures, apply these rules, never write without approval. A capability answers what can the company do? A skill answers how is this work done here?
+Activation decides when a skill runs: someone asks now, a schedule fires every morning, an event arrives.
+The AI host is a vendor's agent harness: Claude, Codex, Mistral Vibe or the next one. It is where the conversation happens, it does the reasoning, and it composes the layers below around a goal.
+The ownership column is the part that matters most, and for a capability it is split in two. The domain side answers for what the data means and which rules are valid, even when it did not write that down itself. Engineering owns the implementation, the security and the technical quality. In practice most of the meaning is discovered rather than dictated. For us, engineering is that team of five, and most of the domain knowledge comes out of a loop that studies the live data and how the tools get used (Introspective Context Engineering). A domain expert reviews it at the end, where one is available. Where none is, the meaning rests on what the data and its use showed, which is a weaker footing, and the capability should say so. Skills are owned by the people who do the work, because that is where knowledge of the procedure lives. The host is owned by a vendor, and is rented.
+Together the layers separate what a company knows about its own operation from the software and the models that use it. Usually that knowledge is spread across business applications, integration code and the heads of experienced people. In this architecture that knowledge stays out of the agent runtime. What the data means and where its limits are belongs with the capabilities, and how the work is done belongs with the people who do it. That separation is what lets a different AI host work over the same company without its knowledge being rebuilt.
+A capability is more than an endpoint with a model in front of it. A building register can return temperatuuroverschrijding: 3.59, an overheating indicator, and the value is perfectly reachable. Given only that, a model picks a unit itself, reads 3.59 as degrees and reports a low risk. The indicator has no unit, the threshold is 1.5, and the risk is significant (the live demo). The application that used to sit in front of that data said "significant". The agent sees a bare number, unless the capability tells it more.
+So a capability carries what a person would have needed explained: units and provenance, what a status does and does not mean, which values are measured and which are calculated, which conclusions the data does not support. I call that a rich domain. Domain-rich would sound like volume: more descriptions, more rules, more prose. The measurements point the other way. In the demo repository's evals, wrong metadata did more damage than missing metadata, and most of a long description never reached the model at all (The Missing Layer has the details).
+Where a result has to be exact, the capability computes it. Our technical calculations live in one library with one tested core, behind an API, a web interface and MCP tools; a result carries its units, assumptions, bounds, intermediate steps and sources. The model finds the right calculation and calls it. It does not own the formula. In the evals, computing a determinate figure on the server was the one approach that got both the value and its derivation right in every run (evidence, L1).
+A common architecture starts from use cases: a finance agent, a planning agent, an agent for each department, each with its own prompts, integrations and copy of the business rules. The argument against that is in Scale Capabilities Before You Scale Agents, so here only the consequence. You build the ERP capability, the BIM capability and the energy capability, and make each trustworthy on its own. You do not build ERP plus BIM, BIM plus energy and all three together as separate projects; people combine the capabilities when a question needs more than one.
+
+
+
+capabilities
+the question it opens
+
+
+
+
+BIM
+what is in this building?
+
+
+energy
+how is this building performing?
+
+
+BIM + energy
+which physical characteristics might explain that performance?
+
+
++ ERP (finance)
+what does that mean financially for this project?
+
+
++ ERP (service history)
+do the building, its energy use, its maintenance and its cost relate?
+
+
+
+Nothing in that table is merged into one data platform. What disappears is the boundary around what can be asked across the systems. Between mid-July and mid-October, our colleagues used the sixteen servers in 104 different combinations, counting each distinct set of servers one person used on the same working day. A day with several servers is not always one question (it can be separate tasks), so the number shows how far the capabilities travel rather than how often they answer something together. None of those combinations required a dedicated integration project.
+Reuse brings its own failure modes. Combining capabilities can compound their errors: two that are each slightly off can produce an answer that is confidently wrong in a way neither shows alone. Each capability has to be right on its own first, and that is still not enough. Two correct capabilities only combine correctly when they agree on what identifies a building, which period a figure covers and how a term is defined.
+Permissions are the other problem. Combining systems should not add up to more authority. A workflow that reads BIM, energy and ERP is reasonable; one that could also change all three, because each capability happened to allow a write, is a risk nobody signed off on. Neither the protocol nor the identity check prevents that, because the user may well be allowed each write separately. The principle is that composing capabilities must not automatically compose authority. Our current policy is a conservative version of it, enforced by which write tools get built at all: a workflow across systems gets read access to each of them and, at most, the one narrow write it was built for. Some processes will legitimately need controlled writes to more than one system. When they do, that should be an explicit decision with its own approval, rather than something the combination happened to allow. Choosing which tools to build is enough while write tools are few. Once several individually permitted writes exist, something has to enforce limits per workflow, and that is a requirement this architecture still has to meet.
+A skill packages how a task is done, in a form an agent executes: which capabilities to use, in which order, which rules apply, where a person has to decide. Written once, it is reusable by anyone with access to the capabilities underneath, without a new application for every repeated workflow.
+A weak skill is a tool sequence: call A, call B, answer. A good one works through the task the way a careful colleague would: establish where we are, resolve what is uncertain, gather evidence, decide, act, verify. At each step the author decides what the person needs to see or approve, and in which form (text, a question, a chart or table, an approval form, a refusal with the fix). Human involvement becomes a design decision per step, rather than a global setting for maximum autonomy or maximum control.
+Non-developers can write skills without getting any direct access to the systems underneath. A skill carries no permissions of its own. Run interactively, it acts with the authority of the person who starts it, and every capability checks that person's role against the identity provider the company already uses. A scheduled run has nobody at the keyboard, and runs under the account of the person who scheduled it. Permissions bound what a skill can reach; they do not make a badly designed skill give the right answer. And meaning stays in the capability. A skill that explains what a field means has taken over the capability's job, and will disagree with the next skill that explains it differently.
+Run a skill by hand and it is a reusable procedure. Attach a schedule and the same procedure becomes operations: some of our skills already run every morning without anyone asking. That much is in production.
+The thesis goes one step further. A procedure, plus capabilities, plus a trigger, plus a bounded objective is close to what organisations usually build as a specialised agent. In this architecture it emerges from the general-purpose harness instead of being built as a separate system, with its own runtime, prompts and integrations. If that holds, most specialised agents a company needs will never be designed as agents at all. They will be skills that someone attached a trigger to.
+When the procedure layer belongs to the business, the controls have to sit in the layer below, because a skill can be written by anyone and can be wrong.
+Authority lives on the server. Roles are checked per capability against the existing identity provider, and each tool call is logged against the identity it ran under. Determinate results are computed by code a specialist can check, as above.
+Writes are narrow, and a person approves the exact content. We are progressive about reading and conservative about writing. Our energy-graph comments show the pattern. The agent cannot write a comment there; it can only propose comments, which opens a review form in the conversation. The specialist edits, ticks and approves, and only the form commits, with a single-use approval. The model has no tool that writes.
+Meaning lives in one place. What the data means is written into the capability, in the same repository as the server code, and it changes in the same commit as the code that produces the data. Skills deliberately carry no domain knowledge of their own. So when a formula is revised or a status starts to mean something slightly different, the capability changes once and every skill that uses it picks up the change. The alternative is a dozen skills, each with its own explanation of the same field, drifting apart without a single error to warn anyone. Keeping meaning beside the code stops definitions from drifting, though it does not remove the need to test the procedures that depend on it when that meaning changes.
+Scheduled skills fit the same controls. They run inside the host under the account of the person who scheduled them, so the same role checks and the same per-call logging apply, and the host keeps the history of every run. That holds while the host does the scheduling. A self-built harness running unattended work under a service account would have to provide all of it itself.
+This architecture started with a decision about what could be undone. A subscription to an AI host can be cancelled next month. A capability layer that knows what the company's data means, who may see what and which writes are safe is an asset the company keeps whichever host wins. So the engineering went into the second, and the first was rented (Enterprise AI Without an Enterprise Budget has the cost side). That meant the capabilities could be built before anyone chose a long-term host.
+Renting also decides how the AI is paid for, and for a small company that may be the largest effect of all. A rented host is sold per seat: a known amount per person per month, which a finance department can budget a year ahead. An agent platform built in-house typically relies on metered inference, often through a model provider's API, so its cost depends on usage, model choice and workload rather than on the number of people. It grows with every run, and can only be estimated before the usage exists, then watched. A well-optimised agent may not burn many tokens per run, but a company running hundreds of them pays for every one, and nobody knows in January what December will cost. That matters more while the value side is still largely unknown and hard to measure.
+There is little evidence yet of what AI returns financially, and experimenting is easier when the bill is fixed in advance than when it grows with every success. Because the capabilities are plain MCP servers, this architecture works with either billing model: colleagues work through subscriptions today, and a self-built harness on API billing could use the same capabilities later. It can also move from one subscription to another.
+The size of the gap depends on use. A heavy user gets far more out of a subscription than its price, and I am an extreme case of that, but a typical office user uses far less and pays around €20 a month whatever the month looks like. None of this is a measured saving, and subscriptions come with usage limits of their own. For a large organisation, with thousands of seats, background workloads and governance requirements of its own, the sums may come out differently. For a company of 350 people, a cost that is known in advance is a real strategic advantage: the same frontier models a large enterprise uses, at a price per seat, without a platform to build and an open-ended bill to pay first.
+That decision gets tested every time a new host appears, and the Mistral connection at the top was one such test. Five minutes proves one connection, though, not interchangeability. Hosts differ in what they deliver: how much of a tool description reaches the model ranges from the first 2,048 characters to all of it, depending on the host (evidence). And a platform can support MCP while still assuming every capability lives inside an agent someone built in that platform, which is the agent-first model again. So each host gets tested before people rely on it.
+Renting the harness today does not rule out building one later. Long-running autonomous workloads, strict operational or regulatory requirements, or the economics of very large volumes could justify a company-owned runtime, and open-weight models are a separate decision that often gets bundled with it. If that happens, the new harness becomes one more consumer of the same capabilities.
+The architecture also moves work between people. A development team builds fewer applications for a single department and maintains more capabilities that many procedures depend on, so its backlog fills with missing capabilities and with keeping the existing ones correct. Domain specialists become authors of procedures, which is new work for them and needs time, examples and someone to review it. And the capability layer turns into shared infrastructure, with what infrastructure always needs: an owner per capability, a way to retire tools, monitoring, and continuity that does not depend on the people who built it. Keeping the meaning in the same repository as the code covers part of that last point. The rest is an engineering organisation that treats the capability layer as a product.
+
+
+
+claim
+status
+
+
+
+
+one general agent over many domain capabilities
+production
+
+
+skills written by the people who do the work, some on a schedule
+production
+
+
+domain meaning versioned with the capability code; skills carry none
+production
+
+
+agent proposes, a person approves, then the write (energy-graph comments)
+production
+
+
+colleagues on per-seat subscriptions, no per-token bill
+production
+
+
+scheduled skills run as the person who scheduled them, run history in the host
+production
+
+
+a new host without new integration work (Mistral Vibe, public server)
+tested once
+
+
+capability-first beats agent-first in general
+thesis
+
+
+skills plus triggers replace most specialised agents
+thesis
+
+
+
+This is one company with a knowable set of systems. Whether the same shape holds for a multinational with hundreds of systems and complex tenancy, I cannot say from here, and nothing above is an ROI figure.
+Our own route began with one recurring question, whether a project was making money, and one capability over the ERP that could answer it. Each capability after that gave colleagues more to work with, often in combinations nobody had planned. The procedures came later, once people had seen what the capabilities could do, and the triggers after that.
+At no point in that sequence does the company have to bet on which agent wins. That is the property I would design for first...."
+image: /img/blog/generated/building-an-agent-readable-infrastructure-for-ai-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Building an Agent-Readable Infrastructure for AI](/img/blog/generated/building-an-agent-readable-infrastructure-for-ai-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### The Paradigm Shift Towards Agent-Readability
+
+The advent of artificial intelligence (AI) has necessitated a rethinking of how organizations structure their operational systems. An agent-readable infrastructure emerges as a transformative framework that allows diverse AI agents—like GPT models, Codex, and Mistral Vibe—to interact with company systems without being tethered to specific platforms. This shift enables organizations to expose capabilities as discrete entities, each with defined meanings and operational limits, thereby enhancing flexibility and operational efficiency.
+
+### Capabilities and Skills: Defining the Building Blocks
+
+At the core of an agent-readable infrastructure are two critical concepts: capabilities and skills. Capabilities represent the functional abilities of a system, such as data retrieval, computation, or decision-making. Skills, on the other hand, are the procedural steps that define how these capabilities are executed. For instance, a capability may allow a system to access financial data, while a skill outlines the process for analyzing that data to generate a financial report. Understanding this distinction is crucial for designing systems that can effectively leverage AI.
+
+### The Role of Domain Knowledge in Capabilities
+
+Incorporating domain knowledge into capabilities is essential for ensuring accurate AI interpretations and actions. Domain knowledge encompasses the contextual understanding of data, including its origins, units of measurement, and relevant business rules. For example, if a capability retrieves temperature data from a building management system, it must also provide context about acceptable thresholds and implications of deviations. This rich domain context enables AI agents to make informed decisions, minimizing the risk of misinterpretation and errors.
+
+### Architectural Principles: Decoupling Domain Knowledge from Runtime
+
+A fundamental architectural principle in developing an agent-readable infrastructure is the separation of domain knowledge from the agent runtime. This design choice allows organizations to maintain their operational knowledge independently from the AI models that utilize it. By decoupling these layers, companies can switch between different AI platforms without needing to reconstruct their underlying knowledge systems. For instance, if an organization transitions from one AI vendor to another, the capabilities that define its operational knowledge remain intact, facilitating smoother integration and continuity.
+
+### Case Study: Warmtebouw's Implementation of Agent-Readable Infrastructure
+
+Warmtebouw, a building services contractor with a workforce of 350, provides a compelling case study for implementing an agent-readable infrastructure. The company has established a framework in which capabilities are clearly defined and owned by domain experts, while engineering teams manage the technical implementation. This division of ownership ensures accountability and preserves domain knowledge alongside capabilities. For example, Warmtebouw has deployed sixteen MCP servers, each equipped with distinct capabilities, enabling their AI agents to access and interpret data across various operational domains with minimal integration efforts.
+
+### Challenges in Combining Capabilities: A Concrete Example
+
+Despite the advantages of an agent-readable infrastructure, challenges arise when combining capabilities. One notable risk is the potential for compounded errors when capabilities provide slightly inaccurate data. For instance, if one capability reports energy consumption with a 5% error margin and another capability provides occupancy data with a 3% error margin, combining these two can yield a result that is confidently incorrect. Therefore, it is imperative to validate each capability independently before integrating them into workflows that require multiple capabilities to function cohesively.
+
+### Managing Permissions and Authority: Practical Scenarios
+
+Effective management of permissions and authority is another critical aspect of agent-readable infrastructure. As capabilities are combined, the risk of unauthorized access or unintended actions increases. For example, if a workflow allows reading from multiple capabilities, it should not automatically grant write permissions across all of them. Establishing strict boundaries around permissions is essential for maintaining security and operational integrity. Organizations should implement policies that ensure workflows involving multiple capabilities only grant the minimum necessary permissions, requiring explicit approval for any write actions that span across systems. This could involve role-based access control (RBAC) where permissions are assigned based on user roles, ensuring that only authorized personnel can execute sensitive actions.
+
+### Future Implications: Adapting to Evolving AI Technologies
+
+The architecture of an agent-readable infrastructure is inherently adaptable, allowing organizations to evolve alongside advancements in AI technologies. As new models and platforms emerge, companies can adjust their capabilities and skills to leverage these innovations without overhauling their entire infrastructure. This adaptability positions organizations to remain competitive in a rapidly changing technological landscape, enabling seamless integration of the latest AI advancements. For instance, as natural language processing (NLP) capabilities improve, organizations can incorporate these advancements into their existing frameworks, enhancing the interactions between AI agents and human users.
+
+### Strategic Advantages of Adopting an Agent-Readable Infrastructure
+
+Implementing an agent-readable infrastructure provides strategic advantages for organizations seeking to integrate AI into their operations. By decoupling domain knowledge from AI platforms, companies can achieve greater flexibility, reduce dependency on specific vendors, and enhance operational efficiency. This architecture not only streamlines AI integration but also fosters a collaborative environment where domain experts can contribute to the development of capabilities and skills without requiring deep technical expertise. The ability to adapt and scale capabilities as business needs evolve further solidifies the long-term viability of this approach.
+
+### Conclusion: The Path Forward for AI Integration
+
+In conclusion, building an agent-readable infrastructure represents a forward-thinking approach to AI integration. By emphasizing capabilities and skills, maintaining domain knowledge, and effectively managing permissions, organizations can create a robust framework that enhances operational efficiency. As AI technologies continue to evolve, the ability to adapt this infrastructure will be paramount for companies looking to leverage AI's full potential while maintaining control over their operational knowledge. Embracing this architecture not only prepares organizations for the future but also positions them to thrive in an increasingly AI-driven world. The strategic advantages offered by an agent-readable infrastructure will be crucial in navigating the complexities of AI integration, ultimately leading to improved decision-making and operational success.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/david_golverdingen_b133a5/toward-an-agent-readable-company-18cp)
+
+---
+
+<SocialShare title="Building an Agent-Readable Infrastructure for AI" slug="building-an-agent-readable-infrastructure-for-ai" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
