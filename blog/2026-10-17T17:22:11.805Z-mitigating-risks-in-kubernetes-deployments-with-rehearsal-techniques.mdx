@@ -1,0 +1,277 @@
+---
+slug: mitigating-risks-in-kubernetes-deployments-with-rehearsal-techniques
+title: "Mitigating Risks in Kubernetes Deployments with Rehearsal Techniques"
+authors: [francis]
+tags: [kubernetes, devops, api, rehearsal]
+date: 2026-10-17T17:22:11.806Z
+description: "A Helm upgrade scales two deployments in a payments namespace: one goes from 6 to 18 replicas, the other from 4 to 12. Review is easy. CI is green. The diff is tiny. Argo CD syncs it, and a few minutes later the new pods are stuck. The events say FailedCreatePodSandBox: failed to assign an IP address. The pod IP pool was nearly full, and nobody in the review thought about it, because nobody in the review looks at IP capacity when they read a replica count.
+That scenario is not hypothetical decoration. It is the main end-to-end fixture in my open-source project, Architecture Rehearsal, because it is the cleanest example of a failure class I care about: changes whose blast radius only shows up once production executes them. The review had opinions. Production had the actual dependency graph.
+I'm a DevOps platform engineer, and this post explains what the tool does, how it is built, what it has actually been tested against, and where it falls short.
+The core idea is simple. Before a change is applied, build a model of the relevant part of the system, apply the change to the model, and run a set of deterministic failure scenarios against it. Then let a policy decide whether the change is allowed to proceed.
+The part I spent the most time on is a rule from the project's first ADR:
+Missing data never becomes false approve.
+Most gates I have used are binary: pass or fail. The problem is what they do when they lack information. If the PDB inventory was never collected, a binary checker usually finds no PDB violations and passes. That is a false approve, and it is worse than having no gate, because now there is a green check to point at.
+So the gate has four outcomes, each with its own exit code:
+
+
+
+Decision
+Meaning
+Exit
+
+
+
+
+approve
+No matched high-risk patterns; required coverage present
+0
+
+
+warn
+Medium-risk findings
+1
+
+
+block
+High/critical findings with evidence
+3
+
+
+unknown
+Required data missing, not safe to approve
+4
+
+
+
+unknown is fail-closed by default. CI has to treat exit 4 as a failing gate, or someone has to explicitly write a policy that says otherwise. The intended consequence is that operators fix their collectors and RBAC instead of ignoring the gap.
+The pipeline, in the repo's own words, is:
+Collect â†’ Model â†’ Propose â†’ Rehearse â†’ Gate â†’ Observe â†’ Verify â†’ Calibrate
+
+rehearsal snapshot k8s turns a cluster dump (a kubectl List export, or live collection) into a baseline snapshot: workloads, services, PVCs, NetworkPolicies, PDBs and the edges between them. A change is compiled from rendered manifests (rehearsal change manifests), from Terraform plans, or from an Argo CD Application's desired state. The change is scoped: by default it cannot remove nodes, so a rendered chart for one namespace doesn't accidentally look like "delete everything else in GitOps".
+The scenarios are plain Go code, each with a name and a risk model. The current set includes cni-ip-capacity, pdb-disruption, rwo-node-loss, volume-az, service-routing and prom-zero-match. For the Argo CD path there are dedicated detectors for scheduling capacity (CPU/memory requests vs allocatable), PVC zone conflicts, NetworkPolicies that cut a dependency, PDB-vs-rollout conflicts, and blast radius. Each one returns PASS, WARN, BLOCK or UNKNOWN. When a scenario doesn't have the facts it needs, it emits an unknown finding instead of staying silent.
+There is no LLM in the risk path. The capability matrix lists that explicitly as not supported. The graph and the rules decide.
+Scenarios produce facts. A small policy engine turns them into a decision. This is the built-in default, written as the YAML policy document the engine accepts:
+apiVersion: rehearsal.io/v1beta1
+kind: RehearsalPolicy
+block:
+  - 'risk in ["critical","high"]'
+  - 'decision == "block"'
+  - 'rollback == "unavailable"'
+  - 'requiredMissing > 0'
+warn:
+  - 'risk == "medium"'
+  - 'decision == "warn"'
+unknownAsBlock: true
+
+Two details matter more than the syntax. First, if you omit unknownAsBlock, it defaults to true; setting it to false is allowed but logged as a warning. Second, an expression the engine can't parse doesn't get skipped. It is rejected when the policy loads, and if one somehow reaches evaluation it produces block. Both of these were bugs I fixed in the latest round of hardening. Before that fix, an omitted unknownAsBlock meant false, and an unrecognised expression simply never matched, so a typo could quietly weaken a policy.
+For teams that want this inside the cluster, there is an operator built on controller-runtime and a RehearsalRun CRD (rehearsal.io/v1beta1). The example in the repo looks like this:
+apiVersion: rehearsal.io/v1beta1
+kind: RehearsalRun
+metadata:
+  name: payments-rollout
+  namespace: default
+spec:
+  baselineRef: baselines/prod.json
+  changeRef: changes/payments-v2.json
+  # observedRef: observed/prod-after.json
+  async: true
+
+The status carries phase, decision, risk, controlPlaneRunId, jobId, evidenceDigest, a specDigest to detect drift, and standard conditions (Accepted, Running, Ready, Failed). Each spec generation gets its own run ID ({namespace}-{name}-{uid8}-g{generation}), so editing a run produces a new rehearsal instead of overwriting the old record.
+One design decision started as a real security bug: the CR can never carry the control plane URL or token. An earlier version had a controlPlaneURL field. That meant anyone allowed to create a RehearsalRun could point the operator's bearer token at a server they controlled. The field was removed in v1.5.1, and now the URL and token come only from the operator's Deployment and Secret.
+A gate that is never checked against reality slowly turns into folklore. After a deploy (or after a change was applied anyway), rehearsal verify compares the rehearsal report with an observed snapshot. It checks that the report is bound to the same baseline and change digests, that the change was actually applied, and that each predicted scenario is consistent with what was observed. Operator annotations such as "we saw failure X" count only as soft checks. The independent scenario check has to pass on its own, and pods stuck in Pending across the cluster don't count as confirmation. The outcome feeds a calibration step that tracks how accurate each scenario has been.
+Every analysis writes an evidence chain:
+baseline â†’ change â†’ proposed â†’ report â†’ observed â†’ verification
+
+Each link is a SHA-256 digest computed from the live objects. The report digest is always recomputed from the report body, so if someone edits decision or risk in a stored report and leaves the old digest field alone, verification fails. The chain can be wrapped in a DSSE-style envelope signed with HMAC or Ed25519. I want to be precise here: this is not full Sigstore, and the threat model says plainly that HMAC does not give you non-repudiation.
+The newest piece came from an obvious gap. A CI check only runs if the change goes through CI. A manual sync from the Argo CD UI, or a direct commit to the tracked branch, skips it.
+rehearsal argo-presync runs the same impact gate as an Argo CD PreSync Job (argocd.argoproj.io/hook: PreSync). The Job reads the desired manifests, takes a live snapshot, runs the detectors and prints a single JSON decision line. ALLOW and WARN exit 0, so the sync continues. BLOCK exits 3 and UNKNOWN exits 4, and Argo aborts the sync with the live objects untouched. Missing inputs, API errors and timeouts also fail closed.
+There is an audited escape hatch for incidents: annotate the Application with rehearsal.io/break-glass: "true" plus a non-empty rehearsal.io/break-glass-reason. The Job logs the override and includes it in the JSON line. Break-glass without a reason is itself treated as a failure.
+Everything below comes from the repo at commit 920ff4f, built locally (rehearsal 1.6.0; the PreSync gate shown later is part of v1.7.0). These are the commands from scripts/e2e_pipeline.sh (the same steps as make e2e), run against the payments fixture from the opening.
+git clone https://github.com/justrunme/architecture-rehearsal.git
+cd architecture-rehearsal
+go build -o bin/rehearsal ./cmd/rehearsal
+bash scripts/e2e_pipeline.sh
+
+Snapshot, scoped change, then analysis:
+==> 1/5 snapshot k8s (baseline from kubectl List dump)
+wrote snapshot out/e2e-pipeline/baseline.json phase=baseline source=kubernetes-manifests (22 nodes)
+==> 2/5 change manifests (scoped to payments; removals off)
+wrote change out/e2e-pipeline/change.json (removals=false scope_ns=[payments])
+  scope OK: 2 patch(es), 0 removals
+==> 3/5 analyze (expect exit 3 block)
+risk=critical decision=block findings=1 rollback=unknown digest=270e3b4f4ea2e25509461038cafe2e0fe804027a73abce74b77bc3fb6e55e5f9 evidence=out/e2e-pipeline/change-helm-scale-payments-e2e-20261017T133404Z
+  analyze blocked as expected
+
+The finding in latest-report.json explains the block with numbers instead of a vague severity label:
+"title": "Pod IP capacity exhaustion (CNI / VPC)",
+"summary": "Replica delta 20 + surge 6 = 26 IPs needed; available 10 (deficit 16). baseline=14 proposed=34",
+"cascade": [
+  "baseline_replicas=14",
+  "proposed_replicas=34",
+  "rollout_surge=6",
+  "requested_ips=26 available=10 deficit=16",
+  "IP exhaustion â†’ FailedCreatePodSandbox â†’ readiness timeout â†’ Helm pending-install"
+],
+"recommended_controls": [
+  "increase max-pods / prefix delegation",
+  "add nodes",
+  "reduce maxSurge"
+]
+
+The same report includes a coverage block (overall 0.45 on this fixture) and lists its gaps, for example no meta.metric_labels â€” prom scenarios limited. I want the tool to say what it didn't look at.
+The fixture also contains a post-deploy dump for the case where the change was applied anyway. Verification passes, with the independent scenario check succeeding apart from the operator annotation:
+"name": "scenario:cni-ip-capacity",
+"passed": true,
+"detail": "meta.cni_ip_available=0 (explicit CNI provider)"
+...
+"name": "rollout_status:workload/payments/payments-api",
+"detail": "rollout_not_converged (consistent with capacity/CNI prediction risk): readyReplicas=6 want=18",
+...
+  verify OK outcome=verified score=1 digest=72f7dbab61a69655
+  decision=block risk=critical failures=['cni-ip-capacity']
+e2e pipeline OK: dumpâ†’graphâ†’scoped changeâ†’blockâ†’verify
+
+Signing and verifying the chain:
+$ export REHEARSAL_HMAC_SECRET="$(openssl rand -hex 32)"
+$ ./bin/rehearsal evidence sign-dsse --chain out/e2e-pipeline/latest-chain.json --out out/e2e-pipeline/evidence-dsse.json
+wrote out/e2e-pipeline/evidence-dsse.json verified=true
+$ ./bin/rehearsal evidence verify-dsse --envelope out/e2e-pipeline/evidence-dsse.json
+signature OK keyId=hmac-env changeId=change-helm-scale-payments-e2e baseline=3035a1f23205 change=e73dd8fe9fa6
+
+The Argo CD fixtures (bash scripts/e2e_argo_impact.sh) show the four outcomes. This is the case I care about most, where the baseline never recorded PDB collection:
+==> unknown-pdb-inventory (expect 4)
+verdict=UNKNOWN decision=unknown findings=1 confidence=low ...
+unknown-pdb-inventory exit=4 expect=4
+
+The generated markdown report says why:
+| `pdb-rollout` | **UNKNOWN** | low | PDB inventory status unknown (baseline did not record PDB collection) |
+
+## Missing data
+
+Gate cannot safely PASS while these are missing:
+
+- `pdb-inventory`
+
+Four detectors passed. A binary gate would probably have approved this change. This one refuses.
+I keep a claim-by-claim EVIDENCE.md that links each claim to a CI run. In short: the policy gate, the evidence chain and DSSE path are covered by the test job. The operator installs via Helm on kind in operator-kind-e2e. The native Argo CD gate runs against real Argo CD Applications on kind in argo-kind-e2e, where a benign Synced app passes and a risky OutOfSync Deployment is blocked.
+The PreSync hook runs in argo-presync-kind-e2e with pinned Argo CD v2.14.9. On that fixture set (kind e2e plus an offline matrix), 5 of 5 risky changes were blocked and 0 of 3 safe changes were falsely blocked. The in-cluster hook added roughly 0.9 to 1.0 seconds per sync on a single-node kind cluster. Those are eight cases. That's a regression check. It tells you nothing about field accuracy, and I wouldn't quote it as an accuracy figure.
+The blast radius is simulated. It comes from a graph plus a change, not from fault injection against a live cluster. It complements chaos engineering and doesn't replace it.
+The model is only as good as the inventory. Fail-closed protects you from false approves caused by missing data. It can't protect you from data that is present but wrong. The repo explicitly does not claim zero false approves on incomplete real-world inventories.
+Live collection against arbitrary production clusters is still at the "reference / not yet" stage in the evidence table. CI uses fixtures and kind.
+Single-cluster. Everything tested is single-node kind. Multi-cluster federation of evidence stores is out of scope for now.
+The scenario catalogue is small. Six rehearsal scenarios and five Argo detectors cover failure classes I have seen often, not everything that can go wrong.
+The PreSync hook expects desired manifests in a ConfigMap, which adds wiring work. It shipped in the v1.7.0 release.
+No production SLOs yet. There are no published time-to-gate or false-approve-rate numbers beyond the fixture metrics above.
+Signing is DSSE-style with HMAC/Ed25519, not a full Sigstore/transparency-log setup.
+Next on my list: more evidence from live collection, more scenarios and detectors (especially around IAM and observability coverage, which score 0 on the main fixture), a less manual way to feed desired state into the PreSync hook, and turning calibration data into something a team can read as "this scenario has been right N out of M times on our clusters".
+The repo is Apache-2.0: github.com/justrunme/architecture-rehearsal. The fastest way in is:
+make demo && make e2e
+make e2e-argo
+
+There is also a longer write-up on the case study page.
+I'm especially interested in two kinds of feedback: failure classes from your own incidents that a graph-plus-scenario model should catch, and places where the gate says approve when you think it should have said unknown. Issues and PRs are welcome.
+Andrey Lesnikov is a Senior DevOps Platform Engineer based in Halle, Germany, and a 3rd place Company Award recipient at the Cloud Native Rockstar Awards 2026...."
+image: /img/blog/generated/mitigating-risks-in-kubernetes-deployments-with-rehearsal-techniques-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Mitigating Risks in Kubernetes Deployments with Rehearsal Techniques](/img/blog/generated/mitigating-risks-in-kubernetes-deployments-with-rehearsal-techniques-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### The Critical Role of Pre-Deployment Rehearsals
+
+In the realm of DevOps, pre-deployment rehearsals are a crucial practice that allows teams to simulate changes in a controlled environment before applying them to production systems. This proactive approach mitigates the risk of deployment failures, which can be catastrophic in complex environments like Kubernetes. Rehearsals enable teams to identify potential issues that may not surface during traditional code reviews or automated testing, thus enhancing the reliability of deployments.
+
+### Defining Blast Radius in Kubernetes Deployments
+
+The concept of blast radius is integral to understanding the potential impact of changes in Kubernetes. It refers to the scope of effect a change can have on the production system. For instance, a seemingly innocuous change, such as scaling a deployment, can lead to severe consequences if it inadvertently exhausts resources like IP addresses or CPU quotas. A practical example of this occurred when a Helm upgrade attempted to scale two deployments in a payments namespace, leading to a failure due to IP capacity exhaustion. 
+
+In addition to this example, consider a scenario where a configuration change to a service mesh inadvertently causes a network policy to block traffic between microservices. This could lead to service outages, illustrating the importance of rehearsals. Understanding the blast radius allows teams to prioritize rehearsals for high-risk changes, ensuring that they are thoroughly vetted before reaching production.
+
+### The Rehearsal Pipeline: A Structured Approach
+
+The rehearsal pipeline consists of several critical stages: Collect, Model, Propose, Rehearse, Gate, Observe, Verify, and Calibrate. Each stage serves a specific purpose in validating changes before they are applied. During the Collect phase, relevant system data is gathered to create a baseline snapshot of the Kubernetes environment. In the Model phase, this data is utilized to simulate the effects of proposed changes. By visualizing potential risks, teams can make informed decisions about whether to proceed with the deployment.
+
+For example, in the Propose stage, teams might use tools like Kustomize or Helm to define the desired state of the application. The Rehearse phase could involve deploying the changes to a staging environment that mirrors production, allowing for real-time observation of how the changes interact with existing resources.
+
+### Components of an Effective Rehearsal Tool
+
+An effective rehearsal tool is designed to automate the rehearsal process, facilitating data collection, modeling, and risk analysis. Core components include a snapshot mechanism that captures the current state of the Kubernetes cluster, a change proposal generator that scopes modifications, and a scenario testing engine that runs deterministic failure scenarios against the model. 
+
+For instance, tools like LitmusChaos can be integrated into the rehearsal pipeline to simulate various failure conditions such as node failures or network latency. This structured approach ensures that discrepancies between expected and actual outcomes are identified and addressed before changes are applied, thereby minimizing the risk of production failures.
+
+### Real-World Example: IP Capacity Exhaustion
+
+A notable case study involves a deployment failure that resulted from IP capacity exhaustion. In this scenario, a Helm upgrade attempted to scale two deployments significantly, increasing the first from 6 to 18 replicas and the second from 4 to 12. Although the changes passed code reviews and CI checks, the new pods became stuck due to the exhaustion of available IP addresses. This incident highlights the importance of rehearsals; had the team simulated the changes beforehand, they would have identified the limitations of the IP pool and avoided the deployment failure.
+
+Additionally, consider a different scenario where a configuration change to a database connection string led to a failure in service-to-database communication. If rehearsals had been conducted, the team could have tested the connection under load and identified potential bottlenecks or misconfigurations, preventing downtime during peak hours.
+
+### Best Practices for Implementing Rehearsal Strategies
+
+To effectively integrate rehearsal strategies into your CI/CD pipeline, consider the following best practices:
+
+1. **Automate Data Collection**: Ensure that your rehearsal tool can automatically gather necessary data from the Kubernetes cluster to create accurate baselines. This reduces the risk of human error and ensures comprehensive coverage.
+
+2. **Define Clear Scenarios**: Develop a comprehensive set of scenarios that reflect common failure modes in your environment. This should include checks for resource limits, network policies, and other critical dependencies that could impact deployment success.
+
+3. **Implement a Fail-Close Mechanism**: Design your gating strategies to default to a fail-closed state. If the rehearsal tool lacks sufficient data to make a confident decision, it should block the deployment rather than allow it to proceed, thereby preventing production failures.
+
+4. **Continuous Calibration**: Regularly review and calibrate your rehearsal scenarios based on real-world outcomes to improve their accuracy and relevance. This iterative process ensures that your rehearsals remain aligned with the evolving nature of your Kubernetes environment.
+
+5. **Incorporate Diverse Failure Scenarios**: Expand your scenario library to include a variety of potential failure modes, such as resource contention, service degradation, and configuration errors. This will help ensure that rehearsals are comprehensive and cover a wide range of possible issues.
+
+### Addressing Limitations of Rehearsal Techniques
+
+While rehearsal techniques offer significant benefits, it is crucial to acknowledge their limitations. One common pitfall is the overgeneralization of rehearsal benefits; teams may assume that rehearsals will catch all potential problems without tailoring scenarios to their specific environment. To mitigate this, it is essential to continually refine and expand the scenario library based on historical incidents and system changes.
+
+Another limitation is the risk of missing critical data during the rehearsal process. If essential information is not collected, the rehearsal tool may issue false approvals, leading to production failures. Implementing a fail-closed policy, as discussed earlier, can help prevent this issue by ensuring that deployments are blocked until all necessary data is available.
+
+### The Importance of Continuous Improvement
+
+Continuous improvement is a vital aspect of implementing rehearsal strategies. Teams should regularly assess the effectiveness of their rehearsal processes and make adjustments as needed. This can involve analyzing the outcomes of past deployments, identifying areas for improvement, and updating rehearsal scenarios to reflect new risks or changes in the environment. 
+
+By fostering a culture of continuous improvement, organizations can enhance their deployment reliability and reduce the likelihood of failures. For instance, conducting post-mortem analyses of failed deployments can provide valuable insights into how rehearsals can be improved.
+
+### Conclusion: The Future of Rehearsal Techniques in Kubernetes
+
+As Kubernetes continues to evolve, the importance of rehearsal techniques in deployment strategies will only grow. By adopting a rehearsal-first mindset, DevOps teams can significantly enhance the reliability of their deployments and reduce the risk of production failures. Looking ahead, the development of more sophisticated rehearsal tools that incorporate machine learning and AI could further improve the accuracy of risk assessments, enabling teams to navigate the complexities of modern cloud-native architectures with confidence.
+
+In summary, implementing a robust rehearsal strategy before applying changes in Kubernetes is essential for mitigating risks and ensuring successful deployments. By understanding the blast radius, leveraging a structured rehearsal pipeline, and continuously improving processes, organizations can significantly enhance their deployment reliability in the ever-evolving landscape of cloud-native technologies.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/andrey_lesnikov_03d1b72f9/rehearse-the-change-before-you-apply-it-fail-closed-blast-radius-for-kubernetes-and-argo-cd-3l6l)
+
+---
+
+<SocialShare title="Mitigating Risks in Kubernetes Deployments with Rehearsal Techniques" slug="mitigating-risks-in-kubernetes-deployments-with-rehearsal-techniques" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
