@@ -1,0 +1,569 @@
+---
+slug: enhancing-ai-decision-making-with-human-oversight-the-role-of-approval-gates
+title: "Enhancing AI Decision-Making with Human Oversight: The Role of Approval Gates"
+authors: [francis]
+tags: [ai, human oversight, approval gates, risk management]
+date: 2026-10-19T11:27:51.367Z
+description: "To add human approval gates to an AI agent, put a policy layer between the model's tool calls and the code that runs them. Give every tool a risk tier, and let tiers rise based on arguments. Low-risk calls run straight away. High-risk calls go into an approval queue and wait for a named person. Blocked actions never run. Any request that nobody answers before its deadline counts as denied. Log every decision as structured events. The model doesn't make any of these choices. Your code does.
+Below is a complete, tested implementation in about 200 lines of standard-library Python, with a scripted demo, an approver CLI, tests, and an adapter for a real LLM.
+Put it outside the model, at the single point where tool calls become side effects. Asking the model to "check with the user before refunding" is a prompt. Prompts can be skipped, misread or overridden by injected text. A gate in the executor can't be skipped.
+This is what the standards ask for. OWASP LLM06:2025 Excessive Agency lists "Require user approval" for high-impact actions and "complete mediation", meaning authorization enforced in downstream systems rather than left to the LLM. The MCP tools specification says there SHOULD always be a human in the loop who can deny tool invocations. For high-risk systems under the EU AI Act, Article 14 requires that people overseeing the system can decide not to use its output and can interrupt it.
+Use four tiers, and let arguments raise a tool's tier:
+
+
+
+Tier
+Meaning
+Behaviour
+Examples
+
+
+
+
+LOW
+Read-only or internal
+Runs automatically
+Look up an order; email a colleague
+
+
+MEDIUM
+Reversible writes
+Runs automatically, with a per-run budget
+Internal note; refund of $25 or less
+
+
+HIGH
+Money, external side effects, hard to undo
+Needs a human approval
+Refund over $25; email a customer
+
+
+BLOCKED
+Never from an agent
+Always refused
+Delete a customer
+
+
+
+Argument-dependent escalation matters most. "Refund" isn't a single risk level: $10 on a delivered order and $4,000 to an unknown account call for different handling. The MEDIUM budget handles the other common failure, where an agent stuck in a loop makes fifty small, individually harmless writes. Once the budget runs out, MEDIUM calls escalate to HIGH.
+Here is the whole library. The model interface is one method, next(messages, tools) -> Action, so you can swap in any LLM:
+"""gated_agent.py - a minimal tool-calling agent with risk tiers and human approval gates.
+Standard library only (Python 3.10+). Plug in any LLM by implementing Model.next()."""
+from __future__ import annotations
+
+import hashlib, json, logging, sqlite3, sys, time, uuid
+from contextlib import contextmanager
+from dataclasses import dataclass, field
+from enum import IntEnum
+from typing import Any, Callable, Protocol
+
+# ---------- structured logging: one JSON object per line ----------
+class JsonFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        data = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "level": record.levelname,
+                "event": record.getMessage(), **getattr(record, "fields", {})}
+        return json.dumps(data, default=str)
+
+log = logging.getLogger("agent")
+_handler = logging.StreamHandler(sys.stdout)
+_handler.setFormatter(JsonFormatter())
+log.addHandler(_handler)
+log.setLevel(logging.INFO)
+
+def emit(event: str, **fields: Any) -> None:
+    log.info(event, extra={"fields": fields})
+
+# ---------- tools and risk tiers ----------
+class Risk(IntEnum):
+    LOW = 0       # read-only, internal: run automatically
+    MEDIUM = 1    # reversible writes: run automatically, but logged and rate-limited
+    HIGH = 2      # external side effects or money: needs a human approval
+    BLOCKED = 3   # never allowed from an agent
+
+@dataclass
+class Tool:
+    name: str
+    description: str
+    params: dict[str, type]                       # minimal schema: name -> type
+    fn: Callable[..., Any]
+    base_risk: Risk
+    escalate: Callable[[dict], Risk] | None = None  # argument-dependent risk
+
+    def risk_for(self, args: dict) -> Risk:
+        return max(self.base_risk, self.escalate(args)) if self.escalate else self.base_risk
+
+    def validate(self, args: dict) -> None:
+        if set(args) != set(self.params):
+            raise ValueError(f"expected args {sorted(self.params)}, got {sorted(args)}")
+        for k, t in self.params.items():
+            v = args[k]
+            ok = isinstance(v, t) or (t is float and type(v) is int)   # models often send 49, not 49.0
+            if not ok or (isinstance(v, bool) and t is not bool):
+                raise ValueError(f"{k} must be {t.__name__}")
+
+# ---------- approval queue (SQLite, so approvers can be another process) ----------
+@dataclass
+class Decision:
+    status: str              # approved | denied | expired
+    approver: str | None = None
+    reason: str = ""
+
+class ApprovalQueue:
+    def __init__(self, path: str = "approvals.db"):
+        self.path = path
+        with self._db() as db:
+            db.execute("""CREATE TABLE IF NOT EXISTS approvals (
+                id TEXT PRIMARY KEY, run_id TEXT, requester TEXT, tool TEXT, args TEXT,
+                args_hash TEXT, risk TEXT, status TEXT, approver TEXT, reason TEXT,
+                created REAL, expires REAL, decided REAL)""")
+
+    @contextmanager
+    def _db(self):
+        db = sqlite3.connect(self.path, timeout=5, isolation_level=None)  # autocommit
+        try:
+            yield db
+        finally:
+            db.close()
+
+    @staticmethod
+    def fingerprint(tool: str, args: dict) -> str:
+        return hashlib.sha256(json.dumps([tool, args], sort_keys=True).encode()).hexdigest()
+
+    def submit(self, run_id: str, requester: str, tool: str, args: dict, risk: Risk, ttl_s: float) -> str:
+        req_id, now = uuid.uuid4().hex[:12], time.time()
+        with self._db() as db:
+            db.execute("INSERT INTO approvals VALUES (?,?,?,?,?,?,?,'pending',NULL,'',?,?,NULL)",
+                       (req_id, run_id, requester, tool, json.dumps(args, sort_keys=True),
+                        self.fingerprint(tool, args), risk.name, now, now + ttl_s))
+        return req_id
+
+    def decide(self, req_id: str, approver: str, approve: bool, reason: str = "") -> bool:
+        """Called by the human-facing side (CLI, Slack button, admin UI)."""
+        with self._db() as db:
+            row = db.execute("SELECT requester FROM approvals WHERE id=?", (req_id,)).fetchone()
+            if row is None or row[0] == approver:
+                return False                                   # no self-approval
+            cur = db.execute(
+                "UPDATE approvals SET status=?, approver=?, reason=?, decided=? "
+                "WHERE id=? AND status='pending' AND expires > ?",  # first decision wins; late ones fail
+                ("approved" if approve else "denied", approver, reason, time.time(), req_id, time.time()))
+            return cur.rowcount == 1
+
+    def wait(self, req_id: str, tool: str, args: dict, poll_s: float = 0.5) -> Decision:
+        while True:
+            with self._db() as db:
+                status, approver, reason, expires, args_hash = db.execute(
+                    "SELECT status, approver, reason, expires, args_hash FROM approvals WHERE id=?",
+                    (req_id,)).fetchone()
+                if status == "pending" and time.time() >= expires:
+                    # Expire atomically so a click landing at the same moment cannot also win.
+                    db.execute("UPDATE approvals SET status='expired', decided=? "
+                               "WHERE id=? AND status='pending'", (time.time(), req_id))
+                    continue
+            if status != "pending":
+                if status == "approved" and args_hash != self.fingerprint(tool, args):
+                    return Decision("denied", approver, "arguments changed after approval")
+                return Decision(status, approver, reason)
+            time.sleep(poll_s)
+
+    def pending(self) -> list[tuple]:
+        with self._db() as db:
+            return db.execute("SELECT id, requester, tool, args, risk, expires FROM approvals "
+                              "WHERE status='pending' AND expires > ?", (time.time(),)).fetchall()
+
+# ---------- the model interface ----------
+@dataclass
+class ToolCall:
+    name: str
+    args: dict
+    id: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
+
+@dataclass
+class Action:
+    tool_calls: list[ToolCall] = field(default_factory=list)
+    final: str | None = None
+
+class Model(Protocol):
+    def next(self, messages: list[dict], tools: list[Tool]) -> Action: ...
+
+# ---------- the agent loop ----------
+@dataclass(frozen=True)
+class Policy:
+    approval_ttl_s: float = 300           # unanswered requests expire -> deny
+    max_steps: int = 8                    # hard stop for loops
+    max_medium_calls: int = 5             # budget for unattended writes per run
+
+class GatedAgent:
+    def __init__(self, model: Model, tools: list[Tool], queue: ApprovalQueue,
+                 policy: Policy = Policy(), requester: str = "agent:support-bot"):
+        self.model, self.queue, self.policy, self.requester = model, queue, policy, requester
+        self.tools = {t.name: t for t in tools}
+
+    def run(self, user_msg: str) -> str:
+        run_id = uuid.uuid4().hex[:8]
+        messages: list[dict] = [{"role": "user", "content": user_msg}]
+        medium_used = 0
+        emit("run_started", run_id=run_id, input=user_msg)
+        for step in range(self.policy.max_steps):
+            action = self.model.next(messages, list(self.tools.values()))
+            if action.final is not None:
+                emit("run_finished", run_id=run_id, steps=step, output=action.final)
+                return action.final
+            messages.append({"role": "assistant", "tool_calls": [c.__dict__ for c in action.tool_calls]})
+            for call in action.tool_calls:
+                result = self._execute(run_id, call, medium_used)
+                if result.get("ran") and result["risk"] == Risk.MEDIUM.name:
+                    medium_used += 1
+                messages.append({"role": "tool", "tool_call_id": call.id, "content": json.dumps(result)})
+        emit("run_aborted", run_id=run_id, reason="max_steps")
+        return "I stopped because this task needed more steps than allowed. A person will follow up."
+
+    def _execute(self, run_id: str, call: ToolCall, medium_used: int) -> dict:
+        tool = self.tools.get(call.name)
+        if tool is None:
+            emit("tool_unknown", run_id=run_id, tool=call.name)
+            return {"ran": False, "error": f"unknown tool {call.name}"}
+        try:
+            tool.validate(call.args)
+        except ValueError as e:
+            emit("tool_invalid_args", run_id=run_id, tool=call.name, error=str(e))
+            return {"ran": False, "error": str(e)}
+
+        risk = tool.risk_for(call.args)
+        base = {"risk": risk.name}
+        if risk == Risk.BLOCKED:
+            emit("tool_blocked", run_id=run_id, tool=call.name, args=call.args)
+            return {**base, "ran": False, "error": "this action is not allowed for the agent"}
+        if risk == Risk.MEDIUM and medium_used >= self.policy.max_medium_calls:
+            risk = Risk.HIGH                                       # budget spent: escalate to a human
+            base = {"risk": risk.name, "escalated": "medium budget exhausted"}
+        if risk == Risk.HIGH:
+            req_id = self.queue.submit(run_id, self.requester, call.name, call.args, risk,
+                                       self.policy.approval_ttl_s)
+            emit("approval_requested", run_id=run_id, request_id=req_id, tool=call.name, args=call.args)
+            d = self.queue.wait(req_id, call.name, call.args)
+            emit("approval_resolved", run_id=run_id, request_id=req_id, status=d.status,
+                 approver=d.approver, reason=d.reason)
+            if d.status != "approved":                             # denied OR expired -> do not run
+                return {**base, "ran": False, "approval": d.status,
+                        "note": "Do not retry this action. Tell the user it needs a person."}
+        started = time.time()
+        try:
+            output = tool.fn(**call.args)
+        except Exception as e:                                     # tool failures go back to the model
+            emit("tool_failed", run_id=run_id, tool=call.name, error=repr(e))
+            return {**base, "ran": False, "error": "tool failed"}
+        emit("tool_ran", run_id=run_id, tool=call.name, risk=risk.name,
+             ms=round((time.time() - started) * 1000))
+        return {**base, "ran": True, "output": output}
+
+A few design choices are worth calling out:
+The model never sees an approval API. It can only request tools. The executor decides whether to run, queue or refuse.
+Validation happens before risk. Unknown tools and malformed arguments are rejected before anything reaches a human, so approvers don't see junk.
+Failures go back to the model as data ({"ran": false, ...}), so it can explain what happened instead of crashing the run.
+max_steps stops runaway loops, a basic defence against unbounded consumption.
+The queue is a SQLite table, so the approver can be a different process: a CLI, a Slack button handler or an admin page. Four rules are enforced in SQL, not by convention:
+First decision wins. decide() updates a row only while it is still pending and not expired. A double-click, or two approvers racing, can't flip a decision.
+No self-approval. The requester's identity (agent:support-bot) can never approve its own request. In a real deployment, check the approver's role as well.
+Expiry is atomic. The waiting side marks an overdue request expired with the same status='pending' guard, so a click that arrives at that moment loses cleanly.
+Approval is bound to the exact arguments. The request stores a SHA-256 fingerprint of (tool, args). If the arguments presented at execution don't match, the approval doesn't count. That prevents "approve $49" from being used for "$4,900". This matters even more once you make execution asynchronous and resume from stored state.
+The human side is a 14-line CLI:
+"""approvals.py - the human side.  python approvals.py list | approve ID | deny ID "reason" """
+import getpass, json, sys, time
+from gated_agent import ApprovalQueue
+
+q = ApprovalQueue("approvals.db")
+cmd = sys.argv[1] if len(sys.argv) > 1 else "list"
+if cmd == "list":
+    for req_id, requester, tool, args, risk, expires in q.pending():
+        print(f"{req_id}  {risk:<6} {tool}({json.loads(args)})  by {requester}  "
+              f"expires in {int(expires - time.time())}s")
+elif cmd in ("approve", "deny"):
+    ok = q.decide(sys.argv[2], f"human:{getpass.getuser()}", cmd == "approve",
+                  sys.argv[3] if len(sys.argv) > 3 else "")
+    print("recorded" if ok else "not recorded (unknown, expired, already decided, or self-approval)")
+
+An approval gate that defaults to "allow" is just a delay. Requests go unanswered all the time: approvers are asleep, notifications get lost, people hesitate. Each of those cases has to end with nothing happening. So in wait(), expired is handled the same as denied. The tool doesn't run, and the model gets a firm instruction: "Do not retry this action. Tell the user it needs a person."
+That instruction is important. Without it, many models simply call the same tool again and create a new approval request every few minutes. To enforce it in code, dedupe pending requests by fingerprint, or cap approval requests per run.
+Pick the TTL to match the business process. Five minutes suits a live chat. A back-office workflow might wait a day, as long as the agent run is designed to pause and resume rather than hold a thread open (see production notes below).
+The demo uses a scripted model, so it runs without an API key. A background thread plays the human approver:
+"""demo.py - run: python demo.py   (no API key needed; the model is scripted)"""
+import json, os, threading, time
+from gated_agent import Action, ApprovalQueue, GatedAgent, Policy, Risk, Tool, ToolCall
+
+ORDERS = {"A-100": {"total": 49.0, "status": "delivered", "email": "sam@example.com"}}
+
+def lookup_order(order_id: str) -> dict: return ORDERS.get(order_id, {"error": "not found"})
+def add_note(order_id: str, text: str) -> str: return f"note added to {order_id}"
+def refund(order_id: str, amount: float) -> str: return f"refunded {amount:.2f} on {order_id}"
+def send_email(to: str, body: str) -> str: return f"sent to {to}"
+def delete_customer(email: str) -> str: return "deleted"
+
+TOOLS = [
+    Tool("lookup_order", "Read an order", {"order_id": str}, lookup_order, Risk.LOW),
+    Tool("add_note", "Internal note", {"order_id": str, "text": str}, add_note, Risk.MEDIUM),
+    Tool("refund", "Refund money", {"order_id": str, "amount": float}, refund, Risk.MEDIUM,
+         escalate=lambda a: Risk.HIGH if a["amount"] > 25 else Risk.MEDIUM),     # small refunds auto
+    Tool("send_email", "Email someone", {"to": str, "body": str}, send_email, Risk.LOW,
+         escalate=lambda a: Risk.LOW if a["to"].endswith("@ourcompany.example") else Risk.HIGH),
+    Tool("delete_customer", "Delete a customer", {"email": str}, delete_customer, Risk.BLOCKED),
+]
+
+class ScriptedModel:
+    """Stands in for an LLM: replays a fixed plan, then summarises the tool results."""
+    def __init__(self, plan): self.plan = list(plan)
+    def next(self, messages, tools):
+        if self.plan:
+            return Action(tool_calls=[self.plan.pop(0)])
+        results = [json.loads(m["content"]) for m in messages if m["role"] == "tool"]
+        return Action(final="Done. Results: " + "; ".join(
+            r.get("output") if r.get("ran") else f"not done ({r.get('approval') or r.get('error')})"
+            for r in results[1:]))
+
+def approver(queue, approve: bool, after_s: float):
+    """Simulates a person clicking Approve/Deny in another process."""
+    def act():
+        time.sleep(after_s)
+        for req_id, *_ in queue.pending():
+            queue.decide(req_id, "human:dana", approve, "checked order history")
+    threading.Thread(target=act, daemon=True).start()
+
+if __name__ == "__main__":
+    if os.path.exists("approvals.db"): os.remove("approvals.db")
+    q = ApprovalQueue("approvals.db")
+    plan = lambda amount: [ToolCall("lookup_order", {"order_id": "A-100"}),
+                           ToolCall("refund", {"order_id": "A-100", "amount": amount}),
+                           ToolCall("delete_customer", {"email": "sam@example.com"})]
+
+    print("\n== 1. small refund: runs without approval; delete is always blocked ==")
+    print(GatedAgent(ScriptedModel(plan(10.0)), TOOLS, q).run("Refund $10 on A-100"))
+
+    print("\n== 2. large refund: a person approves after 1s ==")
+    approver(q, approve=True, after_s=1)
+    print(GatedAgent(ScriptedModel(plan(49.0)), TOOLS, q).run("Refund A-100 in full"))
+
+    print("\n== 3. large refund: nobody answers, request expires, default is deny ==")
+    agent = GatedAgent(ScriptedModel(plan(49.0)), TOOLS, q, Policy(approval_ttl_s=2))
+    print(agent.run("Refund A-100 in full"))
+
+python demo.py runs three scenarios. The $10 refund runs at MEDIUM. The $49 refund waits about a second and then runs after human:dana approves it. In the third scenario nobody answers. Here is its log (some fields trimmed):
+{"event": "approval_requested", "request_id": "399db4279975", "tool": "refund", "args": {"order_id": "A-100", "amount": 49.0}}
+{"event": "approval_resolved", "request_id": "399db4279975", "status": "expired", "approver": null, "reason": ""}
+{"event": "tool_blocked", "tool": "delete_customer", "args": {"email": "sam@example.com"}}
+{"event": "run_finished", "steps": 3, "output": "Done. Results: not done (expired); not done (this action is not allowed for the agent)"}
+
+The refund didn't happen, the delete was refused, and the log shows why for both.
+Implement next(). This adapter uses the OpenAI Python SDK's Chat Completions tool calling (see the function calling guide). OpenAI now recommends the Responses API for new projects, and some newer models require it, but the adapter's shape stays the same:
+"""openai_model.py - adapter so GatedAgent can drive a real model (pip install openai)."""
+import json
+from gated_agent import Action, Tool, ToolCall
+
+PY_TO_JSON = {str: "string", float: "number", int: "integer", bool: "boolean"}
+
+class OpenAIModel:
+    def __init__(self, client, model: str, system: str):
+        self.client, self.model, self.system = client, model, system
+
+    def _schema(self, t: Tool) -> dict:
+        return {"type": "function", "function": {
+            "name": t.name, "description": t.description,
+            "parameters": {"type": "object", "additionalProperties": False, "required": list(t.params),
+                           "properties": {k: {"type": PY_TO_JSON[v]} for k, v in t.params.items()}}}}
+
+    def _to_openai(self, messages: list[dict]) -> list[dict]:
+        out = [{"role": "system", "content": self.system}]
+        for m in messages:
+            if m["role"] == "assistant" and "tool_calls" in m:
+                out.append({"role": "assistant", "content": None, "tool_calls": [
+                    {"id": c["id"], "type": "function",
+                     "function": {"name": c["name"], "arguments": json.dumps(c["args"])}}
+                    for c in m["tool_calls"]]})
+            else:
+                out.append(m)
+        return out
+
+    def next(self, messages, tools) -> Action:
+        resp = self.client.chat.completions.create(
+            model=self.model, messages=self._to_openai(messages),
+            tools=[self._schema(t) for t in tools])
+        msg = resp.choices[0].message
+        if not msg.tool_calls:
+            return Action(final=msg.content or "")
+        calls = []
+        for tc in msg.tool_calls:
+            try:
+                args = json.loads(tc.function.arguments)
+            except json.JSONDecodeError:
+                args = {"__invalid_json__": tc.function.arguments}  # validate() will reject it
+            calls.append(ToolCall(tc.function.name, args, id=tc.id))
+        return Action(tool_calls=calls)
+
+Usage: GatedAgent(OpenAIModel(OpenAI(), model="<your-model>", system="You are a support agent..."), TOOLS, ApprovalQueue()).run("...").
+Two lessons came from wiring this up. Models often send 49 where your schema says float, which is why validate() accepts an int for a float field. And invalid JSON arguments should become a validation error rather than an exception. Neither has anything to do with approvals, but either one will break a run.
+Every run gets a run_id. Each of these is one JSON line, built on the standard logging module: run_started, tool_ran (with tier and duration), tool_blocked, tool_invalid_args, tool_failed, approval_requested, approval_resolved (with approver and reason), and run_finished or run_aborted. With those, you can answer the questions that come up after an incident: who approved this, what exactly did they see, and how long did it wait?
+Two cautions. The demo logs raw arguments for clarity, so redact personal data (emails, message bodies) before you ship. And keep the approvals table as your system of record. It holds who decided, when and why. That is the evidence you need when you document oversight roles, which the NIST AI RMF treats as part of governing AI risk.
+Test the guarantees, not the happy path:
+# test_gates.py - pytest -q
+from gated_agent import ApprovalQueue, Risk
+
+def test_timeout_means_deny(tmp_path):
+    q = ApprovalQueue(str(tmp_path / "a.db"))
+    rid = q.submit("r1", "agent:bot", "refund", {"amount": 49.0}, Risk.HIGH, ttl_s=0.2)
+    assert q.wait(rid, "refund", {"amount": 49.0}, poll_s=0.05).status == "expired"
+    assert not q.decide(rid, "human:dana", True)          # a late click changes nothing
+
+def test_agent_cannot_approve_itself(tmp_path):
+    q = ApprovalQueue(str(tmp_path / "a.db"))
+    rid = q.submit("r1", "agent:bot", "refund", {"amount": 49.0}, Risk.HIGH, ttl_s=60)
+    assert not q.decide(rid, "agent:bot", True)
+
+def test_approval_is_bound_to_exact_arguments(tmp_path):
+    q = ApprovalQueue(str(tmp_path / "a.db"))
+    rid = q.submit("r1", "agent:bot", "refund", {"amount": 49.0}, Risk.HIGH, ttl_s=60)
+    assert q.decide(rid, "human:dana", True)
+    assert q.wait(rid, "refund", {"amount": 4900.0}).status == "denied"
+    assert q.wait(rid, "refund", {"amount": 49.0}).status == "approved"
+
+def test_validation_rejects_wrong_types():
+    import pytest
+    from gated_agent import Tool
+    t = Tool("refund", "", {"order_id": str, "amount": float}, lambda **a: a, Risk.MEDIUM)
+    t.validate({"order_id": "A-1", "amount": 49})          # int is fine for a float field
+    for bad in ({"order_id": "A-1"}, {"order_id": "A-1", "amount": "49"},
+                {"order_id": "A-1", "amount": True}, {"order_id": "A-1", "amount": 1.0, "x": 1}):
+        with pytest.raises(ValueError):
+            t.validate(bad)
+
+All four pass with pytest -q.
+Pause and resume, don't block. wait() holds a thread for simplicity. In production, save the run state, end the worker and resume when the approval webhook fires. Durable workflow engines and job queues fit this well.
+Show approvers the context: the arguments, the customer, why the agent wants to do this, and what happens if they say no. Reviewers who see only "refund: approve?" end up rubber-stamping.
+Watch approval fatigue. If nearly everything gets approved, your thresholds are too low, and the gate trains people to stop reading. Article 14 calls out this "automation bias".
+Make tools idempotent with an idempotency key per request ID, so a retry after an approved action never pays twice.
+Add a kill switch that sets every tier to BLOCKED for a given agent.
+Key takeaways
+Enforce approvals in the executor, not the prompt. The model asks; your code decides.
+Assign risk per call, not per tool. Arguments like amount and recipient change the tier.
+Fail closed. Expired counts as denied, and the model is told not to retry.
+Bind each approval to a fingerprint of the exact arguments, and never let the requester approve itself.
+Log every decision with a run ID, approver and reason, and redact personal data.
+Do I need a framework for this?
+What if the model rephrases the request to avoid a gate?
+Should LOW-risk calls be logged too?
+How long should approvals wait?
+Written by the engineering team at NextCTL LLC, an AI-native software engineering and business automation company registered in Delaware and operating from Dhaka, serving the US, Canada, the UK and Europe. Every agent we build works with scoped permissions, logs its actions and hands off to a person when it should. See our AI agent development service or visit nextctl.com...."
+image: /img/blog/generated/enhancing-ai-decision-making-with-human-oversight-the-role-of-approval-gates-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Enhancing AI Decision-Making with Human Oversight: The Role of Approval Gates](/img/blog/generated/enhancing-ai-decision-making-with-human-oversight-the-role-of-approval-gates-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### The Necessity of Human Oversight in AI Systems
+
+As artificial intelligence (AI) systems become increasingly integrated into critical decision-making processes, the need for human oversight has never been more pressing. The autonomy of AI, particularly in high-stakes environments, raises significant safety and ethical concerns. AI systems can generate outputs that may lead to unintended consequences, especially when they operate without human intervention. Thus, incorporating human approval gates into AI workflows is essential to ensure accountability and mitigate risks associated with automated decisions.
+
+### Defining Approval Gates and Risk Tiers
+
+Approval gates serve as checkpoints within AI decision-making processes where human intervention is required before executing potentially high-risk actions. These gates categorize actions based on their associated risk levels, which can be classified into four distinct tiers: Low, Medium, High, and Blocked. Each tier dictates the level of human oversight required, with Low-risk actions proceeding automatically and Blocked actions being outright denied. This structured approach allows organizations to tailor their oversight mechanisms based on the risk profile of each action.
+
+### Breakdown of Risk Tiers: Understanding Their Implications
+
+The four risk tiers provide a framework for evaluating the potential impact of AI actions:
+
+- **Low Risk**: Actions that are read-only or internal in nature, such as looking up an order or sending an internal email. These actions can be executed automatically without human approval.
+
+- **Medium Risk**: Actions that involve reversible writes, such as adding internal notes or processing small refunds. These actions can run automatically but are subject to logging and rate-limiting.
+
+- **High Risk**: Actions that involve significant external side effects, such as large refunds or customer communications. These actions require explicit human approval before execution.
+
+- **Blocked**: Actions that are never allowed from an AI agent, such as deleting customer records. These actions are automatically denied, ensuring that certain risks are entirely mitigated.
+
+This tiered approach not only clarifies the level of human oversight required but also helps in designing more effective AI systems that align with organizational risk management strategies.
+
+### Implementing a Policy Layer for Approval Management
+
+To effectively manage tool calls and approvals, a policy layer must be integrated into the AI system architecture. This layer acts as an intermediary between the AI model's requests and the execution of those requests, ensuring that all actions are evaluated against the defined risk tiers. By implementing a policy layer, organizations can enforce rules regarding approval thresholds, time-to-live for approval requests, and limits on the number of unattended writes. This architecture enhances the robustness of the AI system by ensuring that it adheres to organizational policies and regulatory requirements.
+
+```python
+class Policy:
+    approval_ttl_s: float = 300  # Time-to-live for approval requests in seconds
+    max_steps: int = 8  # Maximum number of steps the AI can take
+    max_medium_calls: int = 5  # Budget for unattended writes
+```
+
+### Logging and Tracking Decisions for Accountability
+
+An essential aspect of integrating human approval gates is establishing robust logging and tracking mechanisms. Every decision made at the approval gate should be logged as a structured event, capturing details such as the request ID, the approver, the decision made, and the rationale behind it. This level of transparency is crucial for accountability, allowing organizations to audit decisions and understand the context in which approvals were granted or denied. Logging also serves as a critical component for compliance with regulations like the EU AI Act, which mandates that human oversight be documented.
+
+```python
+def emit(event: str, **fields: Any) -> None:
+    log.info(event, extra={"fields": fields})
+```
+
+### Real-World Case Studies: Approval Gates in Action
+
+Several organizations have successfully implemented approval gates in their AI systems, demonstrating their effectiveness in enhancing safety and accountability. For instance, a financial institution utilized approval gates to manage automated loan approvals. By categorizing loan requests into risk tiers, the institution ensured that high-risk loans underwent thorough human review, significantly reducing the incidence of fraudulent approvals. Similarly, a healthcare provider implemented approval gates for AI-driven patient management systems, ensuring that critical treatment decisions were always validated by qualified medical personnel.
+
+### Best Practices for Integrating Approval Gates into AI Systems
+
+To ensure the successful integration of approval gates into existing AI systems, organizations should adhere to several best practices:
+
+1. **Define Clear Risk Criteria**: Establish explicit criteria for categorizing actions into risk tiers. This clarity will help in consistently applying the approval process across various AI functionalities.
+
+2. **Incorporate Feedback Mechanisms**: Implement feedback loops that allow human approvers to provide insights on the approval process. This feedback can inform adjustments to risk criteria and improve the overall system.
+
+3. **Monitor Approval Fatigue**: Be mindful of the potential for approval fatigue among human approvers. If a significant proportion of requests are approved without thorough review, it may indicate that the risk thresholds are set too low.
+
+4. **Ensure Contextual Awareness**: Provide approvers with sufficient context regarding the actions they are approving. This includes details about the implications of the decision and the potential impact on stakeholders.
+
+5. **Regularly Review and Update Policies**: As the AI landscape evolves, so too should the policies governing approval gates. Regular reviews will ensure that the system remains aligned with organizational goals and regulatory requirements.
+
+### Compliance with Regulations: The EU AI Act and Beyond
+
+The integration of human approval gates is not only a best practice but also a compliance necessity in many jurisdictions. The EU AI Act, for example, mandates that high-risk AI systems must incorporate human oversight mechanisms to ensure that decisions can be contested and are transparent. By implementing approval gates, organizations can demonstrate their commitment to responsible AI governance and compliance with emerging regulatory frameworks.
+
+### Conclusion: The Future of AI Governance with Human Approval Gates
+
+Incorporating human approval gates into AI systems represents a significant step towards enhancing safety, accountability, and compliance in automated decision-making processes. By establishing a structured approach to risk management, organizations can leverage AI's capabilities while safeguarding against potential pitfalls. As AI continues to evolve, the integration of human oversight will be critical in ensuring that these systems operate ethically and responsibly, fostering trust among users and stakeholders alike. 
+
+### The Path Forward: Embracing Human-AI Collaboration
+
+The future of AI governance lies in embracing a collaborative approach between humans and machines. By reinforcing the role of human oversight through mechanisms like approval gates, organizations can create a more resilient AI ecosystem that prioritizes safety and ethical considerations. This collaborative framework will not only enhance the performance of AI systems but also ensure that they serve the best interests of society as a whole.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/nextctl/building-an-ai-agent-with-human-approval-gates-5h01)
+
+---
+
+<SocialShare title="Enhancing AI Decision-Making with Human Oversight: The Role of Approval Gates" slug="enhancing-ai-decision-making-with-human-oversight-the-role-of-approval-gates" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
