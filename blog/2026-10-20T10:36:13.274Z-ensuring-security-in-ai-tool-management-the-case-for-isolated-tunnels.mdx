@@ -1,0 +1,113 @@
+---
+slug: ensuring-security-in-ai-tool-management-the-case-for-isolated-tunnels
+title: "Ensuring Security in AI Tool Management: The Case for Isolated Tunnels"
+authors: [francis]
+tags: [ai, security, gpt, tunnels]
+date: 2026-10-20T10:36:13.275Z
+description: "The decision: one tunnel per tool group, no exceptions
+
+
+Ankita is my open-source desktop AI companion — "a little companion, a lot more possible". Its ChatGPT Browser provider lets ChatGPT act through your own open chat tab: no API key, your ChatGPT plan's limits apply. And once that door is open, ChatGPT gets tool groups with very different blast radii: Core (files and commands in your workspace) and Desktop (task browsers, and your manually connected computer-use driver that can actually move your mouse).
+The decision I made, stated up front: every tool group gets its own dedicated OpenAI tunnel, and Ankita refuses to let two groups share one. Reuse a tunnel ID and the save is rejected — before a key is stored, before a competing connection starts, including simultaneous setup attempts. One tunnel, one group, enforced by the code, not by the setup guide.
+The threat model here isn't a hacker. It's the plumbing.
+Each group runs its own instance of the official OpenAI secure-tunnel helper to publish its MCP endpoint to your ChatGPT workspace. Put two helpers on the same tunnel ID and they compete for the same channel. The docs spell out the failure mode plainly: it "can send a Core request to Desktop" — a file operation's request arriving at the surface that can drive your desktop. A confused request landing one surface over, on the machine that can click things.
+I could have routed all three surfaces through one tunnel and demultiplexed at the gateway. I chose not to. The tunnel is where I draw the boundary, because the channel competition happens below anything my code can mediate — it's the official helper's own channel, and two of my helpers fighting over it is a race I can never win with admission logic.
+Three surfaces, declared as separate discovery/permission boundaries in protocol.mjs (NATIVE_TOOL_SURFACES = core, desktop, plugins): Core reads and writes files in the selected workspace; Desktop drives task browsers and the computer-use driver; Plugins exposes only the external plugins currently enabled. Core uses the tools you've already connected — changing global plugin or MCP connections stays in Ankita's own settings; ChatGPT through the tab can't rewire the companion's connections from inside the chat.
+Per group, the user creates one OpenAI tunnel and one restricted key scoped to Tunnels Read and Use — nothing broader. The tunnel ID is validated against the official grammar (tunnel_[a-f0-9]{32}) before anything else happens, and the key is saved through the device's secure storage under a per-surface key name (chatgpt-tunnel- + surface), so a Core key and a Desktop key are never the same stored secret.
+The helper itself doesn't get trust on install either. The binary is SHA-256 pinned against a vendored publisher record (vendor/openai-tunnel/source.json) — mismatch throws before spawn. Its environment is filtered to an OS/TLS allowlist only; the restricted key travels in as an env var and is deleted from it in a finally block. What the UI can see is deliberately narrow: the status view returns surface and status, and "credentials, argv, URLs, raw helper logs and health paths never become UI events." The health signal I do watch is the helper's own control-plane poll counter, read from its loopback health file.
+And even inside a dedicated tunnel, the gateway admits nothing on vibes. Each surface gets its own endpoint URL with a random capability token baked in, matched with a timing-safe comparison and marked no-store so it never enters a shared cache. Batch admission is deliberately absent — one authoritative receipt per HTTP/RPC call. Hosted MCP reuses RPC id 0 across distinct native calls, so the receipt identity can't be the id alone: it's [leaseId, surface, callId, id-type, id]. Every call must prove request ownership — a request that doesn't own the lease gets a 403. Once admission commits, a dropped socket can't cancel or forget the side effect; the scoped ToolHost owns Stop. Gateway shutdown drains every admitted execution first: client disconnect never authorizes replay.
+The tunnel/gateway/origins/ownership suites pass 27/27 locally.
+This boundary defends against helper channel competition and confused routing — not against a compromised official helper. SHA-pinning a vendored binary catches a swapped file; it says nothing if the publisher itself ships something hostile. And the setup friction is real: three tunnels, three restricted keys, three ChatGPT MCP apps to create and enable. I judged the friction cheaper than the failure.
+Here's the design question, and I want the adversarial version: the gateway already admits every call per surface — secret capability URLs, per-surface receipts, ownership checks, no batch admission. With all of that in place, what does the second tunnel actually buy? Is per-group tunnel isolation a genuine failure boundary, or is it ceremony over an admission layer that was already sufficient? If you'd merged all three surfaces onto one tunnel with strict per-surface admission, where exactly would it break first — and is the answer "the helper's channel competition," i.e., is this a security boundary or a correctness hack wearing a security costume? Tell me I'm wrong; the code is at https://github.com/akyourowngames/A.N.K.I.T.A if you want to check my work...."
+image: /img/blog/generated/ensuring-security-in-ai-tool-management-the-case-for-isolated-tunnels-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Ensuring Security in AI Tool Management: The Case for Isolated Tunnels](/img/blog/generated/ensuring-security-in-ai-tool-management-the-case-for-isolated-tunnels-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### The Growing Complexity of AI Integration
+
+As artificial intelligence (AI) tools become increasingly embedded in various workflows, the complexity of managing these systems escalates. Each AI tool often has distinct functionalities, ranging from data processing to user interaction. This integration, while beneficial, raises significant security concerns. The potential for data breaches, unauthorized access, and operational failures necessitates a well-defined security architecture that can effectively manage these risks. Understanding the implications of security boundaries in AI tool integration is essential for developers and security professionals alike.
+
+### Tunnel Isolation: A Definition and Its Significance
+
+Tunnel isolation refers to the practice of creating dedicated communication channels for distinct groups of AI tools, thereby preventing interference and competition for resources. This approach establishes clear operational boundaries, ensuring that each tool group operates independently. The primary significance of tunnel isolation lies in its ability to minimize routing errors and unauthorized access, which can arise when multiple tools share the same communication pathway. By enforcing dedicated tunnels, organizations can enhance their security posture, particularly in environments where sensitive data is processed.
+
+### Architectural Design: Implementing Multiple Tunnels
+
+The architecture of multiple tunnels involves defining separate communication pathways for different AI tool groups, each equipped with its own access controls and authentication mechanisms. For instance, consider a scenario where an AI tool manages both file operations and user interface interactions. By establishing distinct tunnels for these functionalities, the risk of misrouted requests is significantly reduced. A request intended for file manipulation should not inadvertently trigger a user interface action, thereby preserving the integrity and security of the system. Moreover, each tunnel can be monitored independently, allowing for more granular security audits and incident responses.
+
+### The Risks of Shared Tunnels: A Case Study
+
+The risks associated with shared tunnels are multifaceted and can lead to severe operational consequences. When multiple AI tools operate over a single tunnel, they may compete for channel access, resulting in confusion in request routing. For example, a request meant for a secure file operation could be misrouted to a user interface context, leading to unauthorized access or data corruption. This is not merely theoretical; real-world implications can be devastating. In healthcare, a misrouted request may compromise patient data, while in finance, erroneous transactions can lead to significant losses. Such scenarios underscore the critical need for isolated tunnels to prevent routing errors and maintain operational integrity. 
+
+### Balancing Complexity and Security: A Trade-off Analysis
+
+While isolated tunnels offer enhanced security, they also introduce a layer of complexity that organizations must navigate. Each tunnel requires its own configuration, monitoring, and maintenance, which can strain resources and complicate deployment processes. Developers face the challenge of balancing security enhancements with the operational overhead associated with managing multiple tunnels. Organizations must carefully evaluate their security requirements and operational capabilities to determine the optimal architecture that aligns with their needs. For instance, smaller organizations may find a single tunnel architecture sufficient for their operations, while larger enterprises handling sensitive data may require the security benefits of multiple tunnels despite the increased complexity.
+
+### The Adversarial Perspective: Questioning Necessity
+
+From an adversarial perspective, the necessity of tunnel isolation raises important questions. With robust admission controls and request validation mechanisms in place, one might argue that the added complexity of multiple tunnels could be unnecessary. If the existing admission layer effectively prevents unauthorized access and ensures proper routing, does the second tunnel truly add value? This inquiry invites a deeper examination of the failure modes inherent in both single and multiple tunnel architectures. For example, in a single tunnel architecture, a single point of failure could expose the entire system to risks, whereas isolated tunnels can compartmentalize failures, thereby limiting their impact.
+
+### Real-World Implementation: The Case of Ankita
+
+Ankita, an open-source desktop AI companion, exemplifies the practical application of tunnel isolation. Each tool group within Ankita—Core, Desktop, and Plugins—operates through its own dedicated OpenAI tunnel, with strict enforcement against shared tunnel IDs. This design decision mitigates the risk of channel competition, where two tools might inadvertently send requests to each other, leading to operational failures. The architecture ensures that each tool operates within its defined boundaries, significantly enhancing security and operational integrity. By employing SHA-256 pinning for the helper binaries and strict access controls, Ankita exemplifies a robust implementation of tunnel isolation. This case study illustrates not only the practical benefits of tunnel isolation but also its scalability as the application grows.
+
+### Comparative Analysis: Single vs. Multiple Tunnel Architectures
+
+A comparative analysis of single versus multiple tunnel architectures reveals distinct advantages and disadvantages for each approach. Single tunnel architectures may simplify deployment and reduce operational overhead, but they expose systems to the risks associated with shared communication pathways. Conversely, multiple tunnel architectures enhance security by isolating tool groups, but at the cost of increased complexity. The choice between these architectures ultimately depends on the specific use case, risk tolerance, and operational capabilities of the organization.
+
+| Feature                        | Single Tunnel Architecture | Multiple Tunnel Architecture |
+|--------------------------------|---------------------------|-----------------------------|
+| **Complexity**                 | Lower                     | Higher                      |
+| **Security Isolation**         | Limited                   | Enhanced                    |
+| **Risk of Routing Errors**     | Higher                    | Lower                       |
+| **Operational Overhead**       | Lower                     | Higher                      |
+| **Flexibility**                | Limited                   | Greater                     |
+
+### Best Practices for Implementing Tunnel Isolation
+
+To effectively manage AI tool security through tunnel isolation, organizations should adopt several best practices. First, implementing strict access controls and authentication mechanisms for each tunnel is essential. This includes using unique keys and validating tunnel IDs against established patterns to prevent unauthorized access. Additionally, employing robust monitoring and logging practices can help detect and respond to potential security incidents in real time. Regular security assessments should be conducted to evaluate the effectiveness of tunnel isolation strategies and make necessary adjustments as threats evolve. Furthermore, organizations should consider conducting penetration testing to identify weaknesses in their tunnel configurations.
+
+### Conclusion: Navigating the Future of AI Security Management
+
+As AI systems continue to evolve, the need for robust security measures will only grow. Isolated tunnels present a compelling solution for enhancing security in AI tool management, providing clear boundaries that mitigate risks associated with shared communication pathways. However, organizations must carefully consider the complexity introduced by this approach. Striking the right balance between security and operational efficiency is crucial for sustainable AI tool integration. As the landscape of AI security continues to change, ongoing evaluation and adaptation will be key to maintaining a resilient security posture. Ultimately, the decision to implement tunnel isolation should be guided by a thorough risk assessment and a clear understanding of the operational context.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/krish_verma_77e28d3fd63ca/one-tunnel-per-tool-group-enforced-how-my-desktop-ai-companion-keeps-chatgpts-file-tools-out-of-531p)
+
+---
+
+<SocialShare title="Ensuring Security in AI Tool Management: The Case for Isolated Tunnels" slug="ensuring-security-in-ai-tool-management-the-case-for-isolated-tunnels" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
