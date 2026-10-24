@@ -1,0 +1,423 @@
+---
+slug: optimizing-mcp-server-design-for-enhanced-ai-agent-performance
+title: "Optimizing MCP Server Design for Enhanced AI Agent Performance"
+authors: [francis]
+tags: [mcp, ai, systems, infrastructure]
+date: 2026-10-24T17:13:55.309Z
+description: "I’ve been thinking about MCP design a lot lately, especially the gap between making a tool available and making an agent use it well.
+It’s easy to wrap an API in an MCP server, expose a bunch of tools, and call it done. Then the agent picks the wrong tool, guesses a parameter, retries a few times, and burns context just trying to figure out what we meant. The protocol may be working perfectly; the experience still isn’t great.
+So what does a good MCP server actually look like? I think it comes down to a few practical choices: how we name and scope tools, how much context we expose, where Skills fit, and how we keep the whole thing safe in production.
+
+Simple architecture visual: Coder Legion — The End of Glue Code.
+MCP is useful when a capability needs to be reused by different clients, maintained independently, or kept behind a clear security and execution boundary. But it isn’t the right answer for every function an agent calls.
+flowchart LR
+    U[User request] --> A[Agent]
+    A --> D{Shared capability?}
+    D -- No --> F[Local function]
+    D -- Yes --> M[MCP server]
+    M --> B[Business system]
+Use a local function for a small, private operation that only one application needs. Consider MCP when multiple compatible clients need the same integration, the integration needs independent deployment or credentials, or you want a governed boundary between an agent and a system.
+For example, a single application formatting a date does not need an MCP server. A company-wide, read-only service that lets approved agents search Jira issues, retrieve service documentation, or inspect deployment status may benefit from one.
+My rule of thumb: don’t ask “Can I wrap this in MCP?” Ask “What do I gain by putting this capability behind a shared, independently governed interface?”
+A common first attempt is to expose an existing REST API almost one-to-one:
+GET /customers/{id}
+GET /customers/{id}/accounts
+GET /accounts/{id}/transactions
+GET /transactions/{id}
+
+That can be appropriate for predictable, low-level operations. But an agent may not know which endpoint to call first, which identifiers are required, or which of the 40 returned fields matter.
+Instead, design a small set of task-oriented tools around the questions users actually ask:
+find_customer(query)
+list_customer_accounts(customer_id)
+get_account_summary(account_id, period)
+get_transaction_details(transaction_id)
+
+The tool names should describe an action in domain language. Avoid vague names such as process_data, execute, or get_info. Avoid exposing internal database column names if the agent has no reason to know them.
+Too vague
+{
+  "name": "search",
+  "description": "Search records",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "type": { "type": "string" },
+      "q": { "type": "string" }
+    }
+  }
+}
+
+More useful
+{
+  "name": "search_service_docs",
+  "description": "Search approved engineering documentation. Use for questions about service behavior, ownership, and integration steps. Does not search source code or production logs.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "query": {
+        "type": "string",
+        "description": "A concise question or set of technical keywords"
+      },
+      "service": {
+        "type": "string",
+        "enum": ["cards", "payments", "accounts", "identity"]
+      },
+      "limit": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 10,
+        "default": 5
+      }
+    },
+    "required": ["query"],
+    "additionalProperties": false
+  }
+}
+
+The second schema tells the model what the tool is for, what it should not be used for, and which values are valid. Defaults and limits reduce the amount of guessing. That’s the goal: not a clever description, but fewer avoidable mistakes.
+Practical guidelines
+Use domain words the user and model both understand.
+Make required fields genuinely required; default common optional fields.
+Use enums and numeric bounds where the domain is finite.
+Keep parameter counts manageable. Around eight or fewer is a useful heuristic, not a protocol limit.
+Explain when not to use a tool if overlap with another tool is likely.
+Keep descriptions informative but not encyclopedic: every token competes for context.
+
+Another view of the MCP building blocks: Splunk — Securing AI agents with MCP.
+More tools don’t automatically make an agent more capable. If a client loads hundreds of similar tool definitions, the model has more to read and more chances to choose the wrong one. This is one of the most important trade-offs in MCP design: too little guidance creates confusion, but too much guidance also eats into the context window.
+flowchart TD
+    Q[User request] --> R[Find relevant tool]
+    R --> T[Call focused tool]
+    T --> S[Return concise result]
+    S --> D[Fetch details if needed]
+A useful pattern is progressive disclosure:
+Keep the always-visible tool catalog small and clear.
+Offer a lightweight discovery/search tool when the catalog is large.
+Load detailed schemas, domain vocabulary, or instructions only when needed.
+Return a compact summary by default and provide a separate detail operation.
+For example, search_transactions might return transaction ID, date, merchant, and amount. A separate get_transaction_details tool can return status, fees, and settlement information when needed.
+This is often better than returning 50 fields on every call.
+
+
+
+Strategy
+Good when
+Main trade-off
+
+
+
+
+Clearer descriptions
+You need a quick improvement without backend refactoring
+Longer descriptions consume more context
+
+
+Better schemas and defaults
+Inputs have predictable types and valid values
+Schemas need maintenance as the domain changes
+
+
+Split tools by task
+One tool currently does too many things
+More tools can increase discovery complexity
+
+
+On-demand discovery
+The catalog is large or changes often
+Adds a discovery call and some latency
+
+
+Server-side interpretation
+Requests use complex business language and must behave consistently
+Adds inference cost, latency, and another component
+
+
+One agent-backed tool
+You need to hide a complex workflow behind a stable interface
+Less transparency; harder debugging and higher operational cost
+
+
+
+Do not start with a server-side LLM just to compensate for poor names and schemas. First try clearer tool boundaries, validation, defaults, and compact results. Add model-based interpretation only when evaluation shows it is needed.
+
+Visual comparison of Skills and MCP: Daily Dose of Data Science.
+MCP exposes different primitives for different jobs:
+Tools perform actions or computations: create_ticket, search_logs, get_payment_status.
+Resources expose context or data: service://payments/runbook, schema://customer.
+Prompts provide reusable prompt templates or workflows a client can offer to a user.
+Skills are usually instruction packages that explain how to approach a task, often with supporting files, examples, or scripts. Their behavior depends on the host that loads them.
+A skill can tell an agent how to investigate a failed payment. MCP tools can provide the live capabilities it needs to query a payment status or inspect an approved log source.
+flowchart LR
+    U[Investigate failed payment] --> SK[Skill: playbook]
+    SK --> A[Agent]
+    A --> M[MCP tools and resources]
+    M --> O[Evidence-based summary]
+
+
+
+Question
+MCP
+Skill
+
+
+
+
+Primary job
+Standardized access to capabilities and context
+Instructions for performing a task well
+
+
+Can execute an external operation?
+Yes, through a tool handler
+Not inherently; may direct the agent to tools or scripts
+
+
+Can explain a multi-step method?
+Possible, but not its main purpose
+Yes—this is a core strength
+
+
+Portability
+Across compatible MCP clients, subject to supported features and auth
+Depends on host skill format and supported loading behavior
+
+
+Typical failure mode
+Tool ambiguity, unsafe access, poor schemas, latency
+Instructions may not load, may be stale, or may reference unavailable tools
+
+
+
+The “MCP is dead; Skills won” debate gets less useful when it assumes we have to choose one. A Skill can tell an agent when and how to investigate a problem; MCP can provide the actual capability to query a service or retrieve data. There is overlap, of course. A small workflow might be perfectly fine as a Skill that uses tools the host already has. I’d choose based on the runtime, reuse, and governance needs—not the latest hot take.
+Imagine you have a Swagger/OpenAPI file with 500 endpoints. Exposing all 500 as MCP tools might feel like the quickest route, but it usually pushes the hard part onto the model: figuring out which endpoint matters, what sequence to call, and which fields are valid.
+A discovery layer can help, but it should narrow the options to approved operations—not decide permissions.
+A better design adds a discovery and policy layer:
+flowchart TD
+    O[Swagger / OpenAPI] --> I[Index and group endpoints]
+    I --> G[Allowlist and authorization]
+    G --> M[Discover focused MCP tool]
+    M --> V[Validate and call API]
+    V --> R[Normalize result and errors]
+For example, index endpoint metadata such as operation ID, method, path, summary, tags, request schema, response schema, and required scopes. Search that index using keywords and semantic similarity if useful. But retrieval should only help select from an approved catalog; it must not grant permissions.
+Expose focused operations such as get_card_summary or list_payment_methods when they map to meaningful user tasks. Keep raw endpoint access behind a deliberate, restricted tool only if advanced workflows truly need it.
+JSON index or vector database?
+Start with a generated JSON index when the catalog is manageable and exact keyword/tag search works.
+Add embeddings or hybrid search when users describe operations in natural language and vocabulary differs from API terminology.
+Keep the source of truth in OpenAPI; regenerate the index and test it in CI.
+Never treat a vector match as authorization or proof that an operation is safe.
+A tool call will fail sometimes. The design question is whether the failure helps the agent recover or leaves it guessing.
+An MCP tool is a contract between an uncertain caller and a real system. Validate every argument server-side—even if the schema is strict—because clients, models, and callers can still be wrong.
+A useful result should be compact, structured when appropriate, and explicit about what happened.
+Weak error
+{ "error": "Request failed" }
+
+Actionable error
+{
+  "error": {
+    "code": "INVALID_PERIOD",
+    "message": "The period must be one of: 7d, 30d, 90d.",
+    "retryable": false
+  }
+}
+
+A good error tells the agent what can be corrected without exposing stack traces, secrets, internal hostnames, or sensitive data. In other words: be specific about the fix, not about your internal implementation.
+Design for:
+Bounded output: pagination, result limits, field selection, summaries, and detail-on-demand.
+Predictable errors: stable error codes and useful recovery hints.
+Timeouts and cancellation: downstream calls must not hang indefinitely.
+Retries: retry only transient failures; avoid blindly retrying non-idempotent actions.
+Idempotency: for operations such as creating a ticket or initiating a payment, support an idempotency key or equivalent deduplication mechanism.
+Explicit state: if a multi-step operation needs a durable handle, return an opaque workflow or resource ID and validate it on every subsequent call.
+For long or multi-stage tasks, avoid pretending one giant tool call is always the best interface. Use explicit stages, durable state, and status checks where they improve observability and recovery.
+A description saying “only use this carefully” is not a security control. The server has to enforce the rules even when the model gets the call wrong.
+MCP does not make an unsafe backend safe. It can make a capability easier for an agent to reach, so access control and execution boundaries matter.
+flowchart LR
+    A[Agent] --> P[Authenticate and authorize]
+    P --> V[Validate request]
+    V --> H[Run tool safely]
+    H --> L[Audit and monitor]
+Minimum production checklist
+Apply least privilege to tools, service accounts, database roles, and filesystem access.
+Enforce authorization on the server for every call; never rely on a tool description or model judgment.
+Separate read-only tools from write or destructive tools.
+Require explicit user confirmation for consequential actions, such as deleting records, sending messages externally, or moving money.
+Validate paths, URLs, identifiers, enum values, and payload sizes. Prevent path traversal, SSRF, SQL injection, and command injection.
+Use parameterized queries and safe process APIs; do not concatenate model-generated text into SQL or shell commands.
+Keep secrets out of prompts, tool descriptions, errors, and logs.
+Treat tool outputs, retrieved documents, and remote content as untrusted input: they may contain prompt-injection instructions.
+Pin and review server dependencies, scan code, sandbox where appropriate, and monitor changes to tool definitions and behavior.
+Use authenticated transport for remote servers, and verify identity, token audience, scopes, and authorization boundaries.
+Record who called what, with which authorization context, and what outcome occurred—without logging unnecessary sensitive payloads.
+A tool called delete_customer is not safe merely because its description says “be careful.” Enforce the rules in code. For high-impact actions, use a two-phase design:
+prepare_transfer(amount, destination)
+  -> transfer summary + policy checks + confirmation token
+
+confirm_transfer(confirmation_token)
+  -> execute only if token is valid, unexpired, and bound to the approved request
+
+The token should be server-generated and bound to the exact action, actor, and relevant parameters. Confirmation must not become a generic approval for a different action.
+
+
+
+Prefer
+Avoid
+Why
+
+
+
+
+get_payment_status(payment_id)
+do_operation(type, payload)
+Intent is clearer and arguments are easier to validate
+
+
+Small, domain-focused servers
+One giant server for every company system
+Limits blast radius and simplifies ownership
+
+
+Short default responses + detail tools
+Returning every field by default
+Reduces token cost and noise
+
+
+Server-side authorization
+“The model knows not to do that”
+Models are not security boundaries
+
+
+Read/write separation
+One tool with hidden destructive modes
+Makes risk and approval requirements explicit
+
+
+Stable error codes + recovery hints
+Raw stack traces or “failed”
+Supports reliable recovery without leaking internals
+
+
+Evaluation fixtures and telemetry
+“It worked in my demo”
+Makes regressions measurable
+
+
+MCP where reuse/isolation matter
+MCP for every helper function
+Avoids needless infrastructure and latency
+
+
+
+MCP brings a common interface and a useful integration boundary, but it also adds serialization, process/network hops, configuration, version compatibility, and another component to operate. Tool discovery and rich schemas can consume context. A standardized protocol does not guarantee standardized business semantics. And security risks still exist at the tool, identity, and downstream-system layers.
+The answer isn’t to dismiss MCP or put everything behind it. It’s to measure whether the boundary earns its keep: does it improve reuse, safety, consistency, or operations enough to justify the extra moving parts?
+Unit tests can prove that a handler works for valid input. They cannot prove that an agent will select it correctly.
+Build an evaluation set with realistic requests:
+“Show my latest card payment” (clear intent)
+“What happened to the payment from yesterday?” (ambiguous identifiers)
+“Delete all test records” (potentially destructive)
+“Find the card endpoint” (domain-language mismatch)
+“Show me everything” (output explosion risk)
+Track at least:
+Correct tool selection
+Argument validity
+Task completion and factual correctness
+Number of tool calls and retries
+Latency, errors, and token usage
+Unauthorized-action rejection
+Regression rate after schema or description changes
+Test against more than one model if your server is meant to support multiple clients. Use deterministic fixtures for business rules and separate model-dependent evaluations from ordinary unit tests. Include adversarial inputs and malicious content in retrieved data.
+For a new MCP server, build in this order:
+Define the boundary: users, systems, data, permissions, and operations in scope.
+Pick a few high-value tasks: avoid exposing the entire backend on day one.
+Design schemas: clear names, tight constraints, safe defaults, and bounded output.
+Separate primitives: tools for actions, resources for context, prompts for reusable templates; use skills for task instructions when the host supports them.
+Implement policy in code: authentication, authorization, validation, approval, timeouts, and idempotency.
+Add observability: correlation IDs, structured logs, metrics, traces, and audit events.
+Create evals before broad rollout: include happy paths, ambiguous prompts, edge cases, and attack scenarios.
+Measure and iterate: improve tool discovery and descriptions using actual failure data.
+Version and govern: review changes to tool names, schemas, permissions, and semantics as API changes.
+The best MCP server isn’t the one with the longest tool list. It’s the one an agent can use without guessing, retrying needlessly, or being given more access than it needs.
+Use MCP when a shared, governed interface is worth the extra boundary. Use Skills to explain a repeatable way of working when the host supports them. Use a direct function when that’s all you need. And combine the approaches when each has a clear job.
+For me, the design goal is simple: make the right action easy to choose, hard to misuse, and straightforward to debug...."
+image: /img/blog/generated/optimizing-mcp-server-design-for-enhanced-ai-agent-performance-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Optimizing MCP Server Design for Enhanced AI Agent Performance](/img/blog/generated/optimizing-mcp-server-design-for-enhanced-ai-agent-performance-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### The Critical Role of MCP Servers in AI Architectures
+
+Multi-Channel Processing (MCP) servers are essential components in AI architectures, acting as intermediaries that facilitate communication between AI agents and backend services. They encapsulate APIs and provide standardized interfaces, allowing agents to perform complex tasks efficiently. However, the design of these servers is crucial; it determines how well they manage communication, context, and security, thereby directly impacting the performance and reliability of AI agents. Understanding the intricacies of MCP server design is vital for developers and system architects aiming to build robust AI systems.
+
+### Consequences of Ineffective MCP Server Design
+
+Poorly designed MCP servers can severely hinder AI agent effectiveness. For instance, consider a scenario where an MCP server exposes a plethora of low-level API endpoints without adequate context. Agents may become overwhelmed, leading to incorrect tool selections and inefficient resource utilization. An illustrative case involved a financial services company that exposed its entire API surface as MCP tools. Agents struggled to determine which endpoint to call first, resulting in increased retries, context loss, and ultimately, a degraded user experience. Such pitfalls highlight the importance of thoughtful design in MCP servers.
+
+### Fundamental Principles for Effective MCP Server Design
+
+To enhance AI agent performance, several core principles should guide MCP server design. First, tool naming conventions must be clear and descriptive, accurately reflecting their functionalities. For example, instead of a vague name like `process_data`, a more specific name such as `retrieve_customer_info` provides immediate clarity. Furthermore, strict input validation and well-defined schemas are critical. By guiding agents in providing correct parameters, these practices not only streamline interactions but also bolster the system's security posture, reducing the risk of erroneous or malicious requests.
+
+### Crafting Intuitive and Task-Oriented Tools
+
+Creating task-oriented tools is fundamental in MCP server design. Tools should be named based on specific actions they perform, utilizing domain-specific language that resonates with both developers and agents. For instance, instead of a generic `search` tool, a more useful definition would be `search_service_docs`, which clearly indicates its purpose and limitations. This approach minimizes ambiguity and enhances the agent's ability to select the appropriate tool, thus improving operational efficiency. Additionally, input schemas should be tightly defined, with required fields clearly marked and sensible defaults set for optional parameters, thereby reducing cognitive load on the agent.
+
+### Security Considerations and Validation Mechanisms
+
+Security is paramount in the design of MCP servers, especially when agents interact with sensitive data or critical systems. Implementing robust authentication and authorization mechanisms is essential to ensure that only authorized agents can access specific tools and data. Moreover, server-side validation of all inputs is crucial; even with a strict input schema, clients can still send malformed requests. For example, if a tool requires a date parameter, the server should validate that the date is in the correct format and falls within an acceptable range. This proactive approach not only enhances security but also improves the agent's ability to recover from errors by providing actionable feedback.
+
+### Balancing Tool Discovery with Context Management
+
+One of the significant challenges in MCP server design is achieving a balance between tool discovery and context management. While exposing a vast array of tools may enhance functionality, it can also overwhelm agents and lead to decision fatigue. A more effective strategy is to implement a discovery mechanism that allows agents to explore tools based on their immediate needs. For example, a lightweight search interface can help agents find relevant tools without exposing the entire catalog at once. Additionally, limiting the number of visible tools at any given time can help maintain context, allowing agents to focus on the task at hand without unnecessary distractions.
+
+### Evaluating MCP Server Performance Through Metrics
+
+Continuous evaluation of MCP server performance is crucial for identifying areas of improvement. Metrics such as the frequency of tool selection errors, latency in tool execution, and the number of retries can provide valuable insights into the server's effectiveness. For instance, if agents frequently select the wrong tool, it may indicate that naming conventions or input schemas require refinement. An iterative design process, where feedback from real-world usage informs subsequent updates to the server, is essential. This approach not only enhances the server's capabilities but also ensures that it evolves in alignment with the changing needs of AI agents.
+
+### Real-World Case Study: Lessons from a Financial Services MCP Implementation
+
+A notable case study involves a financial services company that initially rolled out an MCP server with a one-to-one mapping of its REST API. While this approach seemed efficient, it led to confusion among agents, who struggled to navigate the extensive array of endpoints. The company eventually restructured its MCP tools, focusing on task-oriented naming conventions and simplified schemas. For example, they transitioned from generic endpoint names like `GET /customers/{id}` to more descriptive names such as `find_customer(query)`. This change reduced ambiguity and improved agent performance, demonstrating the importance of thoughtful design in MCP server implementations.
+
+### Best Practices for Sustaining Effective MCP Servers
+
+To maintain an effective MCP server, organizations should adhere to several best practices. Regularly reviewing and updating tool definitions, schemas, and permissions is critical to ensuring they remain relevant and secure. This includes deprecating outdated tools and introducing new ones based on emerging requirements. Additionally, implementing robust logging and monitoring practices can help track usage patterns and identify potential security breaches. Finally, fostering a culture of collaboration between developers, security teams, and AI practitioners can lead to more informed design decisions, ultimately enhancing the overall effectiveness of the MCP server.
+
+### Conclusion: The Path Forward for MCP Server Design
+
+In conclusion, the design of MCP servers is pivotal in optimizing AI agent performance and security. By adhering to clear naming conventions, implementing stringent validation processes, and balancing tool discovery with context management, organizations can create robust MCP servers that empower AI agents to operate efficiently. Continuous evaluation and iteration of server design, coupled with a commitment to best practices, will ensure that MCP servers remain effective in the face of evolving technological landscapes. As AI continues to advance, the importance of thoughtful MCP server design will only grow, making it a critical area for ongoing research and development.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/arif_sefa_f2d991d373eb93e/your-mcp-server-needs-better-design-for-better-agents-1ka6)
+
+---
+
+<SocialShare title="Optimizing MCP Server Design for Enhanced AI Agent Performance" slug="optimizing-mcp-server-design-for-enhanced-ai-agent-performance" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
