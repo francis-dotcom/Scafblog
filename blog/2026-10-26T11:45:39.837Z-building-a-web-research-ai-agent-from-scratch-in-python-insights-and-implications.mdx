@@ -1,0 +1,410 @@
+---
+slug: building-a-web-research-ai-agent-from-scratch-in-python-insights-and-implications
+title: "Building a Web Research AI Agent from Scratch in Python: Insights and Implications"
+authors: [francis]
+tags: [ai, python, agents, web scraping]
+date: 2026-10-26T11:45:39.837Z
+description: "One question, eleven model calls, nine page fetches and about 1.6 cents. That is what the agent in this post spent to answer who coined the term "prompt injection" and how it differs from jailbreaking. Here is the trace it printed, unedited:
+step 1 | read_notes({"topic":"prompt injection jailbreaking coined term"}) | 13 chars | in 300 out 38
+step 2 | search_wikipedia({"query":"prompt injection term coined who coined prompt injection jai) | 278 chars | in 354 out 42
+step 3 | fetch_url({"url":"https://simonwillison.net/2022/Sep/12/prompt-injection/"}) | 9457 chars | in 470 out 256
+step 3 | fetch_url({"url":"https://en.wikipedia.org/wiki/Large_language_model"}) | 9001 chars | in 470 out 256
+step 3 | fetch_url({"url":"https://owasp.org/www-community/attacks/Prompt_Injection"}) | 86 chars | in 470 out 256
+step 4 | search_wikipedia({"query":"jailbreaking prompt injection difference AI security"}) | 813 chars | in 4939 out 44
+step 5 | fetch_url({"url":"https://simonwillison.net/2023/May/2/prompt-injection-and-jail) | 796 chars | in 5176 out 340
+step 5 | fetch_url({"url":"https://community.owasp.org/attacks/Prompt_Injection"}) | 1469 chars | in 5176 out 340
+step 5 | fetch_url({"url":"https://www.microsoft.com/en-us/security/blog/2023/10/19/ai-ja) | 4457 chars | in 5176 out 340
+step 6 | save_note({"topic":"prompt injection coined term","claim":"Simon Willison coined) | 15 chars | in 6974 out 500
+step 6 | save_note({"topic":"prompt injection definition","claim":"Willison describes pro) | 15 chars | in 6974 out 500
+step 6 | save_note({"topic":"prompt injection versus jailbreaking","claim":"Prompt inject) | 15 chars | in 6974 out 500
+step 7 | fetch_url({"url":"https://simonwillison.net/series/prompt-injection/"}) | 8768 chars | in 7518 out 79
+step 8 | fetch_url({"url":"https://simonwillison.net/2024/Mar/5/prompt-injection-and-jail) | 101 chars | in 9798 out 100
+step 9 | fetch_url({"url":"https://simonwillison.net/2024/Mar/5/prompt-injection-jailbrea) | 9202 chars | in 9943 out 39
+step 10 | save_note({"topic":"prompt injection and jailbreaking distinction authoritative") | 15 chars | in 12109 out 117
+stop=answer steps=11 fetches=9 tokens_in=69823 tokens_out=1836 cost=$0.0162 seconds=42.0
+
+Every line is one tool call the model chose to make. I wrote the program that produced it in one Python file with a single dependency, and I want to walk through each part, because once you can read a trace like this one, most of what people call agent frameworks stops being mysterious. One warning before we start: the answer this run gave me was wrong, and why is the most useful thing in the post.
+I built this one to find out what a framework does for me before I let one do it. The answer turned out to be less than I expected. An agent is a loop around an API call, a handful of functions, and a few decisions about when to stop. Frameworks add real things on top, such as saved state, tracing and handoffs between agents, and I will say which of those are worth having near the end. But if you start there, you cannot tell which behavior comes from your design and which comes from the library.
+The agent is a web research assistant. You ask it a question, it searches Wikipedia, fetches pages, saves notes about the claims it relies on, and answers with sources. It has four tools, it works against any OpenAI-compatible endpoint, and the whole thing is 331 lines including error handling. You need Python 3.10 or newer, uv, and either an API key or a local model through Ollama. The code is at github.com/iayanpahwa/research-agent-from-scratch, and every code block below is copied from that file by a script, not retyped. To run it:
+export AGENT_API_KEY=...   # AGENT_BASE_URL and AGENT_MODEL default to OpenAI and gpt-4o-mini
+uv run agent.py "Who coined the term 'prompt injection', and how is it different from jailbreaking?"
+
+The trace prints to stderr and the answer to stdout. Set PRICE_IN_PER_MTOK and PRICE_OUT_PER_MTOK if you want the cost line to show a number, because they default to zero. The README covers OpenRouter and Ollama.
+A chatbot makes one model call and returns the answer. A workflow makes several calls, but your code decides the order: search, then fetch the top result, then summarize. Anthropic's essay on building effective agents draws the line this way: agents are "systems where LLMs dynamically direct their own processes and tool usage, maintaining control over how they accomplish tasks." The model decides whether to search again, which page to open, and when it has enough.
+That is the whole difference. In a workflow you can read the code and know what will happen. In an agent you can only read the code and know what is allowed to happen.
+
+The agent here has six parts, and I will use the names the code uses.
+
+run() is the loop. messages is the history the model sees on every call. call_model() sends one request to the API. TOOL_SCHEMAS describes the tools to the model, and TOOLS holds the functions that actually run. notes.db is a SQLite file that outlives the process. Everything in the next four sections is one of those parts.
+The model never sees your Python. It sees a JSON description of each tool: a name, a sentence about what it does, and the parameters it takes. Here is the one for fetch_url, printed from the running program:
+{
+  "type": "function",
+  "function": {
+    "name": "fetch_url",
+    "description": "Fetch a web page and return its visible text (truncated) and first links.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "url": {
+          "type": "string",
+          "description": "Full http(s) URL"
+        }
+      },
+      "required": [
+        "url"
+      ]
+    }
+  }
+}
+
+The description is the model's only guide to when to use the tool, so it is part of your design, not documentation. A vague description gets a tool called at the wrong time, or never. A small helper builds these descriptions, and the system prompt is where the agent's rules live:
+def schema(name: str, description: str, **props: str) -> dict:
+    return {
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": description,
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    k: {"type": "string", "description": v} for k, v in props.items()
+                },
+                "required": list(props) if name != "read_notes" else [],
+            },
+        },
+    }
+
+SYSTEM_PROMPT = """You are a research assistant. Answer the user's question using pages you fetch.
+- Search first, then fetch the pages worth reading. Do not answer from memory.
+- Save a note with save_note for each claim you rely on, with the page it came from.
+- Check read_notes before searching, in case an earlier run already covered the topic.
+- Stop when the question is answered. Give a short answer and list your sources."""
+
+The function behind it is ordinary code, with two rules I would apply to any agent tool. First, it never raises. A tool that throws an exception takes the whole run down, so run_tool below catches everything, and a tool that returns {"error": "..."} hands the model something it can react to. Second, it assumes the model is careless or has been tricked, because it might be. Here are the checks at the top of fetch_url:
+parsed = urlparse(url)
+if parsed.scheme not in ("http", "https") or not parsed.hostname:
+    return {"error": "only http and https URLs are allowed"}
+if not is_public_host(parsed.hostname):
+    return {"error": "refusing to fetch a private or unresolvable address"}
+
+Only http and https, and only hosts that resolve to public addresses. Without the second check, a model that decides to fetch http://169.254.169.254/ would be asking your cloud provider's metadata service for credentials on your behalf.
+I checked both with curl on October 23, and the tool sends the descriptive one. search_wikipedia is the only search tool because it needs no API key and it behaves. A paid search API is a one-function swap if you want better results, and it would not change anything else in the design.
+fetch_url also does not follow redirects. It returns {"status": 308, "redirect_to": "..."} and lets the model decide to fetch the new address, which sends the next hop back through the same checks. In the trace at the top, the model hit exactly that on an OWASP link and followed it two steps later.
+Talking to the model is one HTTP request:
+def call_model(messages: list[dict]) -> dict:
+    """One chat-completions request. Retry rate limits and server errors; raise anything else."""
+    for attempt in range(4):
+        r = httpx.post(
+            f"{BASE_URL}/chat/completions",
+            headers={"Authorization": f"Bearer {API_KEY}"} if API_KEY else {},
+            json={"model": MODEL, "messages": messages, "tools": TOOL_SCHEMAS},
+            timeout=120,
+        )
+        if r.status_code == 429 or r.status_code >= 500:
+            time.sleep(2**attempt)
+            continue
+        r.raise_for_status()
+        data = r.json()
+        if "choices" not in data:
+            raise RuntimeError(f"unexpected model reply: {str(data)[:200]}")
+        return data
+    raise RuntimeError(f"model API still failing after retries (HTTP {r.status_code})")
+
+The retry is there because rate limits and server errors are normal, and a single 429 should not end a run. Everything else is a plain request to /chat/completions with the history and the tool descriptions attached.
+for step in range(1, MAX_STEPS + 1):
+    data = call_model(messages)
+    msg, usage = data["choices"][0]["message"], data.get("usage") or {}
+    tokens_in += usage.get("prompt_tokens", 0)
+    tokens_out += usage.get("completion_tokens", 0)
+    calls = msg.get("tool_calls") or []
+    if not calls:
+        answer, stop = msg.get("content") or "", "answer"
+        break
+    messages.append(msg)
+    for call in calls:
+        result = run_tool(call)
+        fetches += call["function"]["name"] == "fetch_url"
+        print(
+            f"step {step} | {call['function']['name']}({(call['function']['arguments'] or '')[:70]}) | {len(result)} chars | "
+            f"in {usage.get('prompt_tokens', 0)} out {usage.get('completion_tokens', 0)}",
+            file=sys.stderr,
+        )
+        messages.append(
+            {"role": "tool", "tool_call_id": call["id"], "content": result}
+        )
+    if tokens_in + tokens_out > TOKEN_BUDGET:
+        stop = "token_budget"
+        break
+
+Read it as three cases. If the reply has no tool_calls, the model is done and its text is the answer. If it has tool calls, the loop runs each one and appends one role: tool message per call, tagged with the tool_call_id the model gave it. That tag is how the model matches results to requests, and if a call has no matching result message, the API rejects the next request. Then the loop goes around again with a longer history.
+A reply can contain several tool calls at once. Step 3 of the trace has three fetches in one reply, and each gets its own result message. The function that runs one call is short:
+def run_tool(call: dict) -> str:
+    name = call["function"]["name"]
+    try:
+        args = json.loads(call["function"]["arguments"] or "{}")
+        result = (
+            TOOLS[name](**args) if name in TOOLS else {"error": f"no such tool: {name}"}
+        )
+    except Exception as exc:  # a tool must never end the run
+        result = {"error": f"tool failed: {type(exc).__name__}: {exc}"}
+    return json.dumps(result)
+
+Malformed arguments, an unknown tool name and a tool that returns an error all come back to the model as data. The model usually corrects itself on the next step, and when it does not, the step cap in a later section ends the run.
+
+The first kind of memory is the messages list. It is everything the model knows, it is sent in full on every call, and it only grows. In the trace above, the prompt was 300 tokens at step 1 and 12,109 at step 10. The total across all eleven calls was 69,823 input tokens, not because any single prompt was that large but because every call resends everything before it. The total grows faster than the number of steps.
+Much of that growth is page text: the prompt went from 470 tokens at step 3 to 4,939 at step 4, after three pages came back in one reply. I measured three pages by comparing the raw HTML with the visible text the agent extracts, using the rough rule of four characters per token:
+
+
+
+Page
+Raw HTML, approx. tokens
+Visible text, approx. tokens
+
+
+
+
+Wikipedia, Prompt injection
+45,034
+4,302
+
+
+Anthropic, Building effective agents
+64,314
+4,547
+
+
+Python docs, sqlite3
+78,886
+18,155
+
+
+
+Feeding raw HTML to a model wastes most of the window, and even the text of a long page is too much to keep. So fetch_url returns at most 8,000 characters of page text, about 2,000 tokens, plus the title and the first 20 links, and sets "truncated": true when it cut something off. The cost is that the model sees only the top of long pages. That is a real limitation, and it is a better one than a context window that fills up on step four.
+def save_note(topic: str, claim: str, source_url: str) -> dict:
+    with closing(db()) as con, con:
+        con.execute(
+            "INSERT INTO notes (ts, topic, claim, source_url) VALUES (datetime('now'), ?, ?, ?)",
+            (topic, claim, source_url),
+        )
+    return {"saved": True}
+
+def read_notes(topic: str = "") -> dict:
+    """Match any word of the topic against saved topics and claims."""
+    words = [w for w in re.findall(r"[^\W_]+", topic) if len(w) > 2][:8] or [""]
+    clause = " OR ".join("topic LIKE ? OR claim LIKE ?" for _ in words)
+    params = [f"%{w}%" for w in words for _ in (0, 1)]
+    with closing(db()) as con:
+        rows = con.execute(
+            f"SELECT topic, claim, source_url FROM notes WHERE {clause} ORDER BY id DESC LIMIT 20",
+            params,
+        ).fetchall()
+    return {"notes": [{"topic": t, "claim": c, "source_url": s} for t, c, s in rows]}
+
+The system prompt tells the model to check read_notes first and to save a note for each claim it relies on. I ran the same question twice against one database. My first version of read_notes matched the model's whole query as a single substring, so the second run asked for "prompt injection jailbreaking coined term", found nothing under the topic "prompt injection coinage", and started from scratch. That is the kind of bug you find only by running the thing twice. The version above matches on any word, and the second run now reads its earlier notes before it does anything else. The notes also carry a risk I only noticed when I read them back, which the cost section below shows.
+
+A loop with no exit is a billing event. The agent here has four ways to stop. It stops when the model answers without asking for a tool, which is the normal case. It stops at a step limit. It stops when total tokens pass a budget. And it stops when something unrecoverable happens, such as a model API that keeps failing after retries. The limits are plain constants:
+MAX_STEPS = 12
+TOKEN_BUDGET = 60_000
+MAX_TOOL_CHARS = 8_000
+MAX_BYTES = 2_000_000
+
+and the budget check sits at the bottom of the loop, using the usage field the API returns with every reply. It runs after tool steps, so the last model call can overshoot it, and the first run in this post did: its total was 71,659 tokens against a 60,000 budget, because the check passed at 59,136 after step 10 and the final answer call added the rest. A hard cap would check before each call.
+if tokens_in + tokens_out > TOKEN_BUDGET:
+    stop = "token_budget"
+    break
+
+The part people skip is deciding what the user sees at each exit. When a run stops at the step limit, it prints stop=max_steps and returns a message saying it stopped without an answer, rather than a half-finished sentence that reads like a result. Errors split into three groups. 
+A bad tool call goes back to the model. A rate limit or server error is retried with a growing delay. Anything else ends the run. If you cannot say which group an error belongs to, the loop will eventually decide for you at an inconvenient time.
+I ran the same question three times, on two models and then a third. The trace at the top is the first run on gpt-5.6-luna through OpenRouter, with an empty notes database. Here is the second run on the same model, with the notes from the first:
+step 1 | read_notes({"topic":"prompt injection jailbreaking coined term"}) | 1632 chars | in 300 out 38
+step 2 | search_wikipedia({"query":"prompt injection term coined Simon Willison Riley Goodside j) | 15 chars | in 712 out 63
+step 3 | fetch_url({"url":"https://simonwillison.net/2022/Sep/12/prompt-injection/"}) | 9457 chars | in 792 out 102
+step 3 | fetch_url({"url":"https://simonwillison.net/2024/Mar/5/prompt-injection-jailbrea) | 9202 chars | in 792 out 102
+step 4 | save_note({"topic":"who coined prompt injection","claim":"Simon Willison propose) | 15 chars | in 5249 out 284
+step 4 | save_note({"topic":"prompt injection definition","claim":"Willison defines promp) | 15 chars | in 5249 out 284
+step 4 | save_note({"topic":"jailbreaking distinction","claim":"Willison defines jailbrea) | 15 chars | in 5249 out 284
+stop=answer steps=5 fetches=2 tokens_in=12630 tokens_out=767 cost=$0.0034 seconds=15.5
+
+The second run read 1,632 characters of earlier notes at step 1, fetched two pages instead of nine, and finished in 5 steps instead of 11. It used 12,630 input tokens against 69,823, for about 0.3 cents against 1.6. That is one run each, with a question the notes already covered, so treat it as an illustration of what persistent notes can save and not as a benchmark. 
+The prices are the models' list prices on OpenRouter on October 23, $0.20 and $1.20 per million input and output tokens for luna and $1 and $5 for claude-haiku-4.5, and the agent prints its own estimate from the usage numbers rather than reading a bill. An earlier fresh run of the same question on the same model cost 0.55 cents, so one run is a sample, not a price.
+The answer the first run gave was wrong, and I would not have caught it without checking. It said Simon Willison coined "prompt injection" in September 2022, after reading his own posts. Willison himself wrote, in a 2025 post, that a Twitter user, @himbodhisattva, coined the term on May 13, 2022, "four months before I did." Wikipedia says the same. The agent saved "Willison coined it" as a note, and the second run read that note first and repeated it with confidence, in fewer steps and for less money. 
+A persistent memory preserves mistakes as faithfully as facts, and a cheaper second run is not evidence that the answer improved. The error did not repeat later. Two more runs on the hardened code both credited @himbodhisattva first and Willison for popularizing it, and both are saved in the repo under examples/postfix, so treat the wrong answer as one draw from a model that can go either way. The lesson about notes holds either way.
+The first run also wasted effort, and I left that in. At step 3 the model fetched the Wikipedia page for "Large language model" because it appeared in the search results, spent 9,001 characters of context on it, and never used it. An OWASP link redirected, and the address it redirected to returned a 404. The model then guessed two more URLs, a Willison post from May 2023 and a Microsoft security blog, and both came back 404. A fourth fetch hit a wrong slug and a 301. Models invent plausible addresses, and the tool's job is to return the error as data so the model can try something else, which it did.
+claude-haiku-4.5, took 4 steps and one fetch, and cost about 1.5 cents. 
+It did far less work than the first run and cost about the same, because its per-token price is five times higher on input. It read only the Wikipedia article, and its answer credited @himbodhisattva with the first use in May 2022, which matches the article and matches Willison. So the run that read less got the better answer. An earlier first run on luna also read the Wikipedia article and gave the same answer as haiku. What mattered was which pages the agent opened, not which model it was.
+I also ran the agent against a local llama3.1:8b through Ollama, with no API key, on a similar question. It called the search tool correctly, then stopped after one search with no page fetched, answered from the snippets, and got the answer wrong. That is one run, so I will not generalize from it. It does show that the path needing no credentials can make a sound design look broken.
+You have now written the loop, the tools, the history and the stop rules. Every framework is a different way of packaging those same parts, and the vocabulary differs. Here is how the pieces in this agent map to three popular ones, with the names checked against each project's source on October 23:
+
+
+
+Piece
+This agent
+LangGraph
+OpenAI Agents SDK
+Claude Agent SDK
+
+
+
+
+Define a tool
+
+schema() plus a function
+
+@tool from LangChain
+function_tool
+tool
+
+
+Cap the steps
+MAX_STEPS
+recursion_limit
+max_turns
+max_turns
+
+
+Keep a conversation between runs
+not built, notes.db stores claims and not the message list
+
+SqliteSaver checkpointer
+SQLiteSession
+resume
+
+
+
+A framework earns its place when you need something this file does not do: state that survives a crash and resumes mid-run, a human approving a step before it runs, several agents handing work to each other, or a trace viewer your team can open. If your agent is one loop and a few tools, you do not need any of that, and you will debug it faster without a layer in between. If you do reach for one, you will already know what it is doing underneath.
+This is the section I would not skip. Look at what the agent you just built does: it takes text written by strangers, from any public page, and puts it in front of a model that can call tools. Whatever that page says is now part of the model's input, and the model cannot reliably tell your instructions from the page's.
+Humanbound's Demetris Gerogiannis ran a pricing agent with a fetch_url tool, much like ours, through 1,350 runs across nine models in One Link Away. A competitor page one link away carried the trap. Four of the five non-OpenAI models he tested sent a confidential unit cost to an attacker's server on every run when nothing in the system prompt addressed it. No jailbreak was involved.
+Our research agent has the same exposure, and I would rather list it than hide it. A page can tell the model to do something. save_note writes to storage that persists, so a poisoned note can mislead every future run. fetch_url will request any public address, including one whose query string carries data out. The only things between the agent and a bad day are the step cap, the token budget and the address check, and that check has a known gap: it looks the name up once and the HTTP client looks it up again when it connects, so a hostile DNS server can pass the check and then point at a private address. A production agent should connect to the address it checked. That is acceptable for a research toy that can write only a local file. 
+It stops being acceptable the moment you add a tool that sends email, runs code or touches money, because the worst case now grows with every tool you add.
+OWASP Top 10 for Agentic Applications groups these risks, and it is a good map of what to check. But a map does not tell you what your agent does. The only way to know is to attack it, before a stranger does.
+Humanbound is an open-source tool that attacks an agent over HTTP and grades what happened. It generates adversarial conversations, sends them to your agent's endpoint, and has a judge model score each one, then rolls the results into a posture score mapped to the OWASP lists. 
+It treats your agent as a black box, so it does not matter whether you built it with a framework or with 331 lines of Python.
+/chat endpoint, which How to test a LangChain agent for security (in 15 lines of FastAPI) walks through. After that, the run looks like this:
+pip install "humanbound[engine]"
+hb test --endpoint bot-config.json --scope scope.yaml --quick --wait
+
+Before it can attack anything, the tool needs a model of its own to write the attacks and judge the replies, so set HB_PROVIDER and HB_API_KEY for a provider, or run it with HB_PROVIDER=ollama and HB_MODEL=llama3.1:8b for full isolation, as the local engine docs describe. That means paid model calls on your side. On my machine the CLI printed an estimate of about 20 minutes for a --quick run. My walkthrough, Attack your own AI agent, shows a full run on a support agent: what the report looks like, which failures it found, and what I changed. The fast sweep took about fifteen minutes there, and the multi-turn run a little over twenty.
+A posture score tells you roughly where you stand, and it is not a certificate. In that walkthrough I fixed a refund limit in code, confirmed by hand that money could no longer leave, and the score barely moved, because the judge sees only what the agent says, never what it did. A clean run is not proof that an agent is safe, and a test like this one finds what it thinks to try. It will not replace limiting what your agent is allowed to do in the first place.
+fetch_url so it only reaches hosts you chose. Review notes before they are trusted by a later run. Keep every tool you add as narrow as the first four. Then point a tester at it, and read what it finds...."
+image: /img/blog/generated/building-a-web-research-ai-agent-from-scratch-in-python-insights-and-implications-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Building a Web Research AI Agent from Scratch in Python: Insights and Implications](/img/blog/generated/building-a-web-research-ai-agent-from-scratch-in-python-insights-and-implications-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### Understanding the Role of AI Agents in Modern Applications
+
+AI agents have emerged as pivotal tools in various domains, acting as intermediaries that automate complex tasks through intelligent decision-making. These agents leverage machine learning models to perform operations such as data retrieval, analysis, and even interaction with users. The ability to create a custom AI agent tailored for specific tasks, such as web research, enables developers to explore the nuances of AI functionalities and limitations. By building an agent from scratch, one gains a comprehensive understanding of its architecture, decision-making processes, and potential pitfalls, contrasting starkly with the opaque nature of pre-built frameworks.
+
+### Setting Up the Development Environment for AI Agent Creation
+
+To build an AI research agent in Python, the initial step involves setting up a suitable development environment. This includes installing Python 3.10 or newer, along with necessary libraries such as `httpx` for making HTTP requests and `sqlite3` for database management. The absence of complex frameworks simplifies the installation process, allowing developers to focus on the core functionalities of their agent. A minimalistic approach ensures that the agent remains lightweight and manageable, enabling a deeper exploration of its components without the overhead of unnecessary dependencies.
+
+```bash
+pip install httpx sqlite3
+```
+
+### Core Components of the AI Agent: An Overview
+
+The architecture of an AI agent typically consists of several core components: the agent's loop, message handling, tool definitions, and persistence mechanisms. The agent's loop is responsible for managing the flow of execution, making decisions based on user input, and determining when to stop processing. Message handling involves maintaining a history of interactions, which informs the model's responses and decisions. Tool definitions specify the capabilities of the agent, such as fetching web pages or saving notes, while the persistence layer, often implemented with a database, allows the agent to retain knowledge across sessions. Understanding these components is crucial for effectively designing and implementing the agent.
+
+### Implementing the Agent: A Step-by-Step Coding Process
+
+The coding process for the AI agent begins with defining its main loop, which orchestrates the interaction between the user and the model. The loop continuously processes user queries, invokes the appropriate tools, and updates the message history. A simple yet effective implementation can be structured as follows:
+
+```python
+def run():
+    messages = []
+    while True:
+        response = call_model(messages)
+        # Process response and update messages
+```
+
+In this code snippet, `call_model` is a function that interacts with the AI model, sending the current message history and receiving the model's output. This modular approach allows for easy updates and modifications to the agent's behavior.
+
+### Tool Implementation: Fetching and Saving Data
+
+The agent's functionality is enhanced through the implementation of various tools. For example, a `fetch_url` tool retrieves web pages and extracts relevant content. This tool must handle errors gracefully, ensuring that the agent can recover from failed requests without crashing. Below is an example of a robust implementation for the `fetch_url` tool:
+
+```python
+def fetch_url(url: str) -> dict:
+    if not is_valid_url(url):
+        return {"error": "Invalid URL"}
+    
+    try:
+        response = httpx.get(url)
+        response.raise_for_status()
+        return {"content": response.text}
+    except httpx.HTTPStatusError as e:
+        return {"error": f"HTTP error: {e.response.status_code}"}
+```
+
+In this implementation, the function checks the validity of the URL before making a request. It also captures any HTTP errors, returning a structured error message that the model can interpret.
+
+### Testing the AI Agent: Validating Functionality and Performance
+
+Once the agent is built, thorough testing is essential to validate its functionality. This involves running various queries and analyzing the results for accuracy and completeness. The agent should be able to handle different types of requests, including those that require multiple tool invocations. Performance can be measured in terms of response time, accuracy of fetched data, and the cost associated with API calls. For instance, the agent's operational cost can be tracked by calculating the number of tokens processed during each interaction:
+
+```python
+tokens_in += usage.get("prompt_tokens", 0)
+tokens_out += usage.get("completion_tokens", 0)
+```
+
+### Common Pitfalls and Error Handling Strategies
+
+While developing an AI agent, several common pitfalls should be addressed proactively. One major risk is the overgeneralization of AI capabilities, which can lead to misconceptions about the agent's reliability. Additionally, neglecting security implications, especially in web scraping, can expose the agent to vulnerabilities. Implementing robust error handling mechanisms, such as validating inputs and managing exceptions, is crucial to maintaining the agent's stability and security.
+
+### Evaluating the Benefits of Custom-Built AI Agents
+
+Building a custom AI agent from scratch offers significant advantages over using pre-built frameworks. It allows for a tailored approach to specific tasks, providing insights into the agent's decision-making processes and operational limitations. Furthermore, developers can optimize the agent's performance by fine-tuning its components and functionalities based on real-world testing and feedback. This hands-on experience fosters a deeper understanding of AI mechanics, empowering developers to create more effective and secure AI solutions.
+
+### The Importance of Tool Descriptions and Documentation
+
+In the context of AI agents, clear tool descriptions are vital for guiding the model's decision-making process. Each tool must be accompanied by a well-defined schema that outlines its purpose and parameters. This ensures that the model can accurately determine when to invoke a particular tool, minimizing the risk of errors. Additionally, thorough documentation of the agent's architecture and functionalities aids in future development and maintenance, fostering collaboration among team members.
+
+### Addressing Security Risks in AI Agent Development
+
+As AI agents interact with external data sources, security risks become a paramount concern. Developers must implement measures to mitigate potential threats, such as validating URLs and sanitizing inputs to prevent injection attacks. Furthermore, employing a robust logging mechanism can help track the agent's interactions, providing insights into any suspicious activities. Regular security audits and testing, such as using tools like Humanbound, can identify vulnerabilities and enhance the agent's resilience against attacks.
+
+### Conclusion: The Future of Custom AI Solutions
+
+The journey of building a custom AI research agent in Python illustrates the complexities and rewards of developing tailored AI solutions. By understanding the underlying mechanics and addressing potential pitfalls, developers can create more robust and effective agents. As AI technology continues to evolve, the ability to craft bespoke solutions will remain a valuable skill, empowering developers to harness the full potential of AI in various applications.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/humanbound_ai/build-your-first-ai-agent-from-scratch-in-python-a-web-research-agent-step-by-step-no-framework-2oo7)
+
+---
+
+<SocialShare title="Building a Web Research AI Agent from Scratch in Python: Insights and Implications" slug="building-a-web-research-ai-agent-from-scratch-in-python-insights-and-implications" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
