@@ -1,0 +1,372 @@
+---
+slug: enhancing-web-application-security-with-vigilant-heron-a-deep-dive-into-ai-driven-threat-detection
+title: "Enhancing Web Application Security with Vigilant-Heron: A Deep Dive into AI-Driven Threat Detection"
+authors: [francis]
+tags: [ai, security, web, proxy]
+date: 2026-10-27T17:14:21.132Z
+description: "A typical WAF in front of a web application rejects known attack patterns with signatures.
+Sending every request to an AI model has the opposite problems.
+vigilant-heron is a Rust reverse proxy I built to sit in between.
+decision model that returns scores.
+This article shows the overall design, a hands-on run from install to a blocked test attack, and then the design decisions: the evaluation order, what reaches the model, and what happens when the model cannot answer.
+Status: vigilant-heron is in early development and has not been validated on real traffic. Every site is expected to start in shadow mode, which records decisions and blocks nothing.
+client ──► nginx / Cloudflare ──► vigilant-heron ──► your site (upstream)
+                                      │
+                                      └──► decision model (Jev, Clef, Strands Decider, or your own)
+
+Screening has two stages.
+fixed rules: known patterns such as SQL injection and path traversal are blocked without asking any model.
+One principle governs the order: a rule's decision cannot be overturned by the model.
+The configuration is written in an nginx-like syntax: the listen address, per-site upstreams, the model choice, rate limits, and logging, all in one file.
+This follows the official Getting started. We will start a test upstream, run the router in shadow mode, send a SQL injection, and switch to enforce.
+On Linux, download a release binary (x86_64 or aarch64, glibc 2.39 or newer):
+ARCH=$(uname -m)   # x86_64 or aarch64
+curl -fsSLO "https://github.com/coo-quack/vigilant-heron/releases/latest/download/vigilant-heron-$ARCH-unknown-linux-gnu.tar.gz"
+tar -xzf "vigilant-heron-$ARCH-unknown-linux-gnu.tar.gz"
+sudo install -m 755 "vigilant-heron-$ARCH-unknown-linux-gnu/vigilant-heron" /usr/local/bin/
+
+On macOS, build from source. The toolchain named by rust-toolchain.toml installs on the first build:
+git clone https://github.com/coo-quack/vigilant-heron.git
+cd vigilant-heron
+cargo build --release --locked
+
+A Docker image is published as well:
+docker run --rm ghcr.io/coo-quack/vigilant-heron:latest --version
+
+Instead of a real application, serve a folder with Python's built-in web server. Keep it running in its own terminal:
+mkdir -p site && echo "hello from the upstream" > site/index.html
+python3 -m http.server 3000 --bind 127.0.0.1 --directory site
+
+Save this as vigilant-heron.conf. It listens on port 8080 and forwards requests for example.com to port 3000:
+listen 127.0.0.1:8080;              # the address the router listens on
+pid vigilant-heron.pid;             # where the router writes its process id
+
+decision {
+    backend jev;                    # the decision model; reads its key from TYPESAFE_API_KEY
+}
+
+site example.com {
+    upstream http://127.0.0.1:3000; # where allowed requests go
+    mode shadow;                    # record decisions, block nothing
+}
+
+While mode shadow; is set, the router forwards every request and only records what it would have blocked.
+-t reads and validates the file, then exits. It starts nothing:
+$ TYPESAFE_API_KEY=... vigilant-heron -t -c vigilant-heron.conf
+configuration file vigilant-heron.conf test is successful
+
+Start the router:
+TYPESAFE_API_KEY=... vigilant-heron -c vigilant-heron.conf
+
+From a second terminal, send an ordinary request:
+curl -i http://127.0.0.1:8080/ -H "Host: example.com"
+
+You get 200 OK with hello from the upstream.
+Now send a request whose query string carries a SQL injection:
+curl -i "http://127.0.0.1:8080/?id=1%20UNION%20SELECT%20password%20FROM%20users" \
+  -H "Host: example.com"
+
+Shadow mode forwards this too, so the answer is still 200 OK. The router's terminal shows what it would have done:
+{"status":"200","action":"allow","reason":"rule","rule_id":"vh-sqli-001","would_have":"block",...}
+
+rule_id is the built-in rule that matched; vh-sqli-001 matches UNION SELECT in a query string.
+would_have is block, which means enforce mode would have answered 403.
+action is allow because shadow mode forwarded the request.
+Read the shadow log until the would-be blocks are the ones you expect, change mode shadow; to mode enforce;, and signal the router to reload. The new file applies without a restart, and connections stay up:
+vigilant-heron -s reload -c vigilant-heron.conf
+
+Send the test attack again. The response is now 403 Forbidden, and the upstream never sees the request. The ordinary request still returns 200 OK.
+In production, nginx stays in front, terminates TLS, and passes the WebSocket headers, the Host the sites are matched on, and the client address:
+upstream vigilant_heron {
+    server 127.0.0.1:8080;
+    keepalive 16;
+}
+
+server {
+    listen 443 ssl;
+    server_name example.com;
+
+    location / {
+        proxy_pass http://vigilant_heron;
+        proxy_http_version 1.1;                                # WebSocket upgrades need HTTP/1.1
+        proxy_set_header Host $host;                           # sites are matched on this header
+        proxy_set_header X-Real-IP $remote_addr;               # the client address, read by real_ip_from
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+    }
+}
+
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+Add this to the router's configuration so the client address is trusted only from nginx:
+real_ip_from 127.0.0.1;             # trust X-Real-IP only from nginx
+real_ip_header X-Real-IP;
+
+Each request goes through these steps, and the first step that decides it ends the evaluation:
+Rate and connection limits (limit_req, limit_conn). A client over a limit is refused with the configured status (503 by default).
+Host check. A Host header with characters that cannot appear in a host name gets 400.
+Access list. A denied client address gets 403.
+Block rules. The built-in rules that are on, then the top-level rules in file order, then the site's rules. The first match blocks.
+Skip rules. The first match forwards the request without calling the model.
+Static assets. A plain GET or HEAD for an image, CSS or JavaScript path, with no query and no body, is forwarded without the model.
+Decision model. The remaining requests are scored, and the scores are compared with the site's thresholds.
+Two properties are worth noting.
+First, block rules are always checked before skip rules, so a skip rule can never let through a request that a block rule matches.
+Second, the path is read in more than one way. Upstreams resolve the same bytes differently: Tomcat, Jetty and Spring drop ; path parameters, IIS and ASP.NET read \ as /, and Express matches the raw path. vigilant-heron reads each path six ways (decoded, with ; cut, with \ as /, combinations of these, and the raw path) and blocks when any reading matches. A static skip requires every reading to be static, so a path like /index.php/x.css is always inspected. The request that reaches the upstream is the one the client sent, unchanged.
+Before a copy of the request is sent to the model, credentials are removed:
+cookie, authorization, proxy-authorization, x-api-key and x-auth-token are always dropped, and so is any other header whose name looks like a credential, such as x-csrf-token or x-session-id.
+Form, JSON, multipart and XML bodies are scanned for fields whose names contain password, token, secret, credential, card_number and similar parts, or a whole word like pass, pin, otp, session or ssn. The values are replaced with [REDACTED]. Names like author, shipping or passenger are sent as they are.
+Only the first 8 KiB of the body is sent by default, cut on a UTF-8 boundary, with a flag when truncation happened.
+All client data sits under untrusted, telling the model to read it as data, not instructions:
+{"event": {
+  "untrusted": {"method": "POST", "path": "/login", "query": null,
+                "headers": [["user-agent", "…"]], "body": "user=alice&password=[REDACTED]"},
+  "meta": {"host": "example.com", "client_ip": "203.0.113.7", "body_truncated": false}
+}}
+
+The model returns two scores between 0 and 1: attack (is this an attack?) and ai_instruction (does this request try to steer an AI or change how it is judged?):
+{"attack": 0.02, "ai_instruction": 0.01}
+
+Each site compares the scores with two thresholds: block_threshold (default 0.87) for attack and instruction_threshold (default 0.8) for ai_instruction. A score at or above its threshold blocks the request.
+Four backends are available:
+Jev (default): TypeSafe's Jev at api.typesafe.ai, with the key read from the TYPESAFE_API_KEY environment variable.
+Clef: Cloudflare Workers AI, clef-flash or clef. Requires a URL with your account id and a token variable.
+Strands Decider: an Apache-2.0 decision model you run yourself. It serves POST /v1/systemone, so the only required setting is the URL.
+http: POSTs the JSON above to any endpoint you choose. Anything that answers {"attack": <number>, "ai_instruction": <number>} works.
+Tokens are never written in the configuration file. api_token_env names an environment variable, and the router reads it at startup.
+With third-party APIs (Jev, Clef), keep in mind that redaction is name-based and best-effort: a secret stored under a name without any of the listed words is sent as it is. Choose a backend you may disclose that data to, or run Strands Decider locally. The Security page spells this out.
+Access logs contain the client address, method, path, status and decision fields — never a body, a query string, or a credential header. A log format that references a credential header via $http_* is rejected when the configuration loads.
+Models fail: timeouts, connection errors, 429s, unparseable answers. vigilant-heron groups the failures and lets you set the behavior per group:
+on_rate_limit: the backend's HTTP 429, and saturation (no free concurrency slot within queue_timeout). Defaults to allow.
+on_client_busy: the client already holds its share of in-flight model calls (max_concurrency_per_client, default 8). Defaults to a 429 refusal.
+on_decision_error: timeouts, connection failures, malformed or out-of-range answers. Defaults to allow.
+None of these touch rule decisions. A rule block stays a block whether the model is down, slow, or saturated.
+The allow defaults exist so that a provider outage does not block legitimate traffic. The trade-off is that an attacker who deliberately saturates the model gets requests past it. For paths that must stay safe, set fail_closed_path: a failed decision on those prefixes is blocked whatever the settings say.
+site example.com {
+    upstream http://app:8080;
+    on_decision_error block;
+    fail_closed_path /wp-login.php /wp-admin;
+}
+
+Here, decision errors normally block, rate limits allow, and the login paths block on any failure.
+Twenty-four built-in rules ship in the binary and are on by default. The categories are SQL injection, XSS, path traversal, command injection, file inclusion, SSRF, template and expression injection, XXE, and known scanner user agents. For example, vh-sqli-001 matches UNION SELECT in a query string, vh-ssrf-001 matches the cloud metadata address 169.254.169.254, and vh-expr-001 matches the Log4Shell form ${jndi:.
+The rules are written to miss an attack rather than block ordinary traffic. Patterns that could appear in a code paste or a post about SQL or HTML are deliberately left out; such requests go to the decision model instead. As a consequence, most rules inspect query strings. In the measurement, the built-in rules blocked no allowed request on either split.
+Opt-in virtual patches for known CVEs ship off by default. For instance, vh-cve-2026-9103 and vh-cve-2026-8481 cover IBM Langflow OSS and are enabled per site with enable_rule where that product runs.
+The models and rules were measured on a labelled dataset. It is synthetic and small — about 85 attacks and 110 allowed requests per split. Thresholds were chosen on the dev split, so only the holdout figures are out of sample. Treat the numbers as a starting point for shadow mode on your own traffic, not as a guarantee.
+With the attack threshold chosen on dev (the highest recall at a dev false-positive rate of 2% or less):
+
+
+
+Backend
+Threshold
+Dev recall / FPR
+Holdout recall / FPR
+
+
+
+
+jev-latest
+0.87
+0.871 / 0.018
+0.892 / 0.009
+
+
+clef-flash
+0.88
+0.694 / 0.018
+0.723 / 0.000
+
+
+
+On the ai_instruction side, a threshold of 0.8 blocked no allowed request and still blocked all 15 prompt-injection rows on both splits.
+Combined with the built-in rules, Jev showed zero false positives and gained recall in every split. The models' weak spots also showed: both miss most scanner probes like /.env and /.git/config, which deterministic deny_path entries handle better.
+Latency, measured from a home connection in Japan through the router: a decision p50 of about 146 ms for Jev and 375 ms for clef-flash. 82% of clef-flash calls exceeded the default 300 ms timeout, so about 1000 ms is recommended for Clef. Strands Decider on a single NVIDIA L4 measured a p50 of 99 ms and a p95 of 436 ms for the 2B checkpoint1.
+A load test with a local stub backend (20 ms delay, Apple M2, 8 logical CPUs) reached 40.9 req/s at concurrency 1, 567.9 req/s at 16, and 2,525.8 req/s at 64 with a p95 of 27.7 ms. The total paid spend across the evaluation runs was 6.63 JPY.
+Credential stuffing. A client trying a hundred passwords never shows in a single-request verdict. Throttling is the job of limit_req on the path.
+Triple encoding. Paths and queries are decoded at most twice. A payload encoded three times is not seen as the attack it encodes.
+Beyond the inspected prefix. Both rules and models see only the first inspect_body bytes of a body.
+WebSocket after the handshake. The upgrade is screened like any request; after a 101, frames are copied through without inspection.
+Everything inside multipart. Multipart redaction is lexical, so a sensitive value can still reach the model in some layouts.
+vigilant-heron blocks what fixed rules can block deterministically, and scores the rest with a decision model. Rule decisions cannot be overturned, model failures are configured per group, and static files never reach the model. Deployment starts in shadow mode, and one -s reload switches a site to enforce.
+If this sounds useful:
+Repository
+Documentation — Getting started, How it works, Decision backends, Evaluation, Security
+
+
+
+
+
+
+
+
+
+The Strands Decider figures come from the JevBench tasks, not from this router's questions. Also note that its server has no authentication (keep it on localhost or a private network), and the published checkpoints use a 4,096-token window that silently cuts long prompts at the end. ↩..."
+image: /img/blog/generated/enhancing-web-application-security-with-vigilant-heron-a-deep-dive-into-ai-driven-threat-detection-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Enhancing Web Application Security with Vigilant-Heron: A Deep Dive into AI-Driven Threat Detection](/img/blog/generated/enhancing-web-application-security-with-vigilant-heron-a-deep-dive-into-ai-driven-threat-detection-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### The Dual-Layered Security Approach
+
+Vigilant-Heron introduces a dual-layered security framework that integrates fixed rules with AI decision models, addressing the limitations of traditional Web Application Firewalls (WAFs). Traditional WAFs primarily depend on signature-based detection, which is often ineffective against novel attack vectors. Vigilant-Heron, as a Rust-based reverse proxy, intelligently assesses incoming requests, applying both deterministic rules and adaptive AI capabilities. This combination not only enhances threat detection but also facilitates dynamic responses to evolving attack patterns.
+
+### Architectural Placement in the Web Stack
+
+Understanding the architectural placement of Vigilant-Heron is vital for maximizing its security capabilities. Typically deployed between the client and the upstream application, Vigilant-Heron sits behind a reverse proxy like Nginx or a cloud service such as Cloudflare. This strategic positioning allows Vigilant-Heron to intercept and analyze all incoming requests before they reach the application server. The hierarchical decision-making process first evaluates fixed rules, followed by scoring requests with an AI model, ensuring immediate blocking of known threats while allowing for nuanced evaluation of ambiguous requests.
+
+### Installation Process for Diverse Environments
+
+Installing Vigilant-Heron requires careful attention to detail, particularly regarding the operating system. For Linux users, the installation process involves downloading the appropriate binary and placing it in the local binary directory. Here’s a step-by-step guide for Linux:
+
+```bash
+ARCH=$(uname -m)   # Determine architecture
+curl -fsSLO "https://github.com/coo-quack/vigilant-heron/releases/latest/download/vigilant-heron-$ARCH-unknown-linux-gnu.tar.gz"
+tar -xzf "vigilant-heron-$ARCH-unknown-linux-gnu.tar.gz"
+sudo install -m 755 "vigilant-heron-$ARCH-unknown-linux-gnu/vigilant-heron" /usr/local/bin/
+```
+
+For macOS users, building from source using Rust's Cargo package manager is required:
+
+```bash
+git clone https://github.com/coo-quack/vigilant-heron.git
+cd vigilant-heron
+cargo build --release --locked
+```
+
+Additionally, a Docker image is available for simplified deployment across various environments. Users can run the image with:
+
+```bash
+docker run --rm ghcr.io/coo-quack/vigilant-heron:latest --version
+```
+
+### Configuration Essentials for Optimal Performance
+
+The configuration of Vigilant-Heron is crucial for its effectiveness in production environments. The `vigilant-heron.conf` file, written in a syntax reminiscent of Nginx, allows for intuitive configuration. A basic configuration might look like this:
+
+```nginx
+listen 127.0.0.1:8080;              # Listening address
+pid vigilant-heron.pid;             # PID file location
+
+decision {
+    backend jev;                    # Decision model backend
+}
+
+site example.com {
+    upstream http://127.0.0.1:3000; # Upstream application
+    mode shadow;                    # Start in shadow mode
+}
+```
+
+In this configuration, the `mode shadow;` directive ensures that the system records decisions without blocking any requests initially. This allows administrators to evaluate the effectiveness of the rules and models before enforcing any restrictions.
+
+### Validating the Setup with Shadow Mode
+
+Testing the setup in shadow mode is essential for validating the configuration and understanding how Vigilant-Heron responds to various requests. During this phase, all incoming requests are logged, and the system indicates what actions it would have taken. For instance, sending a SQL injection attempt while in shadow mode would yield a 200 OK response, but the logs would show:
+
+```json
+{"status":"200","action":"allow","reason":"rule","rule_id":"vh-sqli-001","would_have":"block",...}
+```
+
+This feedback loop enables security professionals to fine-tune configurations based on real-time data without the risk of inadvertently blocking legitimate traffic.
+
+### Transitioning to Enforcement Mode
+
+Once the system has been tested and validated, transitioning to enforcement mode is the next critical step. This mode actively blocks requests that meet the criteria for known threats. The transition can be smoothly executed without downtime using the following command:
+
+```bash
+vigilant-heron -s reload -c vigilant-heron.conf
+```
+
+In enforcement mode, the same SQL injection attempt would now result in a 403 Forbidden response, effectively preventing the attack from reaching the upstream application. This proactive stance significantly reduces the attack surface of the web application.
+
+### AI Decision-Making: Mechanisms and Thresholds
+
+The AI decision-making process within Vigilant-Heron is one of its most compelling features. When a request is evaluated by the AI model, it generates two scores: one indicating the likelihood of an attack and another assessing whether the request attempts to manipulate the AI's behavior. These scores are compared against predefined thresholds (`block_threshold` and `instruction_threshold`), determining whether the request is allowed or blocked.
+
+For example, if the attack score exceeds the threshold of 0.87, the request is blocked. This scoring mechanism is not only a powerful tool for identifying potential threats but also allows for fine-tuning based on specific application needs and traffic patterns.
+
+### Recognizing the Limitations of AI Models
+
+Despite its robust design, Vigilant-Heron is not without limitations. AI models can fail due to various reasons, such as timeouts or unparseable responses. The system is designed to handle these failures gracefully, with configurable behaviors for different failure scenarios. For instance, if a model times out, the request can either be allowed or blocked based on the configuration settings.
+
+Moreover, the reliance on AI introduces additional complexity. For example, poorly formatted or encoded requests may not be evaluated correctly, leading to potential security gaps. Therefore, it is crucial for security professionals to continuously monitor and adjust the system based on observed performance and emerging threats.
+
+### Real-World Deployment Scenarios
+
+In a real-world deployment, Vigilant-Heron can be integrated seamlessly with existing infrastructure. For instance, placing it behind an Nginx server that handles SSL termination and forwards requests to Vigilant-Heron ensures that the application benefits from both enhanced security and performance optimization. The configuration for Nginx might look like this:
+
+```nginx
+upstream vigilant_heron {
+    server 127.0.0.1:8080;
+    keepalive 16;
+}
+
+server {
+    listen 443 ssl;
+    server_name example.com;
+
+    location / {
+        proxy_pass http://vigilant_heron;
+        proxy_http_version 1.1;                                # WebSocket upgrades need HTTP/1.1
+        proxy_set_header Host $host;                           # Sites are matched on this header
+        proxy_set_header X-Real-IP $remote_addr;              # The client address, read by real_ip_from
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+    }
+}
+```
+
+This setup not only enhances security but also maintains the flexibility to scale as traffic increases.
+
+### Best Practices for Effective Deployment
+
+To maximize the effectiveness of Vigilant-Heron in production environments, several best practices should be followed. First, always start in shadow mode to gather insights before enforcing rules. Second, continuously monitor logs and decision outcomes to fine-tune thresholds and rules. Finally, ensure that the configuration is regularly reviewed and updated based on new threat intelligence and application changes.
+
+### Conclusion: A Forward-Thinking Security Solution
+
+Vigilant-Heron exemplifies a forward-thinking approach to web application security by integrating traditional rule-based methods with cutting-edge AI decision models. This dual-layered approach not only enhances threat detection capabilities but also provides a framework for dynamic responses to evolving threats. As the landscape of cybersecurity continues to shift, tools like Vigilant-Heron will be essential for organizations seeking to protect their applications against increasingly sophisticated attacks.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/chataclaw/vigilant-heron-a-rust-reverse-proxy-that-screens-web-requests-with-fixed-rules-and-ai-decision-5064)
+
+---
+
+<SocialShare title="Enhancing Web Application Security with Vigilant-Heron: A Deep Dive into AI-Driven Threat Detection" slug="enhancing-web-application-security-with-vigilant-heron-a-deep-dive-into-ai-driven-threat-detection" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
