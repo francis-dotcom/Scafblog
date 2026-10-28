@@ -1,0 +1,329 @@
+---
+slug: exploring-ai-infrastructure-through-api-analysis
+title: "Exploring AI Infrastructure Through API Analysis"
+authors: [francis]
+tags: [ai, cloud, api, infrastructure]
+date: 2026-10-28T11:48:57.154Z
+description: "Disclosure: Mem0 sponsored this article and the video that goes with it. They saw the outline before I wrote it. Everything below came from running the product against my own Notion workspace, and every number is measured. The payloads are real, copied out of my own terminal.
+Update, 28 Oct 2026: every measurement below, including the connector and tool counts, was taken on 26 August 2026. The catalogue has grown since. Mem0 has also published Gateway pricing at mem0.ai/gateway-pricing (a free Start tier for 5 agents, plus paid Ship and Scale tiers).
+Mem0 shipped a product called Gateway some time between the 8th and the 25th of August. I say "some time" because there was no announcement. No blog post, no changelog entry, no Product Hunt listing, nothing on Hacker News. Their own documentation site has 233 pages and not one of them mentions it.
+So when they asked me to review it, my first problem was that I had nothing to read.
+What I did have was a console. And a console is a client, and a client has to talk to something.
+So I opened the JavaScript the dashboard loads and looked for hostnames it calls:
+curl -s https://gateway.mem0.ai/signup \
+  | grep -oE 'src="/_next/static/chunks/[^"]+"' \
+  | head -20
+
+# then pull the bundles and search them for API hosts
+grep -ohE 'https?://[a-z0-9.-]*mem0[a-z0-9.-]*' chunks/*.js | sort -u
+# https://gateway-mcp.mem0.ai
+
+One host came back, separate from the app itself. And that host is generous:
+curl -s -o /dev/null -w "%{http_code}\n" https://gateway-mcp.mem0.ai/openapi.json   # 200
+curl -s -o /dev/null -w "%{http_code}\n" https://gateway-mcp.mem0.ai/docs           # 200
+curl -s -o /dev/null -w "%{http_code}\n" https://gateway-mcp.mem0.ai/redoc          # 200
+
+A complete OpenAPI specification. Sixty eight endpoints, eighty nine schemas, plus Swagger and ReDoc pages. All public. All unlinked from anywhere.
+That spec turned out to be the best documentation the product has, and it is the reason this piece has numbers in it.
+Marketing pages describe intent. Schemas describe decisions. Pull the enums out and the product's shape appears:
+curl -s https://gateway-mcp.mem0.ai/openapi.json \
+  | jq '.components.schemas | to_entries[]
+        | select(.value.enum) | {(.key): .value.enum}'
+
+{ "ActionClass":    ["read", "write", "execute"] }
+{ "AuditDecision":  ["allowed", "denied", "error"] }
+{ "ConnectorKind":  ["mcp", "openapi"] }
+{ "PlanKey":        ["start", "ship", "scale", "enterprise"] }
+
+Three permission verbs. Connectors are either MCP servers or plain OpenAPI services, which confirms that "bring your own API" is real rather than roadmap. And there are four billing plan keys, which is interesting for a product still describing itself as a limited preview.
+Then there was an endpoint I did not expect, and its description in their own spec reads:
+"Per agent: tools granted vs tools actually used. The 'strip the rest' report."
+That single sentence describes the most useful thing in the product. It appears nowhere on either of their marketing pages. I checked both, twice.
+The pitch for this whole category is context. Connect enough services and your agent loads hundreds of tool definitions before it answers anything. So rather than take their number on trust, I counted their catalogue.
+
+Sixteen connectors. The ten that publish a count come to three hundred and fifty two tools. Vanta on its own is a hundred and thirty five. Their marketing argues the case with three hundred and twelve, so their own product is bigger than the example they use to sell it.
+I connected Notion, made one agent, and granted it read access and nothing else. Creating the agent first:
+POST /api/v1/agents
+{ "name": "docs-reader" }
+
+201 Created
+{
+  "id": "01M0YXWJCZT4GB80NZPWZ38M1F",
+  "name": "docs-reader",
+  "status": "active",
+  "grants": [],
+  "effective_grants": []
+}
+
+Note the empty arrays. A new agent can reach nothing at all until you say otherwise, which is the correct default and worth saying out loud.
+Now the grant. This is the part where I expected to find a problem:
+PUT /api/v1/agents/01M0YXWJCZT4GB80NZPWZ38M1F/grants
+{
+  "grants": [
+    { "connector_id": "01M0YXS38S5W6PN7Y6WX5S4TW3",
+      "permission": "read" }
+  ]
+}
+
+I deliberately left out the tool selector to see what it would default to. It defaults to a wildcard:
+{
+  "tool_selector": "*",
+  "permission": "read"
+}
+
+My first reaction was that a least privilege product defaulting to "everything" is a bad look. But permission is a required field with no default, so the wildcard is always bounded to one action class. "Everything" here means every read tool, not every tool. That is a meaningful difference and it is worth checking before you write the harsher version of the sentence, which I nearly did.
+Twenty eight tools sit behind the Notion connector. Fourteen read, fourteen change things. Notion's consent screen was explicit that the token it was issuing could act on my behalf, which is to say it could write.
+So I skipped the dashboard and asked the gateway itself, over the protocol. Their console hands you the connection line:
+claude mcp add --transport http mem0-gateway \
+  https://gateway-mcp.mem0.ai/mcp \
+  --header "Authorization: Bearer mg_..."
+
+And the raw call underneath it:
+POST https://gateway-mcp.mem0.ai/mcp
+Authorization: Bearer mg_...
+
+{ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }
+
+
+Nineteen tools came back. Fourteen Notion reads, and five of Gateway's own: discover, find_tools, describe_tool, invoke and request_access. Not one of the fourteen execute tools was offered.
+My token can write. The agent holding a key to that same connection cannot. Connector authority and agent authority really are separate things, which is the entire product in one sentence.
+I tried to write anyway:
+{ "jsonrpc": "2.0", "id": 20, "method": "tools/call",
+  "params": {
+    "name": "notion__notion_update_page",
+    "arguments": { "page_id": "00000000-0000-0000-0000-000000000000" }
+  }
+}
+
+The refusal is better designed than most:
+{
+  "jsonrpc": "2.0", "id": 20,
+  "result": {
+    "content": [{ "type": "text",
+      "text": "mem0 gateway denied this call (out_of_scope).
+               Call `discover` to see what you are allowed to do." }],
+    "isError": true
+  }
+}
+
+It fails closed, names the reason in a form a machine can branch on, and tells the model how to recover. An agent that hits this wall can re-orient instead of retrying blindly.
+Every call lands in the audit log with its own latency, so the cost is not a matter of opinion:
+GET /api/v1/audit/events?limit=5
+
+tool           action   decision  deny_reason    latency_ms
+create_pages   execute  denied    out_of_scope            3
+update_page    execute  denied    out_of_scope            4
+search         read     allowed   null                 1438
+get_teams      read     allowed   null                  876
+get_users      read     allowed   null                  860
+
+
+A denial costs three or four milliseconds because it never leaves the gateway. An allowed call costs about a second. I did not time Notion independently, so treat that split as an inference rather than a measurement. But whatever the gateway itself is doing, it is single digit milliseconds against a call that takes a thousand.
+Gateway's answer to the context problem is those five meta tools. Instead of loading three hundred definitions, the model gets a search tool and pulls definitions on demand.
+It works. It is also slow. I timed it four times, warm:
+find_tools "find a page about branding"   7202 ms
+find_tools "list workspace users"         4130 ms
+find_tools "read comments on a page"      6939 ms
+find_tools "search my notes"              8206 ms
+
+discover                                   214 ms
+
+Four to eight seconds for a semantic lookup. Their own audit log shows the same figures, which is how I know it was not my connection.
+By contrast discover returns the agent's entire capability list in about a fifth of a second, as plain readable text:
+# mem0 gateway - agent: docs-reader
+
+## You can READ
+- notion (14 tools): notion__notion_search, notion__notion_fetch, ...
+
+So you trade tokens for latency, and you pay it every time the agent reaches for something new. The cheap path is the complete list. The expensive path is semantic search. That is a reasonable trade. It is just not one anybody puts on a landing page.
+Worth noting: find_tools respects the grant. Asked to "update a page" it returned a search tool, because this agent holds no write grant. The search cannot surface what the policy would refuse.
+Then I called the endpoint I had found in the spec. Ninety seconds of real traffic was enough:
+GET /api/v1/audit/overprovisioning
+
+[
+  {
+    "agent_name": "docs-reader",
+    "granted_tool_count": 14,
+    "used_tool_count": 3,
+    "unused_tools": [
+      "notion__notion_download_attachment",
+      "notion__notion_fetch",
+      "notion__notion_get_async_task",
+      "notion__notion_get_comments",
+      "notion__notion_list_favorite_pages",
+      "notion__notion_list_private_pages",
+      "notion__notion_list_recent_pages",
+      "notion__notion_list_shared_pages",
+      "notion__notion_query_data_sources",
+      "notion__notion_query_meeting_notes",
+      "notion__notion_search_agents"
+    ]
+  }
+]
+
+
+Fourteen granted. Three used. Eleven named, individually, as the ones to remove.
+This idea is not new. Amazon shipped it for cloud permissions in December 2015, comparing what a principal was granted against what it had actually touched. Google followed in 2019. Microsoft bought a company to do it in 2021. In cloud security, granted versus used is a decade old genre.
+In the agent world it is almost absent. I went through the obvious alternatives: Docker's gateway, Pomerium, Cloudflare's portals, Descope, Obot, Kong, agentgateway. None of them publish a granted versus used report, despite nearly all of them holding both halves of the data. They log the grants. They log the calls. Nobody joins the two.
+Mem0 does, and then does not mention it.
+Their other claim is that you can revoke without rotating credentials. That one is easy to test:
+call get_users                    allowed    1295 ms
+POST /api/v1/agents/{id}/kill     200
+call get_users                    DENIED      205 ms  "denied this call (killed)"
+POST /api/v1/agents/{id}/activate 200
+call get_users                    allowed     824 ms
+
+Same key throughout. Never re-issued. The policy changed and the next call felt it. Note the deny reason is killed rather than out_of_scope, so the log tells you which kind of no it was.
+The console screen for that agent reports twenty eight tools allowed, and lists the update page tool among them. The gateway enforces fourteen. Enforcement is correct, and I verified that at the protocol layer twice, so this is a display problem rather than a security hole. It is still worth fixing, because an operator auditing that screen would reach the wrong conclusion about what their agent can reach. I sent it to their team rather than saving it for the video.
+The smaller one is that wildcard default. It is bounded to a permission class so it is not dangerous, but the easy path could be the tighter one. Granting three named tools should be as quick as granting a class:
+{ "connector_id": "...", "permission": "read",
+  "tool_selector": "notion__notion_search" }
+
+That works today. It is just not what you get if you leave the field alone.
+Sign up at gateway.mem0.ai and connect one low risk service.
+Create an agent, grant it read on that connector only.
+Provision a key. The plaintext shows exactly once.
+Point your MCP client at https://gateway-mcp.mem0.ai/mcp with the key as a bearer token.
+Call tools/list and count what comes back against what exists.
+Try a write. Watch it fail in single digit milliseconds.
+Do real work for a minute, then call the overprovisioning endpoint and see how much of your grant you never touched.
+Step seven is the one worth your time. Everything before it is setup.
+If you run one agent that calls two tools, none of this is worth your afternoon. Keep your key in an environment variable and move on with your life.
+If you run several agents against systems that matter, a real Notion, a real database, a real billing provider, then the audit trail alone justifies the layer. The usage report is the part that keeps your grants honest six months later, and nothing else in this space currently does it.
+Two caveats before you try it. It runs in Mem0's cloud today, and a private deployment is advertised but I could not test it on a free account. And there is no published pricing anywhere, which after a full day of use I still find odd.
+One last note on method. Everything here came from reading a spec nobody linked to and then checking each claim against the running product. That took an afternoon. It is a good habit for any tool you are about to give your credentials to, sponsored or not.
+Mem0 Gateway: https://mem0.ai/?via=sebuzdugan (sponsored, affiliate link. Code SEBUZDUGAN for 19 dollars off your first 3 months)
+The OpenAPI spec this article is built on: https://gateway-mcp.mem0.ai/docs
+
+Mem0 open source: https://github.com/mem0ai/mem0
+
+Model Context Protocol specification: https://modelcontextprotocol.io/specification/versioning
+
+AWS IAM last accessed data, December 2015: AWS Security Blog
+
+Anthropic on tool search and token reduction: Anthropic Engineering
+
+
+
+
+  
+  
+  Stay in Touch
+
+
+I break down AI infrastructure by actually running it, on YouTube and X.
+Partnerships: sebuzdugan@gmail.com..."
+image: /img/blog/generated/exploring-ai-infrastructure-through-api-analysis-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Exploring AI Infrastructure Through API Analysis](/img/blog/generated/exploring-ai-infrastructure-through-api-analysis-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### The Underlying Role of APIs in AI Systems
+
+APIs (Application Programming Interfaces) are essential in the architecture of AI systems, facilitating communication between diverse components. They serve as the conduits through which machine learning models access data, interact with user interfaces, and integrate with other services. This interconnectedness not only enhances scalability but also allows AI systems to adapt dynamically to varying workloads and operational demands. As AI continues to evolve, the sophistication of the APIs that underpin these systems becomes increasingly critical.
+
+### Mem0's Gateway: A Unique API Exploration Opportunity
+
+Mem0's Gateway product offers a compelling case study for examining AI infrastructure through API analysis. However, the absence of comprehensive documentation presents significant challenges for developers and practitioners. This lack of guidance necessitates a more hands-on approach to understanding the API's capabilities. By directly interacting with the API, we can extract valuable insights into its design and functionality, as well as the broader implications for AI infrastructure. The implications of this documentation gap are profound; without clear guidelines, developers may misinterpret API functionalities, leading to inefficient implementations and potential security vulnerabilities.
+
+### Methodology: Direct API Interaction via Console Commands
+
+To analyze the Mem0 Gateway API effectively, we utilized console commands to interact with its endpoints directly. This empirical approach allowed us to circumvent the absence of documentation and gather critical data. For instance, we employed the following `curl` command to retrieve the OpenAPI specification, which provided a structured overview of the available endpoints and their functionalities:
+
+```bash
+curl -s https://gateway-mcp.mem0.ai/openapi.json | jq '.'
+```
+
+This command not only revealed the API's structure but also emphasized the importance of engaging directly with system interfaces to uncover operational insights. Developers can replicate this approach by utilizing similar console commands to explore other undocumented APIs, thereby fostering a deeper understanding of their capabilities.
+
+### Key Insights from the OpenAPI Specification
+
+The OpenAPI specification for Mem0's Gateway unveiled a rich dataset, comprising 68 endpoints and 89 schemas. These endpoints encompass a range of functionalities, including agent management and tool invocation. Notably, the specification highlighted structured data types, such as enumerated types like `ActionClass` and `ConnectorKind`, which are pivotal for preventing errors during API interactions. For example, the `ActionClass` enum defines the permissible actions (read, write, execute), ensuring that developers can implement precise control over API calls. The lack of documentation makes it imperative for developers to familiarize themselves with these types to avoid common pitfalls in API usage.
+
+### Security and Permission Management: A Critical Examination
+
+A standout feature of the Mem0 Gateway API is its nuanced permission management system. This system allows for granular control over agent actions, distinguishing between connector authority and agent authority. This separation is vital for maintaining security, as it ensures that agents operate within defined boundaries. For instance, an agent granted read access to a Notion connector can perform read operations only, despite the underlying token's broader permissions:
+
+```json
+PUT /api/v1/agents/{agent_id}/grants
+{
+  "grants": [
+    {
+      "connector_id": "notion_connector_id",
+      "permission": "read"
+    }
+  ]
+}
+```
+
+This design choice mitigates the risk of unauthorized actions, reinforcing the principle of least privilege in API interactions. The absence of documentation heightens the risk of misconfigurations, making it essential for developers to thoroughly test permission settings and ensure they align with intended access controls.
+
+### Analyzing Audit Logs: Understanding Tool Utilization
+
+The audit log feature of the Mem0 Gateway API provides invaluable insights into the relationship between granted and utilized tools. By analyzing these logs, we can identify instances of overprovisioning, where agents have access to tools that they do not actually use. For example, an agent may be granted access to 14 tools but only utilize 3. This information is crucial for administrators seeking to refine access controls and enhance security:
+
+```bash
+GET /api/v1/audit/overprovisioning
+```
+
+Such insights enable organizations to optimize their permission structures and reduce unnecessary exposure. This aspect of API management is often overlooked, yet it is critical for maintaining a secure environment, particularly in the absence of comprehensive documentation.
+
+### The Importance of Context in AI Actions
+
+In AI systems, context significantly influences the appropriateness of actions taken by agents. The Mem0 Gateway API allows agents to dynamically discover tools based on their permissions, which introduces a layer of flexibility. However, this flexibility can come at the cost of latency. For instance, using a semantic search tool to identify available actions may result in delays compared to retrieving a predefined list of tools. This trade-off underscores the necessity for careful consideration of context in which agents operate, as it directly impacts operational efficiency. Developers should be aware of these nuances and design their applications to mitigate potential latency issues.
+
+### Security Implications of Permission Management
+
+The implications of permission management within the Mem0 Gateway API are profound. The design choices embedded in the API architecture significantly influence the overall security of the AI infrastructure. For example, the decision to default to a wildcard permission for tool selectors can lead to unintended access if not managed correctly. Although the API confines permissions to specific action classes, the potential for misconfiguration remains a concern. Developers must remain vigilant regarding these nuances when implementing security measures, particularly in light of the documentation gaps that may obscure best practices.
+
+### Addressing the Documentation Gap: Strategies for Developers
+
+While the lack of comprehensive documentation for Mem0's Gateway API presents challenges, developers can adopt several strategies to mitigate these issues. First, engaging directly with the API through console commands can uncover hidden functionalities and clarify expected behaviors. Second, leveraging the OpenAPI specification can guide API interactions and ensure compliance with expected data structures. Third, fostering a culture of documentation within teams can enhance knowledge sharing and reduce reliance on external resources. Additionally, developers can document their findings and share them with the community, contributing to a collective understanding of the API.
+
+### Best Practices for Engaging with AI APIs
+
+Drawing from our analysis of the Mem0 Gateway API, several best practices emerge for effectively working with AI APIs. First, prioritize direct engagement with the API to uncover hidden functionalities and understand its behavior. Second, utilize the OpenAPI specification as a critical resource for informing API interactions and ensuring compliance with expected data structures. Third, regularly review audit logs to monitor tool usage and adjust permissions as necessary to maintain a secure environment. Finally, encourage collaboration among team members to share insights and strategies for navigating undocumented APIs.
+
+### Conclusion: Insights and Future Directions
+
+The exploration of Mem0's Gateway API illustrates the complexities inherent in AI infrastructure. Through direct analysis, we gained valuable insights into its design, permission management, and usage patterns. This hands-on approach underscores the critical need for thorough documentation and proactive engagement with system interfaces. As AI systems continue to evolve, understanding the underlying infrastructure will be essential for developers and practitioners alike. The lessons learned from this case study can inform best practices and drive improvements in API design and security across the industry. By addressing the documentation gap and adopting strategic approaches, developers can navigate the challenges of working with APIs more effectively, ultimately enhancing the security and functionality of AI systems.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/sebuzdugan/the-docs-didnt-exist-so-i-read-the-api-instead-2cop)
+
+---
+
+<SocialShare title="Exploring AI Infrastructure Through API Analysis" slug="exploring-ai-infrastructure-through-api-analysis" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
