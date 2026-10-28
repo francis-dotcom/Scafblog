@@ -1,0 +1,438 @@
+---
+slug: building-robust-multi-agent-systems-with-java
+title: "Building Robust Multi-Agent Systems with Java"
+authors: [francis]
+tags: [java, ai, agents, distributed]
+date: 2026-10-28T17:14:28.893Z
+description: "Agentic AI and Multi-Agent Systems: From Single Prompts to Coordinated Teams
+
+
+Most LLM applications today still follow a simple pattern: a user sends a prompt, the model returns a response, and the interaction ends. That works well for summarizing a document or drafting an email. It breaks down quickly when the task requires planning, looking up information from several sources, calling APIs, checking intermediate results, and recovering from errors.
+This is where agentic AI comes in. An agentic system pursues a goal through a loop of reasoning, action, and observation. Instead of producing one answer, it decides what to do next, uses tools, inspects the results, and adjusts its plan until the goal is met or it determines it cannot proceed.
+When several such agents collaborate, each with a focused responsibility, we get a multi-agent system. In this article we will look at the core ideas, the trade-offs, and how a Java team can build these systems with clean, testable boundaries.
+A single large prompt that tries to do everything has several structural problems:
+Mixed responsibilities. Planning, retrieval, formatting, and validation are all bundled into one instruction set, which makes them hard to test and improve independently.
+No intermediate verification. If step two produces wrong data, step three builds on it without any check.
+Brittle tool integration. Tool calls are often parsed from free text, which is fragile and hard to audit.
+Poor failure isolation. When something goes wrong, the whole chain fails, and the logs rarely explain why.
+Agentic design addresses these issues by making the steps explicit: who plans, who acts, who checks, and what state is shared between them.
+At its core, an agent is a function that repeatedly does the following:
+Observe the current state: the goal, the conversation so far, and the results of previous actions.
+Decide the next action: answer directly, call a tool, or delegate to another agent.
+Act by executing that action.
+Record the observation and update the state.
+Stop when the goal is satisfied, a step limit is reached, or the agent escalates.
+The stopping conditions matter as much as the loop itself. Without a step limit and clear success criteria, an agent can spend tokens and money going in circles.
+Here is a minimal, framework-agnostic version of that loop in Java:
+public interface Tool {
+    String name();
+    String execute(String input);
+}
+
+public record AgentStep(String thought, String toolName, String toolInput) {}
+
+public class SingleAgent {
+
+    private final LlmClient llm;
+    private final Map<String, Tool> tools;
+    private final int maxSteps;
+
+    public SingleAgent(LlmClient llm, List<Tool> tools, int maxSteps) {
+        this.llm = llm;
+        this.tools = tools.stream().collect(Collectors.toMap(Tool::name, t -> t));
+        this.maxSteps = maxSteps;
+    }
+
+    public String run(String goal) {
+        StringBuilder context = new StringBuilder("Goal: " + goal + "\n");
+
+        for (int step = 1; step <= maxSteps; step++) {
+            AgentStep next = llm.nextStep(context.toString(), tools.keySet());
+
+            if (next.toolName() == null) {
+                return next.thought();          // final answer
+            }
+
+            Tool tool = tools.get(next.toolName());
+            if (tool == null) {
+                context.append("Error: unknown tool ").append(next.toolName()).append("\n");
+                continue;
+            }
+
+            String observation = tool.execute(next.toolInput());
+            context.append("Action: ").append(next.toolName())
+                   .append("(").append(next.toolInput()).append(")\n")
+                   .append("Observation: ").append(observation).append("\n");
+        }
+
+        throw new IllegalStateException("Agent exceeded " + maxSteps + " steps without finishing");
+    }
+}
+
+Notice what is explicit here: the tool registry, the step limit, and the failure path for unknown tools. Those are the details that make an agent operable in production.
+A single agent with many tools can work for small problems, but it tends to accumulate responsibilities. Splitting the work across specialized agents brings several advantages:
+Focused prompts. Each agent has a smaller, clearer instruction set, which is easier to test and tune.
+Independent evaluation. A reviewer agent can be evaluated on its own accuracy without the noise of the rest of the pipeline.
+Parallelism. Independent research tasks can run concurrently.
+Replaceability. You can swap the model or strategy for one agent without touching the others.
+Clear audit trails. Every message between agents is a discrete, loggable event.
+A common set of roles looks like this:
+
+
+
+Role
+Responsibility
+Typical output
+
+
+
+
+Planner
+Decompose the goal into ordered sub-tasks
+A list of steps with dependencies
+
+
+Researcher
+Retrieve information from documents, APIs, or search
+Cited facts and sources
+
+
+Executor
+Perform actions such as writing code or calling services
+Results and side-effect logs
+
+
+Reviewer
+Check outputs against criteria and constraints
+Pass/fail with reasons
+
+
+Coordinator
+Route messages, track state, decide when to stop
+Final aggregated result
+
+
+
+Not every system needs all five roles. Many useful designs have only a planner and one or two workers, with the coordinator logic living in ordinary code rather than in a model.
+How agents talk to each other is the most important design decision. Three patterns cover most real systems.
+A central coordinator decides which worker runs next and collects the results. This is the easiest pattern to reason about and debug, because control flow is centralized.
+public class Orchestrator {
+
+    private final Planner planner;
+    private final Map<String, Worker> workers;
+    private final Reviewer reviewer;
+
+    public Orchestrator(Planner planner, List<Worker> workers, Reviewer reviewer) {
+        this.planner = planner;
+        this.workers = workers.stream().collect(Collectors.toMap(Worker::role, w -> w));
+        this.reviewer = reviewer;
+    }
+
+    public Report execute(String goal) {
+        List<Task> plan = planner.plan(goal);
+        Map<String, Result> results = new LinkedHashMap<>();
+
+        for (Task task : plan) {
+            Worker worker = workers.get(task.assignedRole());
+            if (worker == null) {
+                throw new IllegalArgumentException("No worker for role " + task.assignedRole());
+            }
+
+            Result result = worker.perform(task, results);
+            ReviewVerdict verdict = reviewer.review(task, result);
+
+            if (!verdict.approved()) {
+                result = worker.retry(task, results, verdict.feedback());
+            }
+            results.put(task.id(), result);
+        }
+        return Report.from(goal, results);
+    }
+}
+
+The reviewer step between worker and result is what turns a pipeline into a feedback loop. It is also where you should apply guardrails: schema validation, policy checks, and grounding checks against retrieved sources.
+Agents pass control directly to each other based on the task. This suits conversational flows, such as a triage agent handing a customer request to a billing agent or a technical agent. The risk is that control flow becomes implicit, so you need strong logging of every handoff and a maximum hop count to prevent loops.
+Agents read from and write to a shared state store, and a scheduler decides who acts based on what is on the board. This is flexible and works well for research-style tasks where the next step depends on what others have discovered. The cost is concurrency control: you need versioned state, idempotent writes, and clear ownership of each field.
+For most enterprise Java systems, the orchestrator–worker pattern is the right starting point. You can always evolve toward handoffs or a blackboard once the requirements justify the added complexity.
+Agents are only as reliable as the tools they call. The most common production failure is not the model reasoning incorrectly; it is a tool receiving malformed input or returning something the agent cannot interpret.
+In Java, this is an opportunity. Give each tool a typed request and response, validate inputs before execution, and return structured errors the agent can reason about.
+public record AccountBalanceRequest(String accountId) {
+    public AccountBalanceRequest {
+        if (accountId == null || !accountId.matches("ACC-[0-9]{8}")) {
+            throw new IllegalArgumentException("Invalid account id: " + accountId);
+        }
+    }
+}
+
+public record AccountBalanceResponse(String accountId, BigDecimal balance, String currency) {}
+
+public class AccountBalanceTool implements Tool {
+
+    private final AccountService accounts;
+    private final ObjectMapper mapper = new ObjectMapper();
+
+    public AccountBalanceTool(AccountService accounts) {
+        this.accounts = accounts;
+    }
+
+    @Override
+    public String name() {
+        return "get_account_balance";
+    }
+
+    @Override
+    public String execute(String rawInput) {
+        try {
+            AccountBalanceRequest request = mapper.readValue(rawInput, AccountBalanceRequest.class);
+            AccountBalanceResponse response = accounts.balanceOf(request.accountId());
+            return mapper.writeValueAsString(response);
+        } catch (IllegalArgumentException e) {
+            return "{\"error\":\"" + e.getMessage() + "\"}";
+        } catch (Exception e) {
+            return "{\"error\":\"Tool failed; retry or escalate\"}";
+        }
+    }
+}
+
+Returning structured error objects, instead of throwing exceptions into the agent loop, gives the model something concrete to act on. The agent can correct its input, try another tool, or escalate to a human.
+Guardrails are often implemented as a long list of instructions inside a single prompt. That approach is hard to verify. A better approach is to place checks at the boundaries between components:
+Before a tool executes: validate parameters, enforce authorization, and block actions outside an allow-list.
+Before a result leaves the system: check the output against a schema, scan for sensitive data, and confirm that claims are supported by retrieved sources.
+Before an action with side effects: require explicit approval for anything irreversible, such as sending money, deleting records, or publishing content.
+Because these checks live in ordinary code, you can unit test them, version them, and audit them like any other business rule.
+Debugging a multi-agent system without good telemetry is painful. At minimum, record for every step:
+the agent or role that acted,
+the input and output of each model call and tool call,
+token usage and latency,
+the reviewer's verdict and the reason for any retry,
+the final outcome and the reason the loop stopped.
+Correlate all of these with a single trace ID for the entire goal. Tools such as OpenTelemetry work well here, and Spring Boot's observability support can export these traces to the backend you already use. Treat prompts and tool payloads as sensitive data: redact personal information before it reaches logs.
+Multi-agent systems have real costs that should be designed for from the start:
+Latency compounds. Every additional agent hop adds a model round trip. Parallelize independent branches wherever possible.
+Token costs multiply. Passing full transcripts between agents is expensive. Pass structured results and summaries instead.
+Loops happen. Two agents can keep sending work back and forth. Enforce step budgets and maximum retry counts at the orchestrator level.
+Errors propagate. A wrong fact produced early can be treated as truth downstream. Keep source references with every claim so reviewers can check them.
+A useful rule: start with the simplest system that meets the requirement, measure where time and cost go, and add agents only at the boundaries where they clearly reduce errors or enable parallel work.
+Java is not the default language for AI experimentation, but it has strong advantages for building agentic systems that must run reliably:
+Strong typing makes tool contracts and agent messages explicit.
+Mature concurrency through virtual threads and structured concurrency helps with parallel agent execution.
+Spring Boot provides dependency injection, configuration, security, and observability out of the box.
+Existing services in banking, insurance, retail, and logistics can be exposed as tools without rewriting them.
+Each agent can be a bounded Spring component with its own configuration, its own tool set, and its own test suite. The orchestrator becomes an ordinary service that coordinates them, which is familiar territory for Java teams that already operate microservices.
+If you are beginning with multi-agent systems, consider this path:
+Pick one workflow that currently requires several manual steps and clear success criteria.
+Build a single agent with two or three typed tools and a strict step limit.
+Add a reviewer that checks the agent's output against explicit rules.
+Split the work into a planner and workers only when a single agent becomes hard to test or tune.
+Instrument everything from the first version, so you can see where failures and costs come from.
+Evaluate with real cases. Build a small set of representative tasks and track accuracy, latency, and cost over time.
+This incremental approach keeps the system understandable and gives you evidence for every added layer of complexity.
+Agentic AI moves LLM applications from answering questions to completing goals. Multi-agent systems extend that idea by dividing the work into focused roles with explicit coordination, typed tools, and clear guardrails. The engineering challenges are familiar to anyone who has built distributed systems: boundaries, contracts, observability, and failure handling.
+For Java developers, this is a natural extension of the skills already in use. The language's type system, its mature ecosystem, and frameworks like Spring Boot give you the tools to build agent systems that are testable, observable, and safe to operate. Start small, keep control flow explicit, and let the evidence decide when to add more agents.
+If you are building agentic systems on the JVM, I would be glad to hear what patterns are working for your team...."
+image: /img/blog/generated/building-robust-multi-agent-systems-with-java-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Building Robust Multi-Agent Systems with Java](/img/blog/generated/building-robust-multi-agent-systems-with-java-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### The Shift from LLMs to Agentic AI
+
+As artificial intelligence (AI) evolves, a significant shift is occurring from traditional large language model (LLM) applications to more sophisticated agentic systems. While LLMs excel in generating responses to straightforward prompts, they falter when faced with tasks requiring intricate planning, multi-step reasoning, and real-time adjustments. This limitation necessitates a paradigm that allows systems to autonomously pursue goals through a loop of reasoning, action, and observation. Agentic AI embodies this paradigm, enabling systems to adapt and refine their approaches dynamically.
+
+### Defining Multi-Agent Systems: Roles and Responsibilities
+
+Multi-agent systems (MAS) represent a structured approach to AI architecture, wherein multiple agents collaborate to achieve a common goal. Each agent in a MAS operates with a clearly defined role, such as planner, executor, or reviewer, allowing for a division of labor that enhances both efficiency and reliability. This clear delineation of roles is crucial; it not only simplifies the debugging process but also fosters better maintainability and scalability of the system. By establishing distinct responsibilities, developers can create systems that are easier to test and optimize.
+
+### Architectural Principles for Building Agentic Systems
+
+When designing a multi-agent system in Java, several architectural principles must be adhered to. First, the architecture should promote explicit role definitions among agents to avoid overlapping responsibilities. Each agent should be tailored to handle specific tasks, such as planning, execution, or validation. This separation of concerns simplifies testing and debugging while enhancing maintainability. Furthermore, the communication mechanisms between agents must be well-defined, ensuring that messages are structured and easily interpretable.
+
+### Effective Communication Patterns Among Agents
+
+The success of a multi-agent system heavily relies on the communication patterns employed among agents. Several patterns can be utilized, including centralized coordination, direct handoffs, and shared state management. The centralized coordination pattern simplifies debugging and control flow, as all interactions are managed through a single entity. However, this pattern may introduce bottlenecks if not designed with scalability in mind. Conversely, direct handoffs can facilitate conversational agents but may complicate message tracking. Shared state management offers flexibility but requires meticulous concurrency control to prevent data inconsistencies.
+
+### Implementing a Basic Multi-Agent System in Java
+
+To illustrate the implementation of a multi-agent system, consider the following Java-based framework. This code snippet outlines the structure of a single agent capable of executing tasks through defined tools.
+
+```java
+public interface Tool {
+    String name();
+    String execute(String input);
+}
+
+public record AgentStep(String thought, String toolName, String toolInput) {}
+
+public class SingleAgent {
+
+    private final LlmClient llm;
+    private final Map<String, Tool> tools;
+    private final int maxSteps;
+
+    public SingleAgent(LlmClient llm, List<Tool> tools, int maxSteps) {
+        this.llm = llm;
+        this.tools = tools.stream().collect(Collectors.toMap(Tool::name, t -> t));
+        this.maxSteps = maxSteps;
+    }
+
+    public String run(String goal) {
+        StringBuilder context = new StringBuilder("Goal: " + goal + "\n");
+
+        for (int step = 1; step <= maxSteps; step++) {
+            AgentStep next = llm.nextStep(context.toString(), tools.keySet());
+
+            if (next.toolName() == null) {
+                return next.thought();          // final answer
+            }
+
+            Tool tool = tools.get(next.toolName());
+            if (tool == null) {
+                context.append("Error: unknown tool ").append(next.toolName()).append("\n");
+                continue;
+            }
+
+            String observation = tool.execute(next.toolInput());
+            context.append("Action: ").append(next.toolName())
+                   .append("(").append(next.toolInput()).append(")\n")
+                   .append("Observation: ").append(observation).append("\n");
+        }
+
+        throw new IllegalStateException("Agent exceeded " + maxSteps + " steps without finishing");
+    }
+}
+```
+
+This framework encapsulates the essential components of an agent, including a tool registry and a mechanism for handling errors gracefully.
+
+### Robust Error Handling in Multi-Agent Systems
+
+Error handling is a critical aspect of multi-agent systems. The interaction between agents and tools can lead to failures if inputs are malformed or if tools return unexpected results. A robust system should validate inputs before execution and provide structured error responses. This allows the agent to react appropriately, whether by correcting inputs or escalating issues. For example, consider the following implementation of a tool that retrieves account balances:
+
+```java
+public record AccountBalanceRequest(String accountId) {
+    public AccountBalanceRequest {
+        if (accountId == null || !accountId.matches("ACC-[0-9]{8}")) {
+            throw new IllegalArgumentException("Invalid account id: " + accountId);
+        }
+    }
+}
+
+public class AccountBalanceTool implements Tool {
+
+    private final AccountService accounts;
+    private final ObjectMapper mapper = new ObjectMapper();
+
+    public AccountBalanceTool(AccountService accounts) {
+        this.accounts = accounts;
+    }
+
+    @Override
+    public String name() {
+        return "get_account_balance";
+    }
+
+    @Override
+    public String execute(String rawInput) {
+        try {
+            AccountBalanceRequest request = mapper.readValue(rawInput, AccountBalanceRequest.class);
+            AccountBalanceResponse response = accounts.balanceOf(request.accountId());
+            return mapper.writeValueAsString(response);
+        } catch (IllegalArgumentException e) {
+            return "{\"error\":\"" + e.getMessage() + "\"}";
+        } catch (Exception e) {
+            return "{\"error\":\"Tool failed; retry or escalate\"}";
+        }
+    }
+}
+```
+
+This implementation emphasizes the importance of input validation and structured error handling, allowing agents to make informed decisions based on tool responses.
+
+### Debugging and Telemetry: Ensuring Observability
+
+Debugging a multi-agent system without adequate telemetry can be challenging. To facilitate effective debugging, it is crucial to log detailed information for every step, including the agent or role that acted, the inputs and outputs of each model and tool call, token usage, and the final outcome. This data should be correlated with a unique trace ID for the entire goal, enabling developers to pinpoint issues quickly. 
+
+For instance, integrating OpenTelemetry into your Java application can enhance observability. Below is an example of how to set up a simple telemetry logger:
+
+```java
+import io.opentelemetry.api.OpenTelemetry;
+import io.opentelemetry.api.trace.Tracer;
+import io.opentelemetry.api.trace.Span;
+
+public class TelemetryLogger {
+
+    private static final Tracer tracer = OpenTelemetry.getGlobalTracer("multi-agent-system");
+
+    public static void logAction(String action, String input) {
+        Span span = tracer.spanBuilder(action).startSpan();
+        try {
+            // Log input and action details
+            System.out.println("Action: " + action + ", Input: " + input);
+        } finally {
+            span.end();
+        }
+    }
+}
+```
+
+This logger can be invoked at various points in your agent's execution flow to create a comprehensive audit trail.
+
+### Measuring Performance: The Role of Metrics in Multi-Agent Systems
+
+Performance metrics are vital in assessing the effectiveness of multi-agent systems. Key metrics include latency, token costs, and error propagation. Latency can accumulate with each agent hop, leading to increased response times. Token costs can escalate if full transcripts are passed between agents, necessitating a focus on structured results and summaries. Additionally, errors can propagate through the system, making it essential to maintain clear audit trails and source references for every claim made by agents.
+
+### Security Considerations in Multi-Agent Systems
+
+Security is a paramount concern in the design and implementation of multi-agent systems. Each tool and agent must enforce strict validation and authorization checks to prevent unauthorized actions. Guardrails should be implemented at the boundaries between components, ensuring that inputs are validated and outputs are checked against predefined schemas. This proactive approach to security not only protects sensitive data but also enhances the overall reliability of the system.
+
+### Scaling Multi-Agent Systems: Challenges and Solutions
+
+As the complexity of multi-agent systems increases, scaling becomes a significant challenge. Java's mature concurrency features, including virtual threads and structured concurrency, can facilitate parallel execution of agents. However, careful consideration must be given to concurrency control mechanisms to prevent race conditions and ensure data consistency. Leveraging frameworks like Spring Boot can streamline the development process, providing built-in support for dependency injection, configuration, and observability.
+
+### Future Directions for Agentic AI in Java
+
+The future of agentic AI in Java looks promising, with the potential for more sophisticated multi-agent systems that can tackle complex tasks across various domains. As developers gain experience with these architectures, they can explore advanced patterns such as self-organizing systems and adaptive agents that learn from their interactions. By continuing to refine the design principles and implementation strategies discussed in this article, Java developers can contribute to the evolution of AI applications that are not only intelligent but also reliable and secure.
+
+### Conclusion: The Path Forward for Multi-Agent Systems
+
+In conclusion, the transition from traditional LLM applications to multi-agent systems represents a significant leap forward in AI capabilities. By leveraging Java's strong typing, mature concurrency features, and established frameworks, developers can build robust agentic systems that enhance the functionality of AI applications. As the field of agentic AI continues to evolve, it is essential for engineers to adopt best practices, focus on performance metrics, and prioritize security to ensure the successful deployment of these systems in real-world scenarios. The integration of thorough debugging and telemetry practices will further empower developers to create resilient and adaptive multi-agent systems.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/said_olano/agentic-ai-and-multi-agent-systems-from-single-prompts-to-coordinated-teams-5f30)
+
+---
+
+<SocialShare title="Building Robust Multi-Agent Systems with Java" slug="building-robust-multi-agent-systems-with-java" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
