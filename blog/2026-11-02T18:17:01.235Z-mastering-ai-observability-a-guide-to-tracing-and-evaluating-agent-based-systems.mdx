@@ -1,0 +1,1133 @@
+---
+slug: mastering-ai-observability-a-guide-to-tracing-and-evaluating-agent-based-systems
+title: "Mastering AI Observability: A Guide to Tracing and Evaluating Agent-Based Systems"
+authors: [francis]
+tags: [ai, observability, opentelemetry, agents]
+date: 2026-11-02T18:17:01.236Z
+description: "How to understand, monitor, debug, and optimize agentic AI systems using OpenTelemetry and modern AI observability practices.
+Traditional backend observability is built around relatively predictable execution paths.
+A request enters an application, passes through several services, interacts with a database, and eventually returns a response. We can use logs, metrics, and distributed traces to understand what happened and where a problem occurred.
+AI agents introduce a different level of complexity.
+An agent does not necessarily follow a predefined execution path. It may call an LLM multiple times, select tools dynamically, retry failed operations, delegate tasks to other agents, retrieve external context, or wait for additional user input.
+Consider a relatively simple task:
+A user asks an AI assistant to analyze a merge request and identify potential problems.
+Behind the scenes, the application might:
+Receive the user's request.
+Invoke a coordinator agent.
+Call an LLM to determine the next action.
+Retrieve the merge request from GitLab.
+Read the changed files.
+Delegate security analysis to another agent.
+Execute additional tool calls.
+Evaluate the collected results.
+Generate a final report.
+The user sees one response. The application has actually executed a multi-step workflow involving several components.
+Now imagine the response takes 45 seconds instead of the expected 8 seconds.
+Where should we investigate?
+Did the model take too long to respond?
+Did a tool call time out?
+Was the same operation executed repeatedly?
+Did the agent generate unnecessary steps?
+Did a subagent introduce additional latency?
+Was too much context sent to the model?
+Did a retry increase the overall execution time and cost?
+Traditional request-level logging may tell us that the endpoint took 45 seconds. It does not necessarily explain why.
+AI observability is about understanding the entire execution path, not just measuring the final API response.
+This is where OpenTelemetry becomes particularly useful.
+** is an open-source observability framework for collecting, processing, and exporting telemetry data.
+It provides a vendor-neutral instrumentation model that allows applications to generate telemetry and send it to different observability platforms.
+Instead of implementing a separate monitoring integration for every vendor, we can instrument an application using OpenTelemetry and choose where the telemetry should be exported.
+OpenTelemetry is built around three primary signals:
+
+
+
+Signal
+What it tells us
+AI agent example
+
+
+
+
+Traces
+How an operation was executed
+Model call → tool → subagent
+
+
+Metrics
+How the system performs over time
+Token usage, latency, error rate
+
+
+Logs
+What happened at a specific point
+Tool timeout or agent exception
+
+
+
+These signals complement each other.
+A metric can tell us that the average execution time has increased. A trace can identify which operation introduced the delay. A log can provide the error details associated with that operation.
+OpenTelemetry also provides context propagation, APIs, SDKs, semantic conventions, and the OpenTelemetry Collector.
+An important implementation detail: as of November 2026, the OpenTelemetry JavaScript documentation lists traces and metrics as Stable, while logs remain in Development. The maturity of a specific GenAI convention should also be evaluated separately from the maturity of the underlying OTel signal.
+References: OpenTelemetry Documentation · OpenTelemetry JavaScript
+Before discussing AI-specific instrumentation, we need to understand traces and spans.
+A trace represents the complete execution path of an operation.
+A span represents one individual unit of work within that execution.
+For example:
+Trace: POST /api/agent
+|
++-- HTTP Request
+    |
+    +-- Coordinator Agent
+        |
+        +-- LLM Generation
+        |
+        +-- Tool: GitLab - Get Merge Request
+        |
+        +-- Tool: GitLab - Get Changed Files
+        |
+        +-- Security Agent
+        |   |
+        |   +-- LLM Generation
+        |   |
+        |   +-- Tool: Security Analysis
+        |
+        +-- Testing Agent
+        |   |
+        |   +-- LLM Generation
+        |   |
+        |   +-- Tool: Test Coverage
+        |
+        +-- Final Response Generation
+
+Each span has information such as:
+Trace ID
+Span ID
+Parent span ID
+Start and end timestamps
+Duration
+Attributes
+Events
+Status and exception information
+This creates a hierarchical representation of the complete execution.
+The key benefit is that we can move from a high-level workflow to an individual model call or tool execution without losing the relationship between them.
+For AI agents, this distinction is important because one user request can generate many independent operations.
+In distributed systems, a trace often crosses multiple services.
+Imagine a Next.js application calling a .NET backend, which then delegates a task to a Python agent and receives a result from another service.
+Without context propagation, every service may generate its own independent trace.
+We would see several unrelated operations instead of one complete workflow.
+OpenTelemetry uses W3C Trace Context as its standard propagation format. The traceparent header carries trace and parent-span information between instrumented services.
+The same principle applies to agent-based architectures.
+When an agent delegates a task to another agent through A2A, we should preserve the correlation between the originating request and the remote execution.
+Automatic HTTP instrumentation can handle propagation when the HTTP instrumentation and context manager are configured correctly. Custom transports and asynchronous message queues may require explicit context injection and extraction.
+The important point is that protocol-level interoperability and observability context propagation are separate concerns. Using A2A does not, by itself, guarantee that all distributed spans will appear in one trace.
+References: OpenTelemetry Traces · Context Propagation · W3C Trace Context
+One of the challenges in AI observability is the lack of consistent naming and structure across different AI frameworks and providers.
+For example, one framework might represent an LLM request as a generic operation, while another might expose model-specific attributes.
+This makes it difficult to compare different implementations using the same monitoring platform.
+OpenTelemetry addresses this through Semantic Conventions.
+Semantic conventions define common attribute names, operation types, and instrumentation expectations so that telemetry from different implementations can be interpreted consistently.
+The GenAI semantic conventions extend this approach to generative AI applications.
+Some important attributes include:
+
+
+
+Attribute
+Purpose
+
+
+
+
+gen_ai.provider.name
+Identifies the model provider
+
+
+gen_ai.request.model
+Identifies the requested model
+
+
+gen_ai.response.model
+Identifies the actual response model
+
+
+gen_ai.operation.name
+Describes the operation
+
+
+gen_ai.usage.input_tokens
+Input token usage
+
+
+gen_ai.usage.output_tokens
+Output token usage
+
+
+gen_ai.conversation.id
+Associates operations with a conversation
+
+
+gen_ai.agent.name
+Identifies the agent
+
+
+gen_ai.tool.name
+Identifies the executed tool
+
+
+
+For example, an LLM invocation could be represented by:
+{
+  "gen_ai.operation.name": "chat",
+  "gen_ai.provider.name": "openai",
+  "gen_ai.request.model": "example-model",
+  "gen_ai.usage.input_tokens": 1200,
+  "gen_ai.usage.output_tokens": 350
+}
+
+This is a simplified span attribute example.
+The benefit is that observability platforms do not need to understand a different custom schema for every application.
+The GenAI semantic conventions also define operations for agents and workflows.
+Some examples include:
+invoke_agent
+invoke_workflow
+execute_tool
+plan
+retrieval
+This is particularly valuable for multi-agent architectures.
+We can distinguish an individual model request from an entire agent invocation or a workflow coordinating multiple agents.
+For example:
+invoke_workflow merge-request-review
+|
++-- invoke_agent coordinator
+|   |
+|   +-- chat model
+|   +-- execute_tool fetch_merge_request
+|
++-- invoke_agent security-agent
+|   |
+|   +-- chat model
+|   +-- execute_tool analyze_vulnerabilities
+|
++-- invoke_agent testing-agent
+|   |
+|   +-- chat model
+|   +-- execute_tool analyze_test_coverage
+|
++-- Final Aggregation
+
+This makes the execution model much easier to understand.
+An important maturity consideration: As of November 2, 2026, the OpenTelemetry GenAI agent spans and GenAI metrics documents are still marked Development. These conventions are valuable design references, but teams should pin their instrumentation versions and avoid treating every proposed attribute or metric as a stable, universally implemented contract.
+The current convention documents include:
+Semantic Conventions for GenAI Spans
+Semantic Conventions for Agent Spans
+Semantic Conventions for GenAI Metrics
+Since many TypeScript applications use the Vercel AI SDK to implement model interactions and agent workflows, it is worth looking at its native telemetry integration.
+The AI SDK already supports OpenTelemetry-based instrumentation.
+It can generate spans for:
+Text generation
+Streaming generation
+Individual model calls
+Agent execution
+Tool execution
+Embedding operations
+Reranking
+This means we do not need to manually instrument every model call and tool execution just to obtain basic execution visibility.
+For an AI SDK v7 application:
+pnpm add @ai-sdk/otel @vercel/otel
+
+The OpenTelemetry integration is provided through @ai-sdk/otel.
+This is an important version-specific detail.
+In AI SDK v7, OpenTelemetry integration moved out of the core ai package. Older examples using the v6 experimental_telemetry configuration should not be copied directly into a v7 application.
+Create an instrumentation.ts file in the project root.
+import { registerOTel } from '@vercel/otel';
+import { registerTelemetry } from 'ai';
+import { OpenTelemetry } from '@ai-sdk/otel';
+
+export function register() {
+  registerOTel({
+    serviceName: 'ai-agent-platform',
+  });
+
+  registerTelemetry(
+    new OpenTelemetry({
+      recordInputs: false,
+      recordOutputs: false,
+    }),
+  );
+}
+
+There are two responsibilities here:
+registerOTel initializes the OpenTelemetry infrastructure for the Next.js application.
+registerTelemetry registers the AI SDK-specific integration that creates GenAI spans.
+I have disabled input and output capture in this example intentionally.
+AI SDK telemetry can record prompts and generated outputs by default. In an enterprise environment, capturing this data requires an explicit privacy and security decision.
+We will return to this in the security section.
+For a regular Node.js application without Next.js, register the OpenTelemetry integration once at application startup.
+Once telemetry is registered, supported AI SDK operations automatically emit telemetry through the registered integration.
+We can also provide a functionId to identify the business operation or agent.
+import { generateText } from 'ai';
+
+const result = await generateText({
+  model: myModel,
+
+  instructions: `
+    You are a financial analysis assistant.
+    Analyze the supplied information carefully.
+  `,
+
+  prompt: 'Analyze the latest portfolio performance.',
+
+  telemetry: {
+    functionId: 'portfolio-analysis-agent',
+  },
+});
+
+The functionId helps distinguish operations in traces.
+For example, rather than seeing only generic model invocation spans, we can identify a specific business operation such as:
+invoke_agent portfolio-analysis-agent
+
+The AI SDK v7 OpenTelemetry integration follows the GenAI semantic conventions.
+For generateText and streamText, the integration records three main types of spans:
+1. Agent invocation span
+The root span represents the complete generation operation, including its execution steps and tool calls.
+Example:
+invoke_agent portfolio-analysis-agent
+
+2. Step and model-call spans
+Each model interaction is represented by step and provider-call spans.
+These allow us to understand how many model calls occurred during an operation and how long each one took.
+3. Tool execution spans
+Each client-side tool execution receives its own span.
+For example:
+invoke_agent portfolio-analysis-agent
+|
++-- step 0
+|   |
+|   +-- chat example-model
+|   +-- execute_tool get_portfolio
+|
++-- step 1
+|   |
+|   +-- chat example-model
+|   +-- execute_tool get_market_data
+|
++-- step 2
+    |
+    +-- chat example-model
+
+The resulting trace provides a much more complete representation of an agent workflow than a single model request log.
+The integration also records usage information such as input tokens, output tokens, cache usage, model identifiers, and operation duration when these values are available.
+Sometimes the standard GenAI attributes are not enough.
+For example, we may want to know which business workflow initiated an operation or which application component owns it.
+The AI SDK provides enrichSpan for adding custom attributes:
+import { registerTelemetry } from 'ai';
+import { OpenTelemetry } from '@ai-sdk/otel';
+
+registerTelemetry(
+  new OpenTelemetry({
+    recordInputs: false,
+    recordOutputs: false,
+
+    enrichSpan: ({ spanType, operationId }) => ({
+      'app.component': 'portfolio-assistant',
+      'app.operation_id': operationId,
+      'app.span_type': spanType,
+    }),
+  }),
+);
+
+The exact context available to enrichSpan depends on the span and the SDK's integration API.
+The objective is to enrich the trace with useful application-level context without copying sensitive business data into telemetry.
+References: AI SDK Telemetry · Next.js OpenTelemetry · AI SDK v7 Migration Guide
+Built-in instrumentation is useful, but it does not automatically understand every application-level decision.
+For example, an AI SDK trace may show model calls and tool executions, but it may not tell us why a coordinator selected a particular specialist agent or how long a business workflow spent waiting for an approval.
+These are application-level operations.
+We should instrument them explicitly.
+OpenTelemetry provides a tracing API for creating custom spans.
+Consider a custom agent orchestration function:
+import {
+  trace,
+  SpanStatusCode,
+} from '@opentelemetry/api';
+
+const tracer = trace.getTracer('agent-orchestrator');
+
+export async function runReviewWorkflow() {
+  return tracer.startActiveSpan(
+    'workflow.merge-request-review',
+    async (span) => {
+      span.setAttribute(
+        'workflow.name',
+        'merge-request-review',
+      );
+
+      span.setAttribute(
+        'workflow.version',
+        '1.0.0',
+      );
+
+      try {
+        const result = await executeReview();
+
+        span.setStatus({
+          code: SpanStatusCode.OK,
+        });
+
+        return result;
+      } catch (cause) {
+        const error =
+          cause instanceof Error
+            ? cause
+            : new Error(String(cause));
+
+        span.recordException(error);
+
+        span.setStatus({
+          code: SpanStatusCode.ERROR,
+        });
+
+        throw error;
+      } finally {
+        span.end();
+      }
+    },
+  );
+}
+
+Any supported AI SDK operations executed inside this active span can become child operations in the same trace, provided the OpenTelemetry context is correctly propagated.
+We now have two levels of observability:
+Framework-level instrumentation describes model and tool execution.
+Application-level instrumentation describes business workflows and orchestration decisions.
+This distinction is important.
+We should not expect a model instrumentation library to understand the complete business meaning of an application request.
+For A2A-based systems, distributed tracing becomes even more important.
+Imagine a coordinator running in one service and a security agent running in another service.
+The coordinator should create a child operation for the delegation. The remote service should continue the trace when the execution context is propagated.
+Conceptually:
+Trace: merge-request-review
+|
++-- Coordinator Agent
+|   |
+|   +-- Model Call
+|   |
+|   +-- A2A: Delegate to Security Agent
+|       |
+|       +-- Security Agent
+|           |
+|           +-- Model Call
+|           |
+|           +-- Tool Execution
+|
++-- Final Aggregation
+
+The HTTP request must carry the appropriate trace context, typically through W3C traceparent and tracestate headers.
+For custom transports or asynchronous queues, explicitly inject and extract the OpenTelemetry context.
+This is how we avoid fragmented traces across independently deployed agents.
+Collecting telemetry is not enough.
+We need to define which metrics are useful for understanding the health and quality of an agent platform.
+I would divide AI observability metrics into five categories.
+These describe how long operations take.
+
+
+
+Metric
+Why it matters
+
+
+
+
+End-to-end workflow duration
+Measures total user-facing execution time
+
+
+Model request duration
+Identifies slow inference calls
+
+
+Time to first token
+Measures perceived response latency
+
+
+Tool execution duration
+Identifies slow external operations
+
+
+Agent invocation duration
+Measures the execution time of one agent
+
+
+Queue wait duration
+Identifies scheduling bottlenecks
+
+
+
+For streaming applications, time to first token is particularly useful.
+A workflow that takes 20 seconds but starts responding after 300 ms may provide a better experience than one that takes 10 seconds and remains silent for the first 8 seconds.
+These help us understand whether workflows complete successfully.
+Examples:
+Agent execution success rate
+Tool execution failure rate
+Model request failure rate
+Timeout rate
+Retry rate
+Task cancellation rate
+Human intervention rate
+Incomplete workflow rate
+A high retry rate can be an early indicator of a problematic integration or an unstable external dependency.
+We should also distinguish between a successful model response and a successful business workflow.
+An LLM can return a perfectly valid response while the overall task fails to achieve its objective.
+Token usage should be tracked at multiple levels.
+
+
+
+Metric
+Description
+
+
+
+
+Input tokens
+Tokens sent to the model
+
+
+Output tokens
+Tokens generated by the model
+
+
+Cached input tokens
+Tokens served from provider cache
+
+
+Reasoning tokens
+Model-reported reasoning token usage
+
+
+Tokens per workflow
+Total usage across an entire task
+
+
+Tokens per agent
+Usage attributed to an individual agent
+
+
+
+For multi-step workflows, we should aggregate usage from all model calls rather than looking only at the final response.
+These metrics describe how efficiently agents perform their work.
+Examples:
+Number of tool calls per task
+Number of model calls per agent invocation
+Number of agent handoffs
+Repeated tool-call frequency
+Tool-selection success
+Average steps per workflow
+Average number of clarification requests
+An agent repeatedly calling the same tool can indicate a reasoning loop, an incorrect tool result, or an orchestration problem.
+The trace helps us identify the execution pattern. Metrics help us understand how frequently the pattern occurs.
+This is where AI observability starts to overlap with AI evaluation.
+Examples:
+Answer correctness
+Groundedness
+Retrieval relevance
+Tool-selection accuracy
+Task completion
+Policy adherence
+Human acceptance rate
+These metrics cannot always be derived from execution telemetry alone.
+We need an evaluation strategy to measure the actual quality of the result.
+One of the biggest mistakes in AI platforms is measuring only model token usage and treating it as the total cost of the workflow.
+An agent-based application may consume resources across several layers:
+LLM inference
+Embedding generation
+Reranking
+External API calls
+Database queries
+Vector database operations
+Container or sandbox execution
+Remote agent invocations
+Infrastructure and networking
+The total cost should reflect the entire execution path.
+A useful starting point is to define a model cost formula:
+[
+C_{\text{model}} =
+Where:
+(T) represents token usage.
+(P) represents the applicable price per token.
+(i) represents an individual model operation.
+The pricing model may also need separate rates for cached input, audio, images, reasoning tokens, or other modalities.
+We should use the actual provider-reported billable usage wherever available and avoid double-counting cached or reasoning token subsets.
+The complete workflow cost can then be represented as:
+[
+C_{\text{workflow}} =
+This may be an estimate rather than an exact invoice calculation, depending on which provider and infrastructure usage data are available.
+Imagine two implementations:
+
+
+
+Metric
+Agent A
+Agent B
+
+
+
+
+Average cost per attempt
+$0.04
+$0.07
+
+
+Successful completion rate
+90%
+98%
+
+
+Cost per successful task
+~$0.044
+~$0.071
+
+
+
+Agent A is cheaper per attempt, but Agent B completes more tasks successfully.
+Neither is automatically better.
+The correct decision depends on the business value of successful completion, quality, latency, and the cost of failed attempts.
+A useful metric is:
+[
+\text{Cost per successful task} =
+The numerator should include failed attempts that consumed resources, rather than counting only successful runs.
+Observability data can also help us make better model-routing decisions.
+For example:
+Use a smaller model for classification or simple extraction.
+Use a more capable model for complex analysis.
+Avoid unnecessary model calls when a deterministic operation is sufficient.
+Reuse cached context when appropriate.
+Set explicit iteration and tool-call limits.
+Stop an agent when a task exceeds its budget.
+The important principle is that model selection should be based on measured task quality and total execution cost, not just the price of an individual inference request.
+The current GenAI token metric conventions include proposed counters such as:
+gen_ai.client.inference.usage.input_tokens
+gen_ai.client.inference.usage.output_tokens
+gen_ai.client.inference.usage.cache_read.input_tokens
+gen_ai.client.inference.usage.reasoning.output_tokens
+These conventions are still in Development.
+There is also an important distinction between token usage attributes on individual spans and cumulative token usage metrics.
+A span attribute describes an individual operation. A counter or histogram is used to analyze consumption across many operations.
+For production cost reporting, maintain an application-level pricing registry with model and provider versions, effective dates, and the relevant unit prices.
+This makes historical cost calculations more reliable when provider pricing changes.
+References: GenAI Token Metrics · GenAI Metrics
+This distinction is worth emphasizing.
+Observability tells us what happened during execution.
+Evaluation tells us whether the result was good enough.
+A trace can show that an agent:
+Called the correct model.
+Used three tools.
+Retrieved five documents.
+Completed within four seconds.
+Returned a response without an exception.
+But none of these facts proves that the answer was correct.
+Consider a RAG application.
+The retrieval operation may complete successfully, and the model may return a fluent answer. However, the retrieved documents may be irrelevant or the final answer may contain unsupported information.
+From an operational perspective, the request succeeded.
+From a quality perspective, it failed.
+We need both observability and evaluation.
+Offline evaluation measures an AI application against a predefined dataset.
+For example, we can create 100 representative questions and expected outcomes.
+Whenever we modify a prompt, model, retrieval strategy, or agent workflow, we run the same dataset again.
+This helps identify regressions before deploying changes.
+Useful evaluation dimensions include:
+Answer correctness
+Relevance
+Groundedness
+Tool selection
+Expected task completion
+Policy compliance
+Online evaluation measures actual production interactions.
+We can select a sample of production traces and evaluate them using:
+Rule-based checks
+Code-based evaluators
+LLM-as-a-Judge
+Human feedback
+The important part is to turn real production failures into future test cases.
+For example:
+A production trace shows that an agent selected the wrong tool.
+We identify the relevant input and expected behavior.
+We create a regression dataset entry.
+We update the prompt or agent implementation.
+We rerun offline evaluations.
+We deploy and monitor the next set of production traces.
+This creates a continuous improvement loop.
+Production Traces
+       |
+       v
+Failure Analysis
+       |
+       v
+Evaluation Dataset
+       |
+       v
+Offline Evaluation
+       |
+       v
+Prompt / Model / Agent Changes
+       |
+       v
+Deployment
+       |
+       v
+Online Evaluation
+       |
+       +------> New Regression Cases
+
+Two examples of AI-focused observability and evaluation platforms are:
+Langfuse
+Provides tracing, evaluations, datasets, experiments, and online evaluation of production traffic. It can help connect execution traces with quality measurements.
+Documentation: https://langfuse.com/docs/evaluation/overview
+Arize Phoenix
+An open-source observability and evaluation platform built around OpenTelemetry-based instrumentation and OpenInference conventions.
+It provides tracing, evaluation, datasets, experiments, and debugging capabilities.
+Documentation: https://phoenix.arize.com/
+These tools complement OpenTelemetry. They do not replace the underlying need for correct instrumentation or a well-defined evaluation strategy.
+Reference: Langfuse Evaluation Concepts · Arize Phoenix
+In a production architecture, applications should not necessarily export telemetry directly to every observability backend.
+This is where the OpenTelemetry Collector becomes useful.
+The Collector receives telemetry from instrumented applications, processes it, and exports it to one or more destinations.
+It provides a central place for:
+Batching telemetry
+Filtering unwanted data
+Applying processors
+Handling authentication
+Reducing telemetry volume
+Sampling traces
+Routing signals to different backends
+A simplified architecture looks like this:
+                 AI Applications
+                       |
+            +----------+----------+
+            |          |          |
+            v          v          v
+         Next.js     .NET API   Python Agent
+            |          |          |
+            +----------+----------+
+                       |
+                      OTLP
+                       |
+                       v
+             OpenTelemetry Collector
+                       |
+              +--------+--------+
+              |        |        |
+              v        v        v
+            Traces   Metrics   Logs
+              |        |        |
+              v        v        v
+            Jaeger   Prometheus  Log Backend
+              |
+              v
+            Grafana
+
+The same telemetry can also be routed to AI-specific observability platforms where supported.
+In enterprise environments, we may have several applications and teams using different frameworks and languages.
+A Collector provides a common ingestion point and makes it possible to apply centralized policies.
+For example, a Collector can filter sensitive attributes before telemetry reaches the final backend.
+It also allows us to change exporters or observability providers without changing the instrumentation in every application.
+OpenTelemetry supports different Collector deployment patterns.
+A common enterprise approach is to run lightweight Collectors close to applications and forward telemetry to centralized gateway Collectors.
+This provides a separation between local telemetry collection and centralized processing.
+However, it introduces operational complexity and additional infrastructure. The Collector itself becomes another production component that needs capacity planning, monitoring, and failure handling.
+Reference: OpenTelemetry Collector · Gateway Deployment Pattern
+Agent-based workflows can generate a significant amount of telemetry.
+Consider an agent that performs 15 model calls and 20 tool calls during a single task.
+If the application handles thousands of tasks per hour, storing every span indefinitely may become expensive.
+Sampling helps control this volume.
+There are two common approaches.
+The sampling decision is made when the trace starts.
+For example, we may decide to sample 10% of incoming requests.
+This is relatively simple and reduces the amount of telemetry generated or exported.
+However, we do not yet know whether a trace will eventually fail or become unusually slow.
+The sampling decision is made after considering the trace's collected spans.
+This makes it possible to retain:
+All failed traces.
+All traces exceeding a latency threshold.
+Traces containing specific tool failures.
+A percentage of successful traces.
+For AI agents, tail-based sampling can be particularly useful because many execution problems only become visible after several operations have completed.
+However, tail sampling has an important infrastructure requirement: all spans belonging to the same trace must reach the same tail-sampling Collector instance.
+This generally requires trace-ID-aware routing when using multiple Collector instances.
+A practical approach is to combine sampling strategies:
+Preserve error and high-latency traces.
+Retain a representative sample of successful traces.
+Maintain complete aggregate metrics where possible.
+Apply stricter retention policies to verbose telemetry.
+Reference: OpenTelemetry Sampling · Tail Sampling Processor
+This is one of the most important aspects of AI observability in enterprise environments.
+Traditional telemetry usually contains operational information such as request duration, HTTP status codes, and service names.
+AI telemetry can contain much more sensitive information.
+For example:
+User prompts
+System instructions
+Generated responses
+Tool arguments
+Tool results
+Retrieved documents
+Conversation context
+Customer or business identifiers
+Sending all this information to an observability backend can create additional privacy and data governance risks.
+A particularly important detail is that the AI SDK OpenTelemetry integration records inputs and outputs by default unless configured otherwise.
+We can disable this behavior:
+registerTelemetry(
+  new OpenTelemetry({
+    recordInputs: false,
+    recordOutputs: false,
+  }),
+);
+
+For many production applications, this is a better starting point.
+We can still collect useful operational telemetry:
+Model identifiers
+Token counts
+Duration
+Finish reasons
+Tool execution times
+Error information
+Workflow identifiers
+without exporting the complete conversation.
+Before exporting telemetry, ask whether each attribute is genuinely needed.
+Avoid sending:
+Access tokens
+Authorization headers
+Passwords
+Raw customer records
+Full database query results
+Unfiltered tool arguments
+For sensitive workflows, use approved metadata rather than full payloads.
+An observability backend should not automatically become another storage system for business data.
+The fact that a trace is useful for debugging does not mean the full underlying request and response should be retained indefinitely.
+Enterprise environments should define:
+Who can access traces.
+Which teams can view prompt and response content.
+How long telemetry is retained.
+How data is deleted.
+Which environments are allowed to capture full content.
+How telemetry exports are authenticated and encrypted.
+A sensible approach is to use more detailed content capture in controlled development environments and much stricter policies in production.
+Reference: OpenTelemetry GenAI Content Capture
+OpenTelemetry provides a strong foundation, but it is not a complete AI observability solution by itself.
+Not every framework, provider, or agent runtime exposes the same information.
+Some integrations can automatically trace model calls and tool execution, while others require custom instrumentation.
+We should verify what is actually captured rather than assuming that installing an OpenTelemetry package provides complete visibility.
+The GenAI conventions are still under development.
+Attribute names, operation models, and implementation support may evolve.
+Teams should pin versions, review changes, and avoid coupling application business logic to conventions that have not reached the required maturity.
+A trace can explain what happened but does not prove that the model's result is correct.
+Evaluation datasets, deterministic checks, and human feedback remain necessary.
+Collecting every input, output, tool argument, and execution event can generate significant storage and processing overhead.
+We should measure the cost of observability itself.
+Adding unique user IDs, conversation IDs, trace IDs, or request IDs to metric labels can create an excessive number of time series.
+Use traces for request-level correlation and keep metric dimensions bounded.
+A2A communication, queues, background tasks, and remote tool execution may cross process boundaries.
+If context is lost, we can end up with disconnected traces.
+LLM-as-a-Judge can provide useful signals, but it can also be inconsistent or biased.
+A single evaluation score should not become the only definition of quality.
+Combine deterministic checks, representative datasets, human review, and calibrated evaluators.
+I think this is where observability moves from an implementation detail to an engineering capability.
+When multiple teams develop AI-powered applications, each team may implement different logging, tracing, and evaluation mechanisms.
+Over time, this creates fragmented visibility.
+One team measures token usage, another measures response latency, and another stores tool-call logs without a common correlation model.
+As an AI Chapter Lead, I would focus on establishing a shared observability standard that can be reused across teams and applications.
+Establish a baseline for the telemetry every agent-based application should produce.
+For example:
+
+
+
+Category
+Required information
+
+
+
+
+Application
+Service name, environment, version
+
+
+Workflow
+Workflow name, workflow version
+
+
+Agent
+Agent name, execution status
+
+
+Model
+Provider, requested model, response model
+
+
+Usage
+Input/output tokens, cache usage
+
+
+Tools
+Tool name, duration, execution status
+
+
+Execution
+Trace ID, span ID, error information
+
+
+Business outcome
+Completed, failed, canceled, escalated
+
+
+
+The objective is to make observability consistent without forcing every team to use the same agent framework.
+We can create an internal TypeScript package that wraps the common OpenTelemetry configuration.
+For example:
+@company/ai-observability
+|
++-- OpenTelemetry initialization
++-- AI SDK integration
++-- Agent span utilities
++-- Workflow instrumentation
++-- Tool execution tracking
++-- Cost attribution
++-- Evaluation metadata
++-- Privacy and redaction policies
+
+This package can provide standard helpers for application-level tracing and reduce duplicated implementation.
+For teams using .NET, Python, or Go, equivalent instrumentation conventions can be established without requiring identical SDK implementations.
+We should define a common set of metrics that helps teams understand both technical performance and business outcomes.
+Examples:
+Agent success rate
+Workflow completion rate
+Tool-call failure rate
+Model latency
+Cost per successful task
+Average token usage
+Human intervention rate
+Evaluation quality scores
+A shared dashboard can make it easier to compare systems and identify performance regressions.
+Observability without evaluation gives us only part of the picture.
+We can create reusable evaluation datasets and testing patterns for common agent behaviors.
+For example:
+Tool selection accuracy
+Missing-source detection
+Correct handling of incomplete input
+Permission violations
+Unsupported claims
+Failure recovery
+Task completion quality
+This is particularly valuable because agent behavior can change when prompts, tools, models, or orchestration logic are modified.
+Define what can and cannot be captured by default.
+The shared implementation should make safe defaults easy to use and prevent teams from accidentally exporting sensitive prompts, responses, or tool payloads.
+This should include clear ownership, access policies, retention, and audit requirements.
+A useful pilot would be a multi-agent workflow that involves several independently deployed services.
+For example, a merge request review involving coordinator, security, and testing agents.
+The pilot should demonstrate:
+One trace across the complete request.
+Parent-child relationships between agents.
+Model and tool execution spans.
+Token and cost attribution.
+Error and retry visibility.
+Evaluation results associated with the completed workflow.
+This would provide a reference architecture that other teams can reuse.
+Observability should not begin after production deployment.
+We can introduce telemetry and evaluation requirements into the development process itself.
+For example:
+New agents must have execution tracing.
+New tools must expose execution status and duration.
+Prompt changes must pass relevant regression evaluations.
+New workflows must define success and failure criteria.
+Production deployments must have basic operational dashboards.
+This makes observability a standard engineering practice rather than a separate monitoring task.
+I would avoid introducing every observability component at once.
+A phased approach is more useful.
+
+
+
+Phase
+Focus
+Expected result
+
+
+
+
+1
+OpenTelemetry initialization
+Basic traces and metrics
+
+
+2
+AI SDK instrumentation
+Model and tool visibility
+
+
+3
+Custom agent spans
+Complete workflow tracing
+
+
+4
+Cost attribution
+Usage and cost per task
+
+
+5
+Evaluation
+Offline and online quality checks
+
+
+6
+Security and governance
+Privacy and access controls
+
+
+7
+Shared dashboards
+Cross-team operational visibility
+
+
+
+The first milestone should be simple:
+For every important agent workflow, we should be able to answer what happened, how long it took, how much it cost, and whether it achieved the intended result.
+Once this foundation is established, more advanced capabilities such as anomaly detection, adaptive sampling, automated evaluation, and cost-aware model routing become much easier to introduce.
+AI agents introduce a new level of complexity to application observability.
+A single user request can trigger multiple model calls, tool executions, retrieval operations, and remote agent interactions. Monitoring only the HTTP request or final model response is not enough to understand the complete execution.
+OpenTelemetry provides a vendor-neutral foundation for collecting traces, metrics, and logs across these components.
+Combined with GenAI semantic conventions, AI SDK instrumentation, distributed tracing, and dedicated evaluation systems, it gives engineering teams a much better understanding of how agent-based applications behave in production.
+But the most important distinction remains:
+Observability tells us what happened. Evaluation tells us whether it was good. Cost attribution tells us whether it was worth it.
+For an AI Chapter Lead, the opportunity is to make these capabilities part of the engineering standard: shared instrumentation, consistent metrics, measurable quality, and secure telemetry practices.
+The goal should not be to collect more telemetry.
+It should be to make every production agent workflow understandable, measurable, and continuously improvable.
+OpenTelemetry Official Documentation — Core concepts, signals, instrumentation, and architecture.
+OpenTelemetry JavaScript — TypeScript and Node.js instrumentation.
+OpenTelemetry Tracing — Traces, spans, and distributed execution.
+OpenTelemetry Context Propagation — Distributed trace context.
+OpenTelemetry Collector — Receiving, processing, and exporting telemetry.
+OpenTelemetry Gateway Deployment — Centralized telemetry collection.
+OpenTelemetry Sampling — Head-based and tail-based sampling.
+GenAI Semantic Conventions — Spans — Model operations, retrieval, and tool execution.
+GenAI Agent Spans — Agent invocation, workflows, and tool spans.
+GenAI Metrics — Agent duration, tool calls, and workflow metrics.
+GenAI Token Metrics — Token consumption and usage measurements.
+AI SDK Telemetry — OpenTelemetry integration, span hierarchy, and custom attributes.
+AI SDK v7 Migration Guide — Version-specific telemetry changes.
+Next.js OpenTelemetry — Application-level instrumentation.
+Langfuse Evaluation — Online and offline evaluation.
+Langfuse Core Concepts — Datasets, experiments, and evaluators.
+Arize Phoenix — Open-source AI observability and evaluation.
+OpenInference — OpenTelemetry-based instrumentation conventions for AI applications...."
+image: /img/blog/generated/mastering-ai-observability-a-guide-to-tracing-and-evaluating-agent-based-systems-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Mastering AI Observability: A Guide to Tracing and Evaluating Agent-Based Systems](/img/blog/generated/mastering-ai-observability-a-guide-to-tracing-and-evaluating-agent-based-systems-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### The Unique Challenges of AI Agent Execution
+
+AI agents operate in a fundamentally different paradigm compared to traditional backend systems. While conventional applications follow linear execution paths, AI agents often engage in dynamic workflows that adapt based on user inputs, external contexts, and model interactions. For instance, when a user requests a code review, the AI agent may invoke a series of models, delegate tasks to sub-agents, and interact with various APIs. This complexity creates a multifaceted execution landscape where performance bottlenecks can arise from numerous sources, such as model latency, tool timeouts, and inefficient orchestration. Understanding these intricate execution paths is essential for effective monitoring and optimization. 
+
+A practical example of this complexity can be seen in a chatbot system where user queries lead to different processing paths based on the context. For instance, a simple greeting may require minimal processing, whereas a request for technical support could trigger a cascade of model invocations, including natural language understanding, intent recognition, and retrieval of relevant knowledge from a database.
+
+### The Role of OpenTelemetry in AI Observability
+
+OpenTelemetry serves as a pivotal framework for enhancing observability in AI systems. It provides a vendor-neutral approach to collecting, processing, and exporting telemetry data, allowing developers to instrument their applications without being tied to a specific observability platform. This flexibility is particularly crucial for AI applications, where comprehensive insights into execution paths are necessary for effective monitoring and optimization. By leveraging OpenTelemetry, teams can generate a rich tapestry of traces, metrics, and logs that illuminate the complex interactions within AI workflows, facilitating both performance analysis and cost management.
+
+For example, an AI-driven recommendation engine can utilize OpenTelemetry to trace the flow of data from user interactions through various models, capturing the time taken at each stage and identifying any delays that may affect user experience.
+
+### Understanding Traces, Metrics, and Logs in AI Systems
+
+In the context of AI observability, traces, metrics, and logs play distinct yet interconnected roles. Traces provide a detailed view of how operations are executed, revealing the sequence of model calls and tool executions. For example, tracing the execution of a code review request could highlight each step taken by the coordinator agent, from invoking a language model (LLM) to generating the final report. Metrics quantify system performance over time, capturing data such as average latency and error rates, while logs document specific events or exceptions encountered during execution. This triad of observability signals empowers teams to diagnose issues comprehensively and make informed decisions to enhance system performance.
+
+To illustrate, consider a scenario where an AI agent processes a user query. The trace might show the invocation of multiple models, each contributing to the final output. Metrics could reveal that one model consistently exceeds latency thresholds, while logs might capture an error that occurred during a specific invocation, leading to a deeper investigation.
+
+### Semantic Conventions: Standardizing Observability Across AI Frameworks
+
+A significant challenge in AI observability is the inconsistency in naming conventions across various frameworks and models. OpenTelemetry addresses this by introducing semantic conventions that define common attributes and operation types. For instance, when logging an LLM invocation, attributes like `gen_ai.provider.name`, `gen_ai.request.model`, and `gen_ai.usage.input_tokens` can be employed to maintain consistency across different implementations. This standardization simplifies monitoring and enables comparative analysis across diverse AI systems, allowing teams to identify best practices and optimize performance effectively.
+
+For example, when comparing the performance of different LLMs, using standardized attributes allows teams to aggregate data across systems and identify which model performs best under specific conditions, enhancing decision-making processes.
+
+### The Importance of Custom Instrumentation in AI Workflows
+
+While built-in instrumentation provides a solid foundation, custom instrumentation is often essential to capture application-specific nuances. For example, an AI agent's orchestration function may require explicit spans to track decision-making processes not covered by standard telemetry. By creating custom spans, developers can gain insights into why certain agents were selected for specific tasks or how long workflows spent waiting for approvals. This level of detail is crucial for diagnosing issues arising from complex agent interactions and ensuring optimal performance.
+
+In a practical scenario, if an AI agent is designed to prioritize certain tasks based on user history, custom spans can help track the logic behind these decisions, providing clarity on how effectively the agent is meeting user needs.
+
+### Evaluating AI Performance: Key Metrics to Monitor
+
+To effectively evaluate the performance of AI agents, it is vital to identify and track relevant metrics. Key performance indicators (KPIs) may include end-to-end workflow duration, model request latency, and tool execution times. For instance, measuring the time to the first token can yield insights into perceived response latency, which is crucial for user experience. Additionally, tracking success rates for agent executions and tool calls can help pinpoint areas for improvement. By focusing on these metrics, teams can ensure that their AI systems not only function correctly but also meet user expectations regarding speed and reliability.
+
+For example, in a customer support AI system, monitoring the average time taken to resolve queries can help identify bottlenecks, allowing teams to adjust workflows or enhance model training to improve response times.
+
+### Cost Attribution: Understanding the Financial Impact of AI Workflows
+
+As AI systems grow in complexity, grasping the financial implications of their operations becomes essential. Cost attribution involves analyzing resource consumption across various components of an AI workflow, such as model inference, embedding generation, and external API calls. For example, the total cost of a workflow can be represented mathematically as:
+
+$$
+C_{\text{workflow}} = \sum_{i} C_{\text{model}}(T_i) + C_{\text{external}}(E_j)
+$$
+
+where \(C_{\text{model}}\) represents the cost associated with model operations and \(C_{\text{external}}\) accounts for external service calls. This comprehensive view of costs enables organizations to make informed decisions about resource allocation and optimization strategies, ultimately leading to more efficient AI systems.
+
+In practice, an organization might discover that a particular model is disproportionately driving costs due to high latency and frequent retries, prompting a review of the model's architecture or the introduction of caching mechanisms to mitigate expenses.
+
+### Security and Privacy Considerations in Telemetry
+
+The collection and storage of telemetry data in AI systems raise significant security and privacy concerns. Sensitive information, such as user prompts and model outputs, can inadvertently be exposed if not managed properly. For instance, OpenTelemetry's default behavior is to record inputs and outputs, which may not be suitable for all production environments. Organizations should implement strict policies regarding data retention, access controls, and anonymization to mitigate risks. Strategies such as data masking, encryption of sensitive fields, and limiting access to telemetry data based on roles can further enhance security. By prioritizing security in their observability practices, teams can ensure that they maintain user trust while still gaining valuable insights into system performance.
+
+A concrete example includes implementing a policy where personally identifiable information (PII) is masked before being logged, ensuring compliance with data protection regulations while still allowing for effective monitoring.
+
+### The Interplay Between Observability and Evaluation
+
+Observability and evaluation are interdependent processes that must work in concert to foster continuous improvement in AI systems. While observability provides insights into execution events, evaluation assesses whether the outcomes meet predefined standards. For example, an AI agent may successfully complete a task but still fail to meet quality benchmarks. Implementing a feedback loop that incorporates production traces into evaluation datasets allows teams to identify regressions and refine their models and workflows accordingly. This iterative process is vital for enhancing the overall effectiveness of AI applications.
+
+For instance, if an AI model consistently underperforms in specific scenarios, the observability data can help pinpoint the issue, leading to targeted improvements in the model's training data or architecture.
+
+### Case Study: Observability in a Multi-Agent System
+
+Consider a scenario where a multi-agent system is employed to analyze merge requests in a code repository. The system comprises a coordinator agent that delegates tasks to security and testing agents, each responsible for specific analyses. By implementing OpenTelemetry, the organization can trace the entire workflow from the initial user request to the final report generation. Each agent's performance can be monitored through metrics such as execution duration and success rates, while logs capture any exceptions or errors encountered during the process. This comprehensive observability framework enables the organization to identify bottlenecks, optimize agent interactions, and ultimately improve the system's responsiveness and accuracy.
+
+In this case, the organization might find that the security agent frequently encounters errors due to outdated dependencies, prompting a review of the agent's environment and leading to improved stability and performance.
+
+### Establishing a Robust Observability Framework
+
+To build a robust observability framework for AI agents, organizations should adopt a phased approach. Initial phases should focus on establishing basic telemetry and standardizing semantic conventions, followed by integrating advanced observability techniques such as custom instrumentation and cost attribution. Continuous monitoring and evaluation should be embedded into the development lifecycle to ensure that observability remains a priority throughout the software development process. By fostering a culture of observability, organizations can enhance their AI systems' performance, reliability, and overall value.
+
+### Conclusion: The Imperative of AI Observability
+
+As AI systems continue to evolve, the demand for advanced observability techniques will only increase. By leveraging frameworks like OpenTelemetry and establishing standardized practices, organizations can gain deeper insights into the performance of their AI agents. This understanding will facilitate optimization efforts and enhance decision-making processes regarding resource allocation and cost management. Ultimately, the ability to effectively monitor and evaluate AI systems will be a critical differentiator for organizations seeking to harness the full potential of artificial intelligence, ensuring they remain competitive in a rapidly changing landscape.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/serifcolakel/observability-for-ai-agents-tracing-evaluation-and-cost-control-in-production-1ln)
+
+---
+
+<SocialShare title="Mastering AI Observability: A Guide to Tracing and Evaluating Agent-Based Systems" slug="mastering-ai-observability-a-guide-to-tracing-and-evaluating-agent-based-systems" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
