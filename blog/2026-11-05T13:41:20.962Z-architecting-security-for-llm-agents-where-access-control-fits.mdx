@@ -1,0 +1,120 @@
+---
+slug: architecting-security-for-llm-agents-where-access-control-fits
+title: "Architecting Security for LLM Agents: Where Access Control Fits"
+authors: [francis]
+tags: [ai, llm, security, accesscontrol]
+date: 2026-11-05T13:41:20.962Z
+description: "Access control for LLM agents is usually discussed as a prompt problem. It is an architecture problem. The question is not what you tell the model to avoid. The question is where in the request path a decision gets made, and what happens when that decision is no.
+This article covers the mechanism, a concrete failure mode, and the mitigation, with a short implementation section for RESK.
+AI agent security is the set of controls that govern what an autonomous or semi-autonomous agent can do with the credentials and tools it holds. It covers identity, tool permissions, scope of each call, and the monitoring record that proves what happened. It is distinct from model safety, which concerns what the model outputs. Agent security concerns what the system executes.
+The specific question is where the control belongs. The answer is: on the request path, between the agent and the tool, before execution.
+A control inside the system prompt is advisory. A control in a gateway that sits in front of the tool is enforcement. If the policy check runs after the tool has executed, you have built an audit log of a breach, not a prevention layer.
+The ordering that matters is:
+Authenticate the agent identity.
+Resolve the permission for the specific tool being called.
+Evaluate the requested scope against least privilege.
+Allow or deny the call.
+Record the decision with identity, tool, requested scope and granted scope.
+Skipping any step leaves a path that an injected instruction can walk.
+An agent typically holds a token or a set of credentials. If that token carries more rights than the current task needs, the blast radius of any mistake equals the token scope, not the task scope.
+Consider a failure mode that is not theoretical. An agent is asked to summarize a document. The document contains an instruction to call a write tool. The agent has a token that permits writes because it was provisioned broadly at setup. The model follows the instruction. The write executes. Nothing in the path checked whether a summarization task should ever reach a write tool.
+The failure is not that the model was fooled. The failure is that the architecture had no point where the task scope and the token scope were compared. Monitoring alone would have recorded the call after the fact. Prevention requires the check before execution.
+The mechanism is a policy enforcement point on the request path. Every tool call passes through it. The point holds three pieces of state: the agent identity, the tool permission set, and the scope required by the current task. It compares them and returns allow or deny before the tool runs.
+Two properties make this work. First, the decision is outside the model, so an injected instruction cannot argue with it. Second, the decision is recorded, so a denied call is visible rather than silent. A denial that leaves no trace is indistinguishable from a call that never happened.
+Monitoring closes the loop. Log the agent identity, the tool, the scope requested, the scope granted and the outcome. That record is what lets you answer whether a control is working.
+reskSecure provides the enforcement point for agent tool permissions. It sits between the agent and the tool call and evaluates least privilege before execution, so the check is architectural rather than advisory.
+ReskPoints provides the monitoring record. Every decision is logged with the identity, the tool and the scope involved, so denials and grants are both visible.
+For the permission model in more depth, see the related article on AI agent tool permissions: /blog/ai-agent-tool-permissions.html
+To enforce least privilege on your agents, start here: https://resk.fr/projects/resksecure.html
+The policy check runs before the tool executes, not after.
+Agent identity is authenticated on every call.
+Tool permissions are resolved per tool, not per agent session.
+Requested scope is compared against least privilege for the current task.
+Denials are logged with identity, tool and scope.
+Grants are logged with the same fields.
+The token scope is no broader than the task scope.
+Monitoring can distinguish a denied call from a call that never happened...."
+image: /img/blog/generated/architecting-security-for-llm-agents-where-access-control-fits-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Architecting Security for LLM Agents: Where Access Control Fits](/img/blog/generated/architecting-security-for-llm-agents-where-access-control-fits-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### Defining Access Control in LLM Contexts
+
+Access control is a critical security mechanism that dictates the operations an LLM (Large Language Model) agent can perform based on its identity and the permissions assigned to it. In the realm of LLM agents, access control ensures that these autonomous entities execute only those tasks that align with their intended functionalities. This becomes increasingly significant as the autonomous nature of these agents can lead to unauthorized actions, data breaches, or even catastrophic failures if proper access controls are not in place. Thus, establishing robust access control mechanisms is essential for safeguarding the integrity and security of LLM systems.
+
+### The Request Path: A Crucial Security Framework
+
+The request path in LLM systems comprises the sequence of actions an agent undertakes from the initiation of a request to the execution of a command. This path is vital for implementing effective access controls, as it encompasses several critical stages: authenticating the agent's identity, resolving tool permissions, evaluating the requested task against the principle of least privilege, and finally executing the command. If any segment of this path is inadequately secured, vulnerabilities can be exploited by malicious actors or through erroneous system instructions. Understanding the request path is therefore essential for architects aiming to construct secure LLM systems.
+
+### Advisory vs. Enforcement Controls: The Key Distinction
+
+Access controls can be classified into two main categories: advisory and enforcement mechanisms. Advisory controls provide recommendations or guidelines without actively preventing unauthorized actions, whereas enforcement controls take a more proactive stance by blocking actions that do not meet specified criteria. For LLM agents, relying solely on advisory controls is insufficient; decisions must be enforced before execution to avert unauthorized operations. This distinction is crucial in designing secure LLM architectures, as it directly influences the efficacy of the implemented security measures.
+
+### Analyzing Real-World Security Breaches
+
+Examining concrete examples of security failures in LLM systems underscores the necessity for strategic access control. For instance, consider an agent tasked with summarizing a document that inadvertently includes an instruction to write data. If the agent possesses a broadly provisioned token allowing write operations, it may execute the command without any checks, resulting in unintended modifications. This failure is not merely a flaw in the model's logic but rather a systemic oversight in the architecture that neglected to compare the task scope with the permissions granted. Such incidents highlight the critical need for rigorous checks within the request path to prevent unauthorized actions. A notable case is the misuse of AI-driven chatbots in customer service settings, where agents inadvertently accessed sensitive customer information due to insufficient access controls, leading to data leaks.
+
+### The Role of Policy Enforcement Points in Security Architecture
+
+To mitigate risks associated with unauthorized actions, integrating a Policy Enforcement Point (PEP) into the request path is essential. A PEP functions as a gatekeeper that evaluates requests against established access control policies prior to execution. The architecture of a PEP involves maintaining three critical states: the agent's identity, the permissions associated with the tool being accessed, and the specific scope of the requested task. By comparing these elements, the PEP can make informed decisions to either allow or deny requests, thereby preventing unauthorized actions effectively. For example, if an agent attempts to access a database for writing data, the PEP should validate that the agent's current task aligns with its permissions, ensuring that it does not exceed its authority.
+
+### Implementing RESK: A Comprehensive Security Framework
+
+RESK (Resource and Execution Security Kit) offers a robust framework for implementing access controls in LLM systems. Acting as an intermediary between the agent and the tools it wishes to access, RESK ensures that every request undergoes a thorough evaluation. The implementation of RESK involves configuring the PEP to authenticate the agent's identity on each call, resolve permissions for each tool, and compare the requested scope against the least privilege principle. This proactive approach not only enhances security but also facilitates compliance with regulatory standards, ensuring that the architecture remains resilient against potential threats. For instance, RESK can utilize OAuth 2.0 for secure token-based authentication, ensuring that only authorized agents can make requests based on their defined roles.
+
+### Enhancing Monitoring and Logging Practices
+
+Effective monitoring and logging are indispensable components of a secure LLM architecture. By maintaining comprehensive logs of all decisions made by the PEP, organizations can achieve visibility into the system's operations. Each log entry should encompass the agent's identity, the tool accessed, the requested scope, and the outcome of the decision (allow or deny). This level of transparency is crucial for auditing purposes and for identifying potential security breaches. Furthermore, monitoring can assist organizations in fine-tuning their access control policies based on real-world usage patterns, ultimately leading to improved security postures. Implementing centralized logging solutions like ELK (Elasticsearch, Logstash, Kibana) can provide enhanced visibility and facilitate real-time analysis of access control events.
+
+### Best Practices for Enforcing the Principle of Least Privilege
+
+Adhering to the principle of least privilege is paramount in securing LLM agents. This principle dictates that agents should only be granted the minimum permissions necessary to perform their tasks. To enforce this effectively, organizations should regularly review and update the permissions assigned to agents based on their roles and responsibilities. Additionally, implementing a dynamic permission model that adjusts based on the context of the request can further enhance security. For instance, if an agent's task changes, its permissions should be reevaluated to ensure they remain appropriate, thus minimizing the risk of unauthorized actions. Utilizing role-based access control (RBAC) can simplify this process by allowing administrators to manage permissions at a group level rather than individually.
+
+### Future Directions for Secure LLM Architectures
+
+As LLM technology continues to evolve, the security architectures supporting them must also adapt. The increasing complexity of tasks performed by agents necessitates a reevaluation of access control strategies. Future architectures should incorporate adaptive security measures capable of responding to emerging threats in real-time. Integrating machine learning algorithms for anomaly detection can help identify suspicious activities within the request path, further strengthening security. By prioritizing access control and request path security, organizations can build resilient LLM systems that protect against unauthorized actions while fostering innovation. The adoption of zero-trust security models, where verification is required from everyone attempting to access resources, could also be a significant step forward in enhancing overall security.
+
+### Conclusion: A Call to Action for Security Architects
+
+In conclusion, the strategic placement of access controls within the request path of LLM agents is essential for effective security. By understanding the nuances of the request path, differentiating between advisory and enforcement controls, and implementing robust monitoring practices, organizations can significantly reduce the risk of unauthorized actions. As LLM technology advances, security architects must remain vigilant, continuously adapting their strategies to address new challenges and ensure the integrity of their systems. The future of secure LLM architectures hinges on a proactive approach to access control, one that emphasizes prevention over post-factum auditing, ensuring that security measures are not only reactive but also anticipatory.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/resk/where-llm-access-controls-belong-in-the-request-path-45g0)
+
+---
+
+<SocialShare title="Architecting Security for LLM Agents: Where Access Control Fits" slug="architecting-security-for-llm-agents-where-access-control-fits" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
