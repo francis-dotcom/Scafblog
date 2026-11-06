@@ -1,0 +1,203 @@
+---
+slug: understanding-dns-rebinding-vulnerabilities-in-egress-allowlists
+title: "Understanding DNS Rebinding Vulnerabilities in Egress Allowlists"
+authors: [francis]
+tags: [dns, security, cloud, egress]
+date: 2026-11-06T18:14:32.892Z
+description: "Originally published at webofmike.com on 2026-11-06. The demo repo and every command in it were run before publishing.
+A DNS record that changes between the moment code checks it and the moment code uses it can beat an egress allowlist that resolves a hostname twice. Pydantic AI patched exactly that bug on 2026-11-04, across v2.66.0, v1.107.10, and pydantic-ai-harness 0.66.0, inside a batch of 10 security advisories disclosed at once. Two of the ten are the same bug class I keep writing about on this site: an egress decision that lives in application code instead of the network.
+GHSA-5ppx-9jq6-6pmw (low): allowed_domains on the local web-fetch tool, and PlaywrightBrowser's egress allowlists, resolved a hostname to check it against the allowlist, then connected to the hostname, which resolved it again. Two lookups, and nothing forced them to agree. GHSA-5fj9-5pjw-vpwc (medium): the cloud-metadata blocklist that URL downloads check was missing Tencent Cloud's instance-metadata address, 169.254.0.23, so someone who can hand the application a URL could have it fetch temporary role credentials from that address.
+Neither bug is exotic. The first is DNS rebinding, a technique that's been public for two decades. The second is just an incomplete list. What's worth sitting with is where both checks lived: inside the agent framework, in the same process as the code an attacker is trying to redirect. I built a small, runnable repo that reproduces the shape of both bugs and shows the alternative: pydantic-ai-egress-bypass-demo.
+Disclosure: I work at Solo.io, which makes agentgateway. This post names it as one option for where egress enforcement can live; it is not a claim that agentgateway is immune to its own bugs.
+Here's the pattern GHSA-5ppx-9jq6-6pmw describes, reduced to its essence. A function checks whether a hostname is allowed by resolving it once:
+def is_hostname_allowed(hostname: str, port: int) -> bool:
+    ip = socket.getaddrinfo(hostname, port)[0][4][0]
+    return ip not in BLOCKLIST_IPS
+
+Then the code connects, separately:
+def fetch(hostname: str, port: int, path: str) -> str:
+    if not is_hostname_allowed(hostname, port):
+        raise PermissionError(f"{hostname} resolved to a blocked IP")
+    sock = socket.create_connection((hostname, port), timeout=3)
+    ...
+
+socket.create_connection() takes a hostname, not an IP, so it resolves the hostname again, internally. If DNS answers differently on the second lookup than the first, the check and the connection are checking two different things. That's not a hypothetical: a DNS record with a short TTL, under an attacker's control, can return a safe-looking address on the first query and a forbidden one, like a cloud metadata IP, on the second.
+My demo's vulnerable_fetch.py reproduces exactly this. A mock resolver (rebind_resolver.py) answers the first lookup of a test hostname with an RFC 5737 documentation address and every lookup after that with the address where a fake metadata endpoint is listening. Running it:
+$ python3 vulnerable_fetch.py
+  [check]   resolved api.example-safe.test -> 203.0.113.10 for the allowlist check
+  [connect] connected to api.example-safe.test:8169 (second, independent resolution)
+  [result]  response body: 'FAKE-ROLE-CREDENTIAL-STAND-IN-FOR-CLOUD-METADATA-DO-NOT-USE'
+VULNERABLE: fetched the forbidden endpoint despite the allowlist check
+
+The check passed. The fetch didn't go where the check looked.
+Pydantic AI's actual fix reorders the check to run before resolution instead of after it. A functionally equivalent fix for this reduced version: resolve the hostname exactly once, check that single result, and connect to the IP you already resolved rather than letting the hostname resolve again.
+def fetch(hostname: str, port: int, path: str) -> str:
+    ip = socket.getaddrinfo(hostname, port)[0][4][0]   # resolve ONCE
+    if ip in BLOCKLIST_IPS:
+        raise PermissionError(f"{hostname} resolved to a blocked IP ({ip})")
+    sock = socket.create_connection((ip, port), timeout=3)  # connect to the PINNED ip
+    ...
+
+$ python3 fixed_fetch.py
+  [check]   resolved api.example-safe.test -> 127.0.0.1 for the allowlist check
+BLOCKED: api.example-safe.test resolved to a blocked IP (127.0.0.1)
+
+One resolution, one decision, one connection using that decision. This closes the specific bug. It does not close the category of bug, because the fix lives in exactly the same place the bug did: inside the application, reimplemented correctly this time, in this language binding, in this framework, this release. The next framework, or the next contributor who touches this code path, starts from zero again.
+The alternative is to stop deciding egress policy in the agent's own process at all. A proxy in front of the agent can resolve a destination once and enforce the policy there, and it doesn't matter whether the client behind it has a TOCTOU bug, an incomplete blocklist, or no check whatsoever.
+egress_proxy.py in the demo is about 70 lines: it reads an absolute-URI HTTP request, resolves the target hostname exactly once, checks that IP against a blocklist, and either returns 403 or connects to the pinned IP and relays the response. fetch_through_proxy.py is a client with no allowlist logic of its own, standing in for "whatever bug hits the app's own egress code next":
+$ python3 fetch_through_proxy.py
+  [proxy]   GET http://api.example-safe.test:8169/ -> resolved api.example-safe.test -> 127.0.0.1
+  [proxy]   BLOCKED: 127.0.0.1 is on the egress blocklist
+  [client]  no allowlist check performed; proxy returned HTTP 403
+  [result]  body: 'blocked by egress_proxy policy'
+BLOCKED: the proxy enforced the policy even though the client never checked
+
+The client never resolved anything, never compared an IP to a blocklist, never made a decision. It didn't need to. The policy held because it lived somewhere the client's own bugs can't reach.
+This is the argument for agentgateway as an egress policy enforcement point, which I built a standalone proof of and tested against proxy-variable bypasses back in September and October. A cloud-metadata blocklist, correctly maintained, has to enumerate every provider's instance-metadata address and keep enumerating as providers add more. A gateway that authorizes the resolved destination at connect time, once, in one place, doesn't need the enumeration to be perfect in every agent framework that might ever run behind it. It needs to be correct once.
+No dependencies beyond the Python 3 standard library, no sudo, no Docker:
+git clone https://github.com/themsquared/pydantic-ai-egress-bypass-demo.git
+cd pydantic-ai-egress-bypass-demo
+bash demo.sh
+
+demo.sh starts a fake metadata endpoint, runs the vulnerable fetch (expect VULNERABLE, exit 1), runs the fixed fetch (expect BLOCKED, exit 0), starts the egress proxy, and runs the no-check client through it (expect BLOCKED, exit 0). I ran it three times back to back before publishing this to make sure nothing depended on process-timing luck.
+One thing worth naming if you adapt this: the first version of egress_proxy.py bound port 8888, and on my own machine that collided with an unrelated server I had running from a different project. socketserver.ThreadingTCPServer doesn't set allow_reuse_address by default either, which meant a quick restart during testing hit OSError: [Errno 48] Address already in use from a TIME_WAIT socket, not a real conflict. Both are in the repo's final version: a non-default port, and allow_reuse_address = True on the server classes.
+It models the shape of GHSA-5ppx-9jq6-6pmw and GHSA-5fj9-5pjw-vpwc; it isn't a reproduction of pydantic-ai's actual code path, and it doesn't run a real DNS rebind over the network with an external resolver, since the "DNS" here is an in-process mock built for determinism. egress_proxy.py is a teaching toy, not a production gateway: no TLS inspection, no SNI-based policy, no CONNECT tunneling.
+Ten advisories in one batch isn't a reason to single out Pydantic AI; disclosing ten at once instead of trickling them out is the responsible move. It's a reason to notice where egress decisions keep ending up by default, which is wherever the request happens to originate, and to ask whether that's actually where you want them. The repo is at pydantic-ai-egress-bypass-demo if you want to run the rebind yourself.
+What is a DNS rebinding bypass of an egress allowlist?
+It's a check-then-use bug: code resolves a hostname to decide if it's allowed, then connects to the hostname again, which resolves it a second time. If an attacker controls that DNS record, the first lookup can return a safe address and the second a forbidden one, like a cloud metadata IP. The allowlist check passed; the connection didn't go where it checked.
+How did Pydantic AI fix GHSA-5ppx-9jq6-6pmw?
+Pydantic AI's allowed_domains and PlaywrightBrowser egress allowlists checked a hostname by resolving it once, then connected by resolving the same hostname a second time, so a short-TTL DNS record under an attacker's control could answer those two lookups differently. v2.66.0 and v1.107.10, both dated 2026-11-04, reorder the check to run before resolution instead of after it, so there's no second, independent lookup left to disagree with the first.
+Why put egress enforcement in a gateway instead of the agent framework's own code?
+Because a network proxy resolves a destination once, checks that single result, and connects to the pinned IP, with no second lookup to disagree with the first. It enforces the same policy for every agent behind it regardless of which framework, version, or language each one runs, so a bug in one app's allowlist code doesn't matter.
+What other bugs shipped in Pydantic AI's 2026-11-04 security batch?
+Ten advisories landed together in v2.66.0, v1.107.10, and pydantic-ai-harness 0.66.0. The other one worth knowing: GHSA-5fj9-5pjw-vpwc, a cloud-metadata blocklist missing Tencent Cloud's instance-metadata address (169.254.0.23), so a URL download could reach it and read temporary role credentials on affected deployments.
+Canonical version, with machine-readable markdown at https://webofmike.com/pydantic-ai-egress-dns-rebind/index.md: https://webofmike.com/pydantic-ai-egress-dns-rebind/..."
+image: /img/blog/generated/understanding-dns-rebinding-vulnerabilities-in-egress-allowlists-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Understanding DNS Rebinding Vulnerabilities in Egress Allowlists](/img/blog/generated/understanding-dns-rebinding-vulnerabilities-in-egress-allowlists-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### Understanding DNS Rebinding Attacks
+
+DNS rebinding is a potent attack vector that leverages the inherent flexibility of the Domain Name System (DNS) to manipulate how browsers resolve hostnames. By controlling DNS records, an attacker can make a victim's browser resolve a hostname to different IP addresses over short time frames, typically defined by the Time-To-Live (TTL) settings. This manipulation can allow unauthorized access to internal resources that should be protected by egress allowlists, particularly in cloud environments where these policies are essential for safeguarding sensitive data and services. Historical incidents, such as the exposure of internal services at major corporations due to DNS rebinding, underscore the real-world implications of this vulnerability.
+
+### The Role of Egress Allowlists in Network Security
+
+Egress allowlists are a critical component of network security, defining which external hosts can be accessed by internal applications. These allowlists serve as a first line of defense, ensuring that only approved domains can be contacted. However, if not implemented with precision, they can create vulnerabilities that attackers can exploit. The recent vulnerabilities discovered in Pydantic AI highlight the risks associated with relying on application-level checks for egress policies, emphasizing the need for robust, network-level enforcement mechanisms. For instance, organizations that fail to regularly update their allowlists may inadvertently expose themselves to attacks, as attackers can exploit outdated entries or misconfigurations.
+
+### Dissecting the Pydantic AI Vulnerability
+
+Pydantic AI's vulnerabilities, particularly GHSA-5ppx-9jq6-6pmw and GHSA-5fj9-5pjw-vpwc, illustrate the critical flaws in egress policy implementations. The first vulnerability involved a check-then-use flaw, where a hostname was resolved to verify if it was allowed, followed by a second resolution for the actual connection. This two-step process allowed attackers to manipulate DNS responses, leading to unauthorized access to sensitive resources. The second vulnerability exposed a critical cloud metadata service due to an incomplete blocklist, allowing attackers to potentially access sensitive role credentials. Such vulnerabilities not only compromise data integrity but can also lead to unauthorized actions taken on behalf of legitimate users.
+
+### Code Vulnerabilities: A Closer Look at Pydantic AI
+
+To understand the implications of these vulnerabilities, consider the following Python code snippet that illustrates the flawed logic in hostname resolution:
+
+```python
+def is_hostname_allowed(hostname: str, port: int) -> bool:
+    ip = socket.getaddrinfo(hostname, port)[0][4][0]
+    return ip not in BLOCKLIST_IPS
+```
+
+In this example, the function resolves the hostname to check against a blocklist. However, the subsequent connection is made without ensuring the resolved IP address remains consistent:
+
+```python
+def fetch(hostname: str, port: int, path: str) -> str:
+    if not is_hostname_allowed(hostname, port):
+        raise PermissionError(f"{hostname} resolved to a blocked IP")
+    sock = socket.create_connection((hostname, port), timeout=3)
+```
+
+This separation of checks creates an opportunity for a DNS rebinding attack, where an attacker can control DNS responses to yield different results for the two lookups, thus bypassing security measures. Real-world examples, such as the exposure of internal APIs at various tech firms, illustrate how attackers can exploit such vulnerabilities to gain unauthorized access to sensitive data.
+
+### Implementing Secure Egress Allowlists
+
+To mitigate the risk of DNS rebinding attacks, it is essential to implement egress allowlists with a focus on security. One effective strategy is to consolidate DNS resolution and connection logic into a single step. The following refactored code resolves the hostname once and uses that IP address for both the check and the connection:
+
+```python
+def fetch(hostname: str, port: int, path: str) -> str:
+    ip = socket.getaddrinfo(hostname, port)[0][4][0]  # Resolve once
+    if ip in BLOCKLIST_IPS:
+        raise PermissionError(f"{hostname} resolved to a blocked IP ({ip})")
+    sock = socket.create_connection((ip, port), timeout=3)  # Connect to the resolved IP
+```
+
+This approach eliminates the timing attack vector by ensuring that the same resolved IP address is used for both the security check and the actual connection, thus closing the vulnerability. Additionally, organizations should implement logging and monitoring to detect unusual patterns that may indicate a rebinding attack in progress.
+
+### The Importance of External Proxies for Egress Policy Enforcement
+
+While addressing application-level vulnerabilities is crucial, a more robust solution involves shifting egress policy enforcement to an external proxy. By employing a dedicated proxy for egress traffic, organizations can ensure consistent enforcement of egress policies across all applications. The proxy performs a single DNS resolution, checks the IP against the blocklist, and either allows or denies the connection based on that single resolution. This architecture significantly reduces the risk of DNS rebinding attacks, as the application itself does not perform any DNS resolution. Furthermore, using an external proxy can help in auditing and logging egress traffic, providing visibility into potential security incidents.
+
+### Practical Implementation of an Egress Proxy
+
+Implementing an egress proxy can be straightforward and requires minimal dependencies. Below is an example of a basic proxy server that reads an HTTP request, resolves the target hostname, and checks it against a blocklist:
+
+```python
+import socketserver
+
+class EgressProxy(socketserver.ThreadingMixIn, socketserver.TCPServer):
+    allow_reuse_address = True
+
+    def handle_request(self, request):
+        # Parse the request and resolve the hostname
+        hostname = extract_hostname(request)
+        ip = socket.getaddrinfo(hostname, port)[0][4][0]
+        
+        # Check against blocklist
+        if ip in BLOCKLIST_IPS:
+            return 403  # Forbidden
+        # Proceed with connection if allowed
+        self.connect_to_target(ip)
+
+# Further implementation details...
+```
+
+This proxy can be configured to enforce egress policies for multiple applications, providing a centralized point of control that is less susceptible to individual application vulnerabilities. The ability to scale and adapt the proxy to changing security landscapes further enhances its utility.
+
+### Future Considerations for Cloud Security
+
+As cloud environments continue to evolve, the need for robust egress security measures will only increase. Organizations must remain vigilant in monitoring for new vulnerabilities and adapting their security practices accordingly. This includes regularly updating blocklists, auditing egress policies, and considering the use of advanced proxy solutions that can provide additional layers of security. Furthermore, as new attack vectors emerge, the security community must collaborate to share insights and develop best practices for mitigating risks associated with DNS vulnerabilities. Notably, organizations should also engage in threat modeling exercises to identify potential weaknesses in their egress security posture.
+
+### Conclusion: A Call to Action for Enhanced Security Practices
+
+The vulnerabilities uncovered in Pydantic AI serve as a stark reminder of the importance of secure egress policies in cloud environments. By understanding the mechanics of DNS rebinding attacks and implementing robust security measures, organizations can significantly reduce their risk exposure. Security professionals must advocate for best practices in egress policy enforcement, including the use of external proxies and continuous monitoring for emerging threats. The time to act is now — secure your cloud applications against DNS rebinding vulnerabilities before they can be exploited. By doing so, organizations not only protect their sensitive data but also foster a culture of security awareness that is essential in today’s digital landscape.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/webofmike/pydantic-ais-dns-rebind-bypass-of-its-egress-allowlist-1c1j)
+
+---
+
+<SocialShare title="Understanding DNS Rebinding Vulnerabilities in Egress Allowlists" slug="understanding-dns-rebinding-vulnerabilities-in-egress-allowlists" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
