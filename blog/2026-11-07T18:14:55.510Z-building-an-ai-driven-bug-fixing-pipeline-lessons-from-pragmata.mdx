@@ -1,0 +1,280 @@
+---
+slug: building-an-ai-driven-bug-fixing-pipeline-lessons-from-pragmata
+title: "Building an AI-Driven Bug-Fixing Pipeline: Lessons from PRAGMATA"
+authors: [francis]
+tags: [ai, bugfixing, automation, collaboration]
+date: 2026-11-07T18:14:55.510Z
+description: "TL;DR: We built PRAGMATA, a multi-agent bug investigation and fixing pipeline. It takes a bug report, investigates it, reproduces it, debates possible fixes, and eventually ships a patch. Developers stay in control through two approval gates.
+The interesting part? We wanted Switch Console to be where all of this actually happens. Not just somewhere agents dump notifications.
+There was one problem. Switch has no public API documentation.
+So we reverse-engineered the protocol.
+The usual bug-fixing workflow is pretty painful.
+Someone reports a bug. The report is missing half the context. A developer tries to reproduce it, can't, asks for more information. A few Slack threads later, someone figures out what's wrong.
+Then comes the fix, the review, and the inevitable possibility that the same bug shows up again two sprints later.
+We wanted to automate as much of this as possible.
+That's how PRAGMATA came about.
+It's a 9-phase pipeline that takes an unstructured bug report and works through the entire process:
+
+
+
+Phase
+What happens
+
+
+
+
+0. Intake
+Parses the report and extracts metadata
+
+
+1. Investigation
+Analyzes the codebase and finds the likely fault
+
+
+2. Reproduction
+Runs the scenario inside an isolated Docker sandbox
+
+
+3. Human Gate 1
+Developer reviews the evidence and approves the bug
+
+
+4. Analysis
+Traces the root cause with code citations
+
+
+5. Strategy Debate
+Multiple agents debate competing fixes
+
+
+6. Human Gate 2
+Developer picks the approach
+
+
+7. Implementation
+Agent writes the patch
+
+
+8. Verification
+Runs regression tests
+
+
+9. Resolution
+Marks the issue resolved with an audit trail
+
+
+
+One important thing: we don't let agents blindly modify code.
+A developer must first approve the bug. Then they choose the fix strategy. Only after that does the implementation agent get to work.
+Everything else is autonomous.
+Most agent integrations I've seen work like this:
+Agent does something -> sends a Slack message -> human clicks a link -> goes somewhere else to review it.
+We didn't want that.
+Think about it. If an agent tells you it found a bug in cart.js, line 30, that's not much to go on.
+But what if it shows you the stack trace, actual sandbox output, relevant code, and the failing test?
+Now you have something to make a decision with.
+We wanted all of that to be visible inside Switch. Developers should be able to follow the investigation, review the evidence, and interact with the agents without jumping between five different tools.
+So Switch had to become the collaboration layer itself.
+Which brings us to the most interesting part of this project.
+Switch Console is a desktop application. We couldn't find public API documentation, an SDK, or even a Postman collection to get started.
+So we opened the Electron app's renderer DevTools and started inspecting network traffic.
+Basically, we watched what the desktop client was doing and mapped out the gateway protocol ourselves.
+Here's the handshake sequence we figured out:
+GET  /gateway/auth/config
+POST /gateway/auth/login
+GET  /gateway/auth/me
+GET  /gateway/tenants
+POST /gateway/tenants/{id}/switch
+GET  /gateway/rooms
+GET  /gateway/chats/{id}/messages
+GET  /gateway/chats/{id}/activity
+GET  /gateway/messaging-apps
+GET  /gateway/feature-flags
+
+Each endpoint had to return the exact structure Switch expected. Otherwise, things would silently break further down the flow.
+Messages were particularly annoying.
+The MessagePage response, for example, needed to look something like this:
+{
+  "messages": [...],
+  "headSeq": 11,
+  "hasMore": false
+}
+
+And every message needed the right fields: messageId, seq, roomId, sentAt, sender, source, body, format, attachments, and a bunch of others.
+Even the sender object had its own expected structure, including clientId, name, kind, and agentId or userId.
+Get the schema wrong and the message simply wouldn't show up.
+We ended up building the entire gateway server in FastAPI. Around 400+ lines covering authentication, tenants, rooms, chats, agents, collaborations, and messaging apps.
+Eventually, pointing Switch Console at http://localhost:8000 was enough to get it to authenticate, navigate into our workspace, and display live agent messages.
+That was a pretty satisfying moment.
+The architecture is actually fairly straightforward.
+Bug report submitted
+        ↓
+FastAPI workflow engine
+        ↓
+9-phase investigation pipeline
+        ↓
+Agents write messages to _STORED_ROOMS
+        ↓
+Switch Console polls the gateway
+        ↓
+Developer sees live updates and evidence
+        ↓
+Developer approves / responds
+        ↓
+Workflow continues
+
+One implementation detail worth mentioning: we didn't bother setting up a database or message queue for the demo.
+demo.py and gateway.py share a Python dictionary called _STORED_ROOMS.
+One module writes agent messages into it. The other serves those messages through the gateway endpoints.
+That's it. No Redis, no Kafka, no unnecessary infrastructure for a hackathon demo.
+We also added Slack Incoming Webhooks for teams that want notifications outside Switch.
+We needed a simple bug that people could understand immediately.
+So we used a coupon bug.
+// SAVE20 should apply when subtotal >= 100
+if (subtotal > 100) {
+    discount = subtotal * 0.20;
+}
+
+The problem? An order worth exactly $100 doesn't qualify for the discount.
+PRAGMATA takes this report and:
+Finds the faulty condition in cart.js.
+Reproduces the issue inside a Docker sandbox.
+Shows the reproduction evidence in Switch.
+Waits for the developer to approve the bug.
+Runs a multi-agent debate on possible fixes.
+Lets the developer choose a strategy.
+Applies the one-line patch.
+Runs regression tests and verifies the fix.
+Marks the issue resolved.
+All of this takes roughly 32 seconds.
+The actual fix is one character. Getting to the point where we're confident that it's the right fix is the interesting part.
+Honestly, once we figured out the protocol, the underlying model made a lot of sense.
+Rooms and messages are a pretty natural fit for multi-agent systems.
+Agents become message senders.
+Workflow phases become messages.
+Threads become sub-investigations.
+Human approvals become part of the conversation.
+We didn't have to force our agents into some custom chat interface. The collaboration model was already there.
+There are still a few things we'd like to see:
+1. Public API documentation
+This was easily our biggest time sink. Even a basic protocol reference would have saved us 6+ hours of reverse-engineering.
+2. Webhook subscriptions
+Right now, agents can push messages into Switch, but reacting to messages from users requires polling.
+Being able to subscribe to room events would make the human approval gates much more interactive.
+3. Agent identity registration
+We currently fake agent identities through sender.name and sender.kind.
+A proper agent registry with persistent identities, roles, avatars, and capability descriptions would make multi-agent rooms much easier to understand.
+Backend: FastAPI, Python
+Frontend: Next.js, TypeScript
+Agent inference: Groq
+Sandbox: Docker
+Collaboration: Switch Console, Gateway Protocol v0.31.0
+Notifications: Slack Incoming Webhooks
+GitHub: https://github.com/A23droid/pragmata
+Check out the branch-2 branch for the demo flow.
+Built for the Flip the Switch Hackathon.
+The biggest takeaway for us was that getting agents to do the work is only half the problem. Getting humans to trust, understand, and interact with that work is just as important...."
+image: /img/blog/generated/building-an-ai-driven-bug-fixing-pipeline-lessons-from-pragmata-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Building an AI-Driven Bug-Fixing Pipeline: Lessons from PRAGMATA](/img/blog/generated/building-an-ai-driven-bug-fixing-pipeline-lessons-from-pragmata-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### The Burden of Traditional Bug Resolution Workflows
+
+In the landscape of software development, traditional bug resolution workflows often become cumbersome and inefficient. The typical process begins with a bug report that frequently lacks sufficient context, leading to a frustrating cycle of communication. Developers must engage in time-consuming exchanges to gather necessary details, which can extend the bug resolution cycle over multiple sprints. This inefficiency not only drains resources but also stifles productivity, as developers struggle to reproduce issues amid unclear reports. The need for a more streamlined approach to bug fixing is evident, prompting the exploration of AI-driven solutions.
+
+### Introducing PRAGMATA: A Comprehensive 9-Phase Pipeline
+
+PRAGMATA emerges as a solution to the inefficiencies inherent in traditional workflows by implementing a robust 9-phase bug-fixing pipeline. This pipeline encompasses the following phases: intake, investigation, reproduction, two human approval gates, analysis, strategy debate, implementation, verification, and resolution. Each phase is designed to enhance efficiency and transparency, allowing developers to concentrate on higher-level decision-making rather than mundane tasks. The architecture of this pipeline ensures that while automation is leveraged, developer oversight remains a cornerstone of the process, particularly at critical junctures.
+
+### The Significance of Developer Control in AI Systems
+
+One of the standout features of PRAGMATA is its commitment to maintaining developer control within an AI-driven environment. Unlike many automated systems that operate with minimal human intervention, PRAGMATA incorporates two distinct approval gates. The first gate allows developers to review evidence gathered during the investigation phase, ensuring they validate the identified bug before any further actions are taken. The second gate empowers developers to select the strategy for fixing the bug, reinforcing their role in the decision-making process. This dual-gate approach fosters trust between developers and AI agents, promoting collaboration and enhancing the overall bug-fixing experience.
+
+### Challenges and Insights from Reverse-Engineering the Switch Console Protocol
+
+The development of PRAGMATA hinged on the reverse-engineering of the Switch Console's protocol, a complex endeavor due to the absence of public API documentation. By utilizing the Electron app's renderer DevTools and monitoring network traffic, we meticulously mapped the gateway protocol. This involved identifying essential endpoints for authentication, messaging, and tenant management. The challenges encountered during this process underscored the critical importance of adhering to precise schema definitions; any deviation could lead to silent failures, complicating the debugging process further. This experience highlights the necessity for robust API documentation in facilitating smoother integrations.
+
+### Building the FastAPI Gateway Server: Technical Specifications
+
+To facilitate communication between PRAGMATA and the Switch Console, we constructed a FastAPI-based gateway server, comprising approximately 400 lines of code. This server handles key functionalities such as authentication, tenant management, and messaging, leveraging FastAPI's asynchronous capabilities for scalability. The architecture is designed to be straightforward, allowing for seamless integration with the Switch Console while minimizing the need for additional infrastructure, such as databases or message queues. The choice of FastAPI was strategic, as its performance characteristics align well with the demands of a multi-agent system, enabling efficient handling of concurrent bug investigations.
+
+```python
+from fastapi import FastAPI, HTTPException
+
+app = FastAPI()
+
+@app.post("/gateway/auth/login")
+async def login(credentials: dict):
+    # Authentication logic here
+    pass
+
+@app.get("/gateway/tenants")
+async def get_tenants():
+    # Fetch tenant data logic here
+    pass
+```
+
+### Real-World Implementation: A Case Study on Coupon Logic
+
+To demonstrate PRAGMATA's capabilities, we utilized a straightforward bug related to coupon application logic. The original implementation failed to apply a discount for orders with a subtotal of exactly $100 due to an incorrect conditional check. PRAGMATA processed the bug report, investigated the codebase, and reproduced the issue within a Docker sandbox. Evidence was presented to the developer, who approved the bug. Following this, a multi-agent debate ensued, leading to the identification of a one-character code change that resolved the issue. This entire process was completed in approximately 32 seconds, showcasing the pipeline's efficiency.
+
+### The Role of Evidence in Enhancing Developer Decision-Making
+
+A critical aspect of PRAGMATA is its ability to present comprehensive evidence to developers during the approval phases. Rather than simply notifying developers of a bug, the system offers detailed context, including stack traces, sandbox outputs, and relevant code snippets. This transparency empowers developers to make informed decisions quickly, significantly reducing the time spent in discussions and enhancing overall productivity. By integrating evidence into the workflow, PRAGMATA transforms developers from passive recipients of information to active participants in the bug-fixing process.
+
+### Addressing Potential Risks of AI Integration in Bug Fixing
+
+While the integration of AI in bug resolution offers numerous advantages, it is essential to acknowledge and address potential risks. One significant concern is the possibility of over-reliance on AI agents, which could lead to diminished developer engagement and oversight. To mitigate this risk, PRAGMATA's design incorporates multiple human approval gates, ensuring that developers remain actively involved in the decision-making process. Furthermore, the importance of maintaining a collaborative environment cannot be overstated; fostering open communication between developers and AI agents is crucial for building trust and ensuring effective collaboration. The potential for AI to misinterpret data or suggest suboptimal solutions also necessitates vigilant human oversight, as developers must critically evaluate AI-generated recommendations.
+
+### Future Enhancements for PRAGMATA's Functionality
+
+Looking ahead, several enhancements could further bolster PRAGMATA's capabilities. The introduction of public API documentation would streamline the integration process for future developers, significantly reducing the time spent on reverse-engineering. Implementing webhook subscriptions would enhance interactivity during human approval gates, allowing developers to respond to messages in real-time rather than relying on polling mechanisms. Additionally, establishing an agent identity registration system would provide clarity regarding agent roles and capabilities, facilitating better collaboration among agents and developers. Lastly, incorporating machine learning algorithms to analyze past bug resolutions could help PRAGMATA suggest more effective strategies and improve its overall efficiency.
+
+### The Balance Between Automation and Human Oversight
+
+The development of PRAGMATA illustrates a critical principle in AI-driven systems: the balance between automation and human oversight. While the pipeline automates numerous aspects of the bug-fixing process, it is imperative to maintain developer involvement at vital stages. This approach not only cultivates trust in AI systems but also ensures that human intuition and expertise are effectively leveraged. As we continue to refine PRAGMATA and explore new integrations, the lessons learned from this project will inform our efforts to create more efficient and collaborative development environments.
+
+### Conclusion: The Future of AI in Software Development
+
+As AI technologies continue to evolve, their integration into software development workflows will become increasingly sophisticated. PRAGMATA serves as a compelling case study in how AI agents can enhance developer efficiency while preserving the critical human element of oversight. By focusing on collaboration, transparency, and control, we can pave the way for a future where AI-driven systems augment human capabilities rather than replace them. The journey of building PRAGMATA has not only yielded a powerful tool for bug fixing but has also provided invaluable insights into the dynamics of human-agent collaboration in software engineering, emphasizing the importance of a balanced approach to automation.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/shourya_agrawal_8bfa96e72/we-reverse-engineered-switchs-protocol-to-build-an-ai-bug-fixing-pipeline-heres-how-it-went-2n6g)
+
+---
+
+<SocialShare title="Building an AI-Driven Bug-Fixing Pipeline: Lessons from PRAGMATA" slug="building-an-ai-driven-bug-fixing-pipeline-lessons-from-pragmata" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
