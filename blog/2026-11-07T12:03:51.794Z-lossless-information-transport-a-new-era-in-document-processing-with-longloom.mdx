@@ -1,0 +1,261 @@
+---
+slug: lossless-information-transport-a-new-era-in-document-processing-with-longloom
+title: "Lossless Information Transport: A New Era in Document Processing with LongLoom"
+authors: [francis]
+tags: [ai, llm, gpt, security]
+date: 2026-11-07T12:03:51.794Z
+description: "I built an open-source library that processes documents of any length through LLM map/merge/repair — with measured, reproducible proof that no facts are lost. Here's why I built it, how it works, and what the benchmarks show.
+Every LLM has a context window. Every enterprise has documents that blow past it.
+The standard advice is "just chunk it and summarize each piece." That works — until you actually measure what's lost. We did, with a planted-fact test: seed a document with known identifiers, numbers, and dates, then check how many survive a naive chunk-summarize pipeline.
+The result: naive summarization drops 2–10% of facts. Different facts every run. A contract ID here, a dollar amount there. Gone. And because it's stochastic, you can't even predict what disappears.
+For a chatbot, 8% fact loss is annoying. For a compliance pipeline, a legal discovery, or a financial audit — it's disqualifying.
+LongLoom's core insight is simple: the pipeline should transport information losslessly, and the LLM should only condense when you explicitly allow it.
+The library splits into two modes:
+
+
+
+Mode
+What the LLM does
+Fact preservation
+Use when
+
+
+
+
+
+Summarizing (default)
+Reads each chunk, produces a summary
+Measured 2–10% loss
+Readable reports, chat contexts
+
+
+
+Verbatim extraction (for_extraction())
+Copies fact-bearing lines verbatim
+
+100.0% at scale (4,367/4,367 planted facts)
+Compliance, legal, audit, search indexing
+
+
+
+The verbatim mode works because the extraction prompt tells the LLM to copy lines containing facts rather than paraphrase them. The merge stage deduplicates exact copies. The result: the pipeline adds zero information loss — verified by a deterministic fake LLM that provably echoes its input, plus real NVIDIA Nemotron and OpenAI GPT-4o-mini runs.
+big document
+     │
+     ▼
+CHUNK ──► line-aware splitting, persisted to your storage
+     │
+     ▼
+MAP ──── one LLM call per chunk (parallel, checkpointed)
+     │
+     ▼
+MERGE ── hierarchical combine, window-sized groups
+     │
+     ▼
+REPAIR ─ bounded condensation, only if still too big
+     │
+     ▼
+final result + verification report
+
+The context window only ever sees chunks and compact intermediate results. The document never has to fit.
+Any LLM. Not a wrapper around one vendor — a dependency-injection seam:
+from longloom import init_llm
+
+# 9 provider integrations, or bring your own:
+llm = init_llm("nvidia", "nvidia/nemotron-3-ultra-550b-a55b", api_key=..., thinking=False)
+llm = init_llm("openai", "gpt-4o-mini", api_key=...)
+llm = init_llm("anthropic", "claude-sonnet-4-20250514", api_key=...)
+llm = init_llm("custom", model="my-model", base_url="http://vllm.internal:8000/v1",
+               headers={"X-Tenant": "acme"})     # vLLM, LiteLLM, Azure APIM — anything OpenAI-compatible
+llm = lambda prompt: my_gateway(prompt)          # even a bare function
+
+Any storage. Your databases, your schema, your tables:
+from longloom import create_store
+
+store = create_store("postgresql://app@host/mydb",
+                     table="app_chunks",           # your table
+                     columns={"id": "chunk_pk"},   # your column names
+                     namespace="legal-team")       # multi-tenant safe
+
+9 storage targets: PostgreSQL, MySQL, MSSQL, Oracle, MongoDB, Supabase, SQLite, JSONL, in-memory. Or subclass one ABC with four methods for anything else.
+All benchmarks are reproducible — the benchmark script ships in the repo:
+python examples/20_benchmark.py --sections 50000
+
+
+
+
+Benchmark
+Result
+
+
+
+
+Pipeline losslessness
+83,023/83,023 facts preserved at 6.7M chars / 2.16M tokens / 3,795 chunks — 100.0%
+
+
+
+Parallel map speedup
+≈4× (measured with real NVIDIA API, 8 workers)
+
+
+Real NVIDIA extraction (91.7%)
+nvidia/nemotron-3-ultra at scale, verbatim mode
+
+
+Real OpenAI extraction
+gpt-4o-mini, same pipeline, same verbatim mode
+
+
+CI coverage
+100% line coverage, gated at 99% in CI on Python 3.10–3.13
+
+
+
+The 83,023-fact stress test processes a document 265× larger than the NVIDIA context window — and preserves every single fact through chunk → map → hierarchical merge → repair.
+The things security reviews actually check:
+Explicit credentials — api_key= is a constructor argument. The library contains zero os.environ reads for secrets (verified by test).
+Zero telemetry — no phone-home, no analytics, no update pings.
+Your databases — chunks live in your tables, your columns, your namespaces. No dedicated database required.
+Injection-validated — table and column names are regex-validated before any query is built.
+XSS-hardened — generated HTML viewers escape content and disable script execution.
+Structured logging — longloom.* stdlib loggers; prompts, completions, and credentials are never logged (regression-tested).
+SECURITY.md — data-flow disclosure, private vulnerability reporting.
+CI — pytest matrix on Python 3.10–3.13, pip-audit supply-chain scan, 100% line coverage gate, MongoDB service container for live integration tests.
+Map/merge aggregates; it doesn't reason globally. Cross-chunk conflicts are preserved side by side, not reconciled.
+Real-LLM verbatim extraction achieves ~92% fact preservation at scale (the pipeline adds zero loss; the model's quality is the model's quality).
+The map phase is sequential per worker; parallelize via max_workers for large corpora.
+tiktoken approximates non-OpenAI tokenizers — keep 2× headroom on chunk sizes.
+pip install longloom
+
+from longloom import MapReduceProcessor, SQLiteContextStore, init_llm, PromptTemplates
+
+processor = MapReduceProcessor(
+    llm=init_llm("nvidia", "nvidia/nemotron-3-ultra-550b-a55b",
+                 api_key=os.environ["NVIDIA_API_KEY"], thinking=False),
+    store=SQLiteContextStore("ctx.db"),
+    prompts=PromptTemplates.for_extraction(),
+    max_workers=4,
+)
+result = processor.process(your_500_page_document, task="Extract all obligations")
+
+GitHub: github.com/sumitnemade/longloom
+
+
+PyPI: pypi.org/project/longloom
+
+
+Landing page: sumitnemade.github.io/longloom
+
+
+Benchmark script: examples/20_benchmark.py
+
+
+
+MIT licensed. 88 tests. Zero telemetry. Star it if useful — contributions welcome.
+LongLoom is built on LangGraph and langchain-core. It works with NVIDIA Nemotron, OpenAI GPT, Anthropic Claude, Groq, Ollama, Mistral, DeepSeek, Together AI, and any OpenAI-compatible endpoint...."
+image: /img/blog/generated/lossless-information-transport-a-new-era-in-document-processing-with-longloom-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Lossless Information Transport: A New Era in Document Processing with LongLoom](/img/blog/generated/lossless-information-transport-a-new-era-in-document-processing-with-longloom-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### The Context Window Limitation in LLMs
+
+Large Language Models (LLMs) such as GPT-4 and others have transformed the landscape of natural language processing (NLP) by enabling complex tasks like summarization and information extraction. However, they are inherently limited by their context windows, which define the maximum amount of text they can process at one time. This constraint becomes particularly acute when handling extensive documents, where vital information may exceed the context window. In enterprise applications—especially in compliance, legal, and financial sectors—this can lead to significant inaccuracies and data loss, undermining the reliability of the insights generated.
+
+### The Pitfalls of Traditional Document Processing Techniques
+
+Traditional approaches to managing large documents typically involve chunking the text into smaller segments and summarizing each piece. While this method may seem efficient, it introduces a stochastic element that can result in the loss of critical facts. Research indicates that naive summarization can lead to a 2-10% loss of essential information, such as contract identifiers or financial figures, which can vary unpredictably with each execution. In high-stakes environments, such as legal compliance or financial audits, this unpredictability is unacceptable, as it can result in missing crucial data that could affect outcomes.
+
+### LongLoom: A Paradigm Shift in Document Processing
+
+LongLoom emerges as a robust solution to the limitations of conventional document processing methods. Its innovative architecture is designed specifically for lossless information transport, allowing for the processing of documents of any length without sacrificing factual integrity. LongLoom operates in two distinct modes: summarization and verbatim extraction. The summarization mode condenses information but carries the risk of fact loss, while the verbatim extraction mode is engineered to ensure that all critical details are preserved. This dual-mode architecture empowers users to select the most appropriate processing strategy for their specific needs.
+
+### Understanding Verbatim Extraction Mode
+
+The verbatim extraction mode in LongLoom is a game-changer for organizations that prioritize data accuracy. This mode instructs the LLM to extract lines containing facts directly, rather than attempting to paraphrase them. This straightforward approach guarantees a 100% fact retention rate, as demonstrated in benchmark tests. The extraction process involves a meticulous workflow that includes line-aware splitting, parallel processing through LLM calls, and a hierarchical merge to consolidate results. This structured methodology ensures that even the most complex documents can be processed without any loss of information, making it ideal for compliance and legal applications.
+
+### Rigorous Benchmarking of Fact Preservation
+
+LongLoom's capabilities are validated through rigorous benchmarking, which showcases its effectiveness in preserving facts during document processing. In a stress test involving a document 265 times larger than the context window, LongLoom successfully retained all 83,023 planted facts, illustrating its reliability and robustness. The benchmark results indicate that LongLoom can handle up to 6.7 million characters and 2.16 million tokens while maintaining a 100% fact preservation rate. Such performance is indispensable for enterprises that rely on accurate data for informed decision-making and compliance adherence.
+
+| Benchmark Metric                      | Result                             |
+|---------------------------------------|------------------------------------|
+| Facts Preserved                       | 83,023/83,023 facts (100%)        |
+| Document Size                         | 6.7 million characters             |
+| Token Count                           | 2.16 million tokens                |
+| Processing Efficiency                 | 4x speedup with parallel processing |
+
+### Security Features: Protecting Data Integrity
+
+In addition to its focus on fact preservation, LongLoom incorporates robust security measures to ensure data integrity and privacy. The library is designed to avoid reading environment variables for secrets, thereby mitigating the risk of credential exposure. It features zero telemetry, which means no data is sent back to developers, a crucial aspect for organizations handling sensitive information. Moreover, all database interactions are injection-validated, and generated HTML viewers are XSS-hardened, ensuring that the application is secure from common vulnerabilities. These security measures build trust and confidence in LongLoom as a reliable tool for enterprise document processing.
+
+### Real-World Applications in Compliance and Legal Sectors
+
+LongLoom's architecture and capabilities are particularly advantageous for applications in compliance and legal sectors. For instance, during legal discovery processes, the ability to extract all obligations from lengthy contracts without losing critical details can significantly reduce the risk of errors. In financial audits, where accuracy is paramount, LongLoom ensures that all relevant data points are preserved, facilitating a more thorough and reliable review process. Furthermore, organizations can leverage LongLoom for search indexing, where maintaining the integrity of fact-bearing lines is essential for accurate retrieval.
+
+### Implementation Insights: Integrating LongLoom into Existing Workflows
+
+Integrating LongLoom into existing workflows is straightforward and can be tailored to fit various enterprise environments. The library supports multiple LLM providers, allowing organizations to choose their preferred model based on specific use cases. Additionally, LongLoom is compatible with various storage solutions, including PostgreSQL, MySQL, and MongoDB, enabling seamless integration into existing data architectures. The following code snippet illustrates how to set up LongLoom for a document processing task:
+
+```python
+from longloom import MapReduceProcessor, SQLiteContextStore, init_llm, PromptTemplates
+
+processor = MapReduceProcessor(
+    llm=init_llm("openai", "gpt-4o-mini", api_key="YOUR_API_KEY"),
+    store=SQLiteContextStore("ctx.db"),
+    prompts=PromptTemplates.for_extraction(),
+    max_workers=4,
+)
+
+result = processor.process(your_large_document, task="Extract all obligations")
+```
+
+This example demonstrates how easy it is to configure LongLoom for extracting obligations from a large document, showcasing its flexibility and adaptability to different operational contexts.
+
+### Future Directions for LLMs in Document Processing
+
+As the demand for accurate and efficient document processing continues to grow, the need for solutions like LongLoom becomes increasingly evident. Its innovative approach to fact preservation not only addresses the limitations of existing LLMs but also sets a new standard for how enterprises can leverage AI in their operations. By focusing on lossless information transport, LongLoom paves the way for more reliable applications of LLM technology, ultimately enhancing the overall quality of enterprise document processing.
+
+### Conclusion: Setting New Standards in Document Processing
+
+In conclusion, LongLoom represents a significant advancement in the field of document processing with LLMs. By offering a solution that prioritizes fact preservation and security, it addresses critical challenges faced by organizations across various sectors. As enterprises continue to adopt AI technologies, the importance of maintaining data integrity cannot be overstated. LongLoom not only meets this demand but also establishes a precedent for future developments in the AI landscape, ensuring that the evolution of document processing aligns with the highest standards of accuracy and reliability.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/sumitn/longloom-stop-losing-facts-when-your-documents-exceed-the-context-window-1ci2)
+
+---
+
+<SocialShare title="Lossless Information Transport: A New Era in Document Processing with LongLoom" slug="lossless-information-transport-a-new-era-in-document-processing-with-longloom" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
