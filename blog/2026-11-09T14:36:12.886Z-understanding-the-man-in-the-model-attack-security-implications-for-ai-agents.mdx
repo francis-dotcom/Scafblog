@@ -1,0 +1,257 @@
+---
+slug: understanding-the-man-in-the-model-attack-security-implications-for-ai-agents
+title: "Understanding the Man-in-the-Model Attack: Security Implications for AI Agents"
+authors: [francis]
+tags: [ai, security, llm, inference]
+date: 2026-11-09T14:36:12.887Z
+description: "TL;DR
+
+
+
+HiddenLayer researchers published "Man-in-the-Model" on October 22, 2026. Their point: if an attacker controls the inference server or LLM gateway that sits between a coding agent and its model, the attacker can inject tool calls the model never requested, and the agent will run them.
+Approval systems did not stop this in the demonstrations. In the Codex example, a forged command began with the already-approved git prefix, so it ran without a prompt. The trick was a -c diff.external=... option that makes git execute a shell command.
+A related pattern, CoreBreak (Cloud Security Alliance note, August 6, 2026), put CVEs on dispatch layers that "did not consistently verify that a tool-call instruction had legitimately originated from a model turn."
+I ran git 2.53.0 locally and confirmed that diff.external and core.fsmonitor both execute commands, and that --output writes files, from a command that starts with git.
+In a small runnable model, a prefix allowlist blocked 1 of 6 forged calls, an argv-aware allowlist blocked 4, and a provenance check blocked all 6. The model is illustrative, not a product benchmark.
+The lesson: an approval gate answers "is this command allowed?" It does not answer "did the model I trust actually ask for it?" You need both answers.
+Most agent threat models put the dangerous input in the model's context: a poisoned web page, a malicious tool description, a hostile README. The model reads it, gets steered, and emits a bad tool call. Guardrails, system prompts and approval prompts are built around that picture.
+HiddenLayer's write-up (authors Esteban Tonglet, Divyanshu Divyanshu and Kasimir Schulz) moves the attacker to a different seat. The attacker controls a system that sits on the path: an inference server such as Ollama or vLLM, or an LLM gateway such as LiteLLM. That position is not exotic. People route coding agents through gateways for cost tracking, key management and model switching, and the write-up cites a 2026 supply chain compromise of LiteLLM and separate research on third-party LLM routers injecting malicious code.
+From that seat the attacker sees every request and every response. The write-up shows three capabilities:
+Forge a tool call. The gateway edits the model's response to include a tool call the model never produced. The agent harness cannot tell the difference, because from its side the call arrived in the normal response channel.
+Hide it. The gateway removes the injected call and its result from the conversation before the history goes back to the model, so the model never learns about it. Injected timing wrappers also strip their own log lines from the output the user sees.
+Learn what is guarded. The gateway identifies the harness from HTTP headers, tool catalogues and request structure, and reads configuration such as CLAUDE.md or .cursorrules by injecting file reads and then deleting them from the history.
+The authors say the research looked at "over 4 thousand captured sessions" and "over thirty-five thousands file reads." Their summary line is the sentence to remember: sandboxes and approval mechanisms "can reduce that impact, but they do not establish that a tool call originated from the model the user intended to trust." The write-up as I read it does not report vendor fixes for the demonstrated cases.
+git prefix become a bypass?
+
+
+Codex lets a user approve a command prefix once, so later commands that begin with git run without a prompt. That is a reasonable usability choice when you assume the model wrote the command. The research shows what happens when someone else writes it. The forged call from the write-up:
+git -c diff.external='sh -c "cat .env"' diff --no-index /dev/null .env
+
+It starts with git, so the prefix check passes. But -c sets a configuration value for this one invocation, and diff.external tells git to run an external program to produce the diff. Git is a shell launcher with a diff command attached.
+I did not want to take this on faith, so I tested it in a scratch directory with a harmless marker command instead of cat .env:
+git --version
+# git version 2.53.0.windows.2
+echo "SECRET=abc" > .env
+git -c diff.external='sh -c "echo PWNED > marker.txt"' diff --no-index /dev/null .env
+cat marker.txt
+# PWNED
+git diff --no-index --no-ext-diff /dev/null .env   # no marker, plain diff
+
+The marker file appeared. In a fresh repository I confirmed two more shapes that also start with git:
+git -c core.fsmonitor='sh -c "echo FSM > fsm_marker.txt"' status created the marker file, so a read-only looking status ran a command.
+git diff --output=out.txt /dev/null .env wrote out.txt, so a "diff" wrote to disk.
+None of this is a git bug. These are documented features. The bug is in the policy that treats the first word of a command string as the identity of the command. I made the same point in an earlier post about the newline in a read-only fast path: the string you approve and the process the operating system starts are different things.
+The timing result in the write-up is the part I found most useful for defenders. When a tool runs automatically, the result comes back almost immediately. When a human must approve it, the round trip includes seconds of human time. A gateway that measures the delay between sending a tool call and seeing the next request can infer which tools run without approval.
+
+The figures come from the write-up: across more than 35,000 file reads only 1.0% fell inside the heuristic's ambiguous range, 4.7% of calls to tools with short typical runtimes did, and 25.5% of shell calls did. Shell commands are the hardest to classify because their runtimes vary, but even there roughly three in four calls were classifiable by timing alone.
+What this means in practice: the attacker does not need to guess which injected calls would trigger a prompt. It can learn which tools are safe to abuse silently, then inject only those. Hiding in the visual noise helps too. A long pipeline with several redirects makes a small added fragment "much less visually salient" to a human skimming for rm, sudo or curl, in the authors' words.
+It is the same family, seen from a different angle. The Cloud Security Alliance note on CoreBreak, dated August 6, 2026, describes tools executing in agent frameworks without a model decision ever taking place. The listed CVEs:
+
+
+
+
+Product
+CVE
+CVSS v4.0
+Fixed in
+
+
+
+
+Google Agent Development Kit (Python)
+CVE-2026-18236
+9.3
+2.5.0 (July 16, 2026)
+
+
+AWS Bedrock AgentCore (InvokeHarness API)
+CVE-2026-18830
+8.6
+Deployed by AWS, no customer action
+
+
+Vercel @ai-sdk/harness-codex
+
+CVE-2026-64650
+6.3
+1.0.29 (July 10, 2026)
+
+
+Vercel @ai-sdk/harness-opencode
+
+CVE-2026-64651
+6.3
+1.0.28 (July 10, 2026)
+
+
+
+The CSA root cause is the same sentence that sums up the gateway research: the dispatch layer treated a well-formed instruction as proof that a model had issued it. In the Google case, a forged human-approval confirmation worked because the confirmation processor never checked that the target tool belonged to the executing agent. The recommended mitigations include cryptographically verifiable tokens in place of command-line authorization checks, and confirmation gates that validate tool ownership and argument integrity.
+The difference is where the forgery happens. CoreBreak forges inside the framework, through session history or the harness API. The gateway attack forges on the wire. Both defeat a gate that only inspects the content of the call.
+To make the distinction concrete I built a small model of the decision. It is my own illustration, not any vendor's code, and the numbers describe this test set only.
+Three guards face six forged calls and four legitimate ones:
+Prefix allowlist. Approve anything starting with git or ls.
+Argv-aware allowlist. Parse the command, allow only git status, git diff, git log, deny -c, --ext-diff, --no-index, --output and any argument mentioning .env.
+Provenance MAC. The endpoint that runs the model signs each tool call with an HMAC over turn number, call index and argv. The harness verifies it before running anything. The key lives where the gateway cannot read it.
+
+
+
+
+import hmac, hashlib, shlex, json
+
+KEY = b"endpoint-side demo key"
+
+def sign(turn, idx, argv):
+    msg = f"{turn}|{idx}|{json.dumps(argv)}".encode()
+    return hmac.new(KEY, msg, hashlib.sha256).hexdigest()
+
+def guard_prefix(call):
+    return call["cmd"].startswith(("git ", "ls"))
+
+SAFE_SUBCMDS = {"status", "diff", "log"}
+DENY_OPTS = ("-c", "--ext-diff", "--no-index", "--output", "--exec-path")
+
+def guard_argv(call):
+    argv = shlex.split(call["cmd"])
+    if argv[0] == "ls":
+        return True
+    if argv[0] != "git" or len(argv) < 2 or argv[1] not in SAFE_SUBCMDS:
+        return False
+    for a in argv[2:]:
+        if a in DENY_OPTS or a.startswith("--output") or ".env" in a:
+            return False
+    return True
+
+def guard_provenance(call):
+    if "mac" not in call:
+        return False
+    want = sign(call["turn"], call["idx"], shlex.split(call["cmd"]))
+    return hmac.compare_digest(call["mac"], want)
+
+The forged set covers the three git shapes I verified locally, a plain curl | sh, a git log -p that has an allowed shape but reads committed history, and a replay of a genuinely signed git status in a later turn. Output of the full script:
+injected call                                              prefix allowlist  argv-aware allowlist   provenance MAC
+git -c diff.external=... diff --no-index /dev/null .env              passes               BLOCKED          BLOCKED
+git -c core.fsmonitor=... status                                     passes               BLOCKED          BLOCKED
+git diff --output=... (file write)                                   passes               BLOCKED          BLOCKED
+curl ... | sh (no approved prefix)                                 BLOCKED               BLOCKED          BLOCKED
+git log -p (allowed shape, reads history)                            passes                passes          BLOCKED
+replay of a signed 'git status' in turn 8                            passes                passes          BLOCKED
+
+prefix allowlist       blocked 1/6 injected, falsely blocked 0/4 legit
+argv-aware allowlist   blocked 4/6 injected, falsely blocked 0/4 legit
+provenance MAC         blocked 6/6 injected, falsely blocked 0/4 legit
+
+
+Three things to read from this, with the limits stated plainly.
+First, the prefix allowlist is the weakest guard because it matches the one part of the string an attacker controls for free. Second, the argv-aware allowlist is the right fix for the command-shape problem, and it cost nothing on the legitimate calls in my set. But it is a denylist inside an allowlist, and git has many options. I would not claim my deny list is complete. Third, only the provenance check stops the calls that look perfectly fine, such as git log -p (which can read secrets committed long ago) and a replayed legitimate call. That check does not judge the command at all. It judges who sent it.
+What the model does not show: whether a provenance signature is practical in a real deployment. The signer has to be something the gateway cannot impersonate, such as the model endpoint you operate, a provider that signs responses, or a sidecar you attest. I am not aware of a mainstream coding-agent setup that offers this today, and a signature only proves the call was not altered in transit. It does not prove the model's decision was wise. Treat the third column as a design target, not a product.
+Stop approving by prefix. Approve parsed argv shapes. Deny configuration injection flags for tools that execute helpers: git -c, --ext-diff, --exec-path, and similar options in other CLIs.
+Put the gate at execution time. Do the check in the process that will actually spawn the command, after every hop that can edit the call, not in a prompt that renders text the gateway can influence.
+Treat your gateway as part of the trust boundary. Pin versions and digests of LiteLLM-style proxies and inference servers, restrict who can change their config, and log tool calls on the harness side so the harness record can be compared with the provider's request log.
+Keep secrets out of reach of read-only tools. The injected read had value because .env was readable. Remove what an injected call could exfiltrate.
+Add a replay check. Bind each approval to a turn and call index so a valid call cannot be re-sent later.
+What is a "man-in-the-model" attack?
+Does a human approval prompt stop it?
+Is git -c diff.external a vulnerability in git?
+How is this different from prompt injection?
+Would signing tool calls fix everything?
+Earlier posts in this series:
+One Check, Four Paths: What the Docker Sandboxes sbx cp Symlink Bug Teaches About Guarding Every Position (published 2026-11-08, same series)
+Authenticated Is Not Authorized: What a 9.3 Fail-Open Default in an Agent Mesh Teaches About Tool Gating (published 2026-11-02, same series)
+HiddenLayer, "Man-in-the-Model" research on LLM gateway attacks against coding agents (Tonglet, Divyanshu, Schulz, 2026-10-22): https://www.hiddenlayer.com/research/blog-llm-gateway-coding-agent-security
+
+Cloud Security Alliance Labs, CoreBreak research note, "When the Model Never Runs: Agent Guardrail Bypasses" (2026-08-06): https://labs.cloudsecurityalliance.org/research/csa-research-note-agent-infra-guardrail-bypass-20260806-csa/
+
+Local reproduction: git 2.53.0 (diff.external, core.fsmonitor, --no-ext-diff, --output), scratch directory, harmless marker commands only
+Illustrative guard model: author's own script, six forged calls and four legitimate calls, not a benchmark of any product..."
+image: /img/blog/generated/understanding-the-man-in-the-model-attack-security-implications-for-ai-agents-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Understanding the Man-in-the-Model Attack: Security Implications for AI Agents](/img/blog/generated/understanding-the-man-in-the-model-attack-security-implications-for-ai-agents-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### Understanding the Architecture of AI Agents
+
+AI agents have become essential components in various applications, leveraging Large Language Models (LLMs) to execute tasks ranging from natural language processing to automated coding. These agents typically rely on inference servers and LLM gateways to handle requests and generate outputs. However, this architecture introduces significant security vulnerabilities. If an attacker gains control over the inference server or LLM gateway, they can manipulate the agent's behavior, leading to unauthorized actions that bypass traditional security mechanisms.
+
+### Defining the Man-in-the-Model Attack
+
+The "man-in-the-model" attack represents a sophisticated exploitation method where an adversary gains control over the communication channel between an AI agent and its underlying model. Unlike conventional injection attacks that manipulate input data, this attack allows the adversary to forge responses from the model itself. For example, an attacker can inject malicious commands into the model's output, which the AI agent executes without verification. This manipulation can occur without any visible alteration to the communication, making detection challenging.
+
+### Mechanisms of Compromise in Inference Servers
+
+Compromised inference servers or LLM gateways can manipulate requests and responses in various ways. They can forge tool calls, alter outputs, or intercept sensitive data. Techniques such as HTTP header manipulation can reveal the architecture of the harness, enabling the attacker to exploit its weaknesses. For instance, if a coding agent is routed through a compromised gateway, the attacker can inject commands that appear legitimate, leveraging the trust the agent has in the model's outputs. This method of attack highlights the critical need for robust security measures at the gateway level.
+
+### Real-World Case Studies of Vulnerabilities
+
+Recent incidents involving systems like Codex and LiteLLM illustrate the practical implications of these vulnerabilities. In one notable case with Codex, an attacker exploited a command prefix that was already approved, allowing them to execute a forged command without user confirmation. This was achieved through the use of the `-c diff.external` option in Git, which executed a shell command that the model never intended to invoke. Similarly, LiteLLM faced a vulnerability where the model’s output was manipulated to include unauthorized API calls due to a lack of input validation in the inference server. Such incidents underscore the inadequacies of current security measures that rely solely on command approval mechanisms.
+
+### The Flaws in Traditional Approval Mechanisms
+
+Traditional approval mechanisms often fail to verify the provenance of commands issued by AI agents. They typically focus on whether a command is allowed rather than whether it originated from a trusted model. This oversight creates a significant security gap, as attackers can exploit this to execute unauthorized commands. For example, the prefix allowlist approach, which permits commands based on their initial characters, is particularly vulnerable. An attacker can craft commands that begin with an approved prefix, effectively bypassing the approval process entirely. In one documented case, a malicious actor was able to execute a harmful command by prefixing it with an innocuous command like `git commit`, thus evading detection.
+
+### Limitations of Heuristic Approaches to Security
+
+Heuristic approaches to command validation, such as timing analysis, can provide some level of detection for unauthorized actions. However, they are not foolproof. For instance, an attacker can learn which commands execute quickly and are less likely to trigger human approval, allowing them to inject those commands silently. This method of exploitation is particularly concerning, as it can evade detection mechanisms that rely on human oversight or delayed responses. The reliance on heuristics can lead to false security, where systems appear robust but are, in fact, vulnerable to sophisticated attacks.
+
+### Recommendations for Enhancing Security Measures
+
+To mitigate the risks associated with man-in-the-model attacks, developers and security professionals must adopt a multi-faceted approach to security. First, transitioning from prefix-based approvals to more granular, parsed command validation can significantly enhance security. This involves implementing deny lists for potentially dangerous command options that could execute malicious actions. By focusing on the specific commands and their contexts, organizations can better protect their systems from exploitation. Additionally, employing machine learning techniques to analyze command patterns can help identify anomalies that traditional validation methods might miss.
+
+### Implementing Provenance Checks for Command Validation
+
+Incorporating provenance checks into the command execution process is another crucial step. By signing tool calls with cryptographic tokens that validate the origin and integrity of commands, organizations can ensure that only legitimate requests are executed. This approach requires that the signing mechanism be robust and impervious to manipulation by compromised systems. Provenance checks can serve as a strong line of defense against unauthorized command execution, ensuring that the commands originate from trusted sources.
+
+### Treating Gateways as Critical Trust Boundaries
+
+It is imperative to treat inference servers and LLM gateways as critical components of the trust boundary within AI systems. Organizations should implement strict access controls, version pinning, and logging mechanisms to monitor interactions with these components. This helps ensure that any unauthorized changes can be quickly identified and addressed. By establishing a clear boundary of trust, organizations can better safeguard their AI agents against potential attacks.
+
+### Securing Sensitive Information in AI Systems
+
+Another important aspect of securing AI agents is managing sensitive information. Compromised systems often exploit the availability of sensitive data, such as environment variables or configuration files. For example, an attacker could access API keys stored in plaintext within a configuration file, leading to unauthorized access to external systems. By restricting access to such data and employing techniques to obfuscate or encrypt sensitive information, organizations can reduce the risks associated with data exfiltration. Ensuring that sensitive information is not easily accessible can limit the potential impact of a successful attack.
+
+### The Evolving Landscape of AI Threats
+
+As AI systems continue to evolve, so too do the threats they face. The man-in-the-model attack exemplifies how traditional security paradigms may not suffice against sophisticated adversaries. Organizations must remain vigilant and adaptive, continually assessing their security posture and updating their defenses against emerging threats. This proactive approach is essential for maintaining the integrity and security of AI systems in an increasingly complex threat landscape.
+
+### Conclusion: A Call for Comprehensive Security Frameworks
+
+The security implications of the man-in-the-model attack underscore the necessity for robust security frameworks in AI agent architectures. By recognizing the vulnerabilities inherent in current systems and implementing comprehensive security measures, developers and security professionals can better protect their AI agents from exploitation. The future of AI security hinges on our ability to anticipate and mitigate risks, ensuring that these powerful tools can be used safely and effectively across a wide range of applications. Ongoing research and collaboration among AI developers, cybersecurity experts, and system architects will be crucial in developing innovative solutions to safeguard against evolving threats.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/ginigenai_hp_0ae441ead91f/the-model-never-ran-why-an-agents-approval-gate-cannot-trust-the-wire-between-it-and-its-llm-2ecn)
+
+---
+
+<SocialShare title="Understanding the Man-in-the-Model Attack: Security Implications for AI Agents" slug="understanding-the-man-in-the-model-attack-security-implications-for-ai-agents" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
