@@ -1,0 +1,314 @@
+---
+slug: unlocking-the-potential-of-local-inference-a-technical-exploration
+title: "Unlocking the Potential of Local Inference: A Technical Exploration"
+authors: [francis]
+tags: [local inference, ai models, hardware optimization, kv cache]
+date: 2026-11-16T14:13:01.316Z
+description: "Before you read: The Life of a Request: What Happens When You Hit Enter, The KV Cache: Why Long Chats Get Slow and Expensive and Quantization: Smaller Weights, Same Answers (Mostly).
+Local inference replaces the model-as-a-service API (application programming interface) call with a computation bound to your own CPU (central processing unit), GPU (graphics processing unit), and memory. The key tools are Ollama and llama.cpp for running models, plus the hardware profile that determines whether a model runs at 5 tokens per second or 50.
+Two things decide how well it goes: whether the model and its KV (key-value) cache fit in fast memory, and how fast that memory is. Context length matters more than people expect, because the cache grows with every token. Quantizing the cache, for example keys at 8 bits and values at 4, cuts it by more than half, so more than twice the context fits in the same memory.
+Last time we broke down the economics of API inference, finding that a token's price is mostly GPU time and margin. Now we turn to the hardware you own: what it takes to run a model on your own machine, and when "local" is actually the better choice.
+Consider the same user request from Part 1, now routed to an Ollama server on a laptop. The prompt is the same, but the whole pipeline (tokenization, prefill, decode, streaming) runs on your machine, not on a remote GPU cluster.
+Local inference changes the trust boundary. The prompt never leaves your machine. No network call, no third-party logs, no data processing agreement. From a compliance perspective, that alone can be the deciding factor for regulated workloads.
+It also changes the cost model. Instead of paying per token, you pay once for hardware and then for electricity. A single high-end GPU running a quantized 7B or 8B model can generate millions of tokens per day with no incremental API bill.
+The price is that you now manage the memory hierarchy yourself. When you call an API, the provider hides VRAM (the GPU's own memory) pressure, KV cache limits, and model loading. Locally, those become your problem.
+The runtime stack is different too. Instead of an HTTP endpoint that hides the model behind a scheduler, you have a program that loads a model file from disk and runs it. llama.cpp is a C/C++ inference engine with command-line tools and its own OpenAI-compatible server, llama-server. Ollama wraps llama.cpp for GGUF models and adds model downloads, management and a REST API; on Apple Silicon, recent versions can also run models on Apple's MLX framework (Ollama's MLX announcement). The abstraction level changes what you can tune.
+The first question is capacity. If the model weights and KV cache fit entirely in GPU memory (or in a Mac's unified memory), you get the fastest generation. If part of the model spills to ordinary system RAM, those layers run at system-RAM speed and every token slows down.
+A rough rule for GGUF models: Q4_K_M averages about 4.9 bits per weight (llama.cpp's quantize README), so the weights need about 0.6 GB per billion parameters, plus room for the KV cache. Some current examples:
+
+
+
+Model
+Weights at about 4 to 5 bits
+Fits on
+
+
+
+
+Llama 3.1 8B (Q4_K_M)
+about 4.9 GB
+an 8 GB GPU, or a 16 GB laptop
+
+
+A 14B model such as Qwen3 14B (Q4_K_M)
+about 9 GB
+a 12 to 16 GB GPU
+
+
+gpt-oss-20b (mixture of experts, MXFP4)
+runs within 16 GB
+a 16 GB GPU or Mac
+
+
+Code Llama 34B (Q4_K_M)
+about 20 GB
+a 24 GB GPU
+
+
+Llama 3.3 70B (Q4_K_M)
+about 43 GB
+two 24 GB GPUs, or a Mac with 64 GB
+
+
+
+The second question is speed, and it has a simple rule. Each new token requires reading every weight once (Part 1), so for a single user:
+decode tokens per second ≈ memory bandwidth ÷ bytes read per token (weights, plus the KV cache at long contexts)
+A 7B model at Q4_0 is about 3.8 GB. On an RTX 4090, with 1,008 GB/s of bandwidth, the ceiling is about 1,008 ÷ 3.8 ≈ 265 tokens per second. Real runs land at roughly 60 to 75 percent of the ceiling, as llama.cpp's community benchmarks show (Apple Silicon results and CUDA results, Llama 2 7B, 128 generated tokens, one user):
+
+
+
+Hardware
+Memory bandwidth
+Ceiling (bandwidth ÷ 3.8 GB)
+Measured, 7B Q4_0
+
+
+
+
+RTX 5090 (32 GB)
+1,792 GB/s
+about 470 tok/s
+about 290 to 300 tok/s
+
+
+RTX 4090 (24 GB)
+1,008 GB/s
+about 265 tok/s
+about 186 to 189 tok/s
+
+
+M5 Max, 40-core GPU
+614 GB/s
+about 160 tok/s
+about 120 tok/s (newer llama.cpp build)
+
+
+M4 Max, 40-core GPU
+546 GB/s
+about 145 tok/s
+about 83 tok/s
+
+
+M2 Max, 38-core GPU
+400 GB/s
+about 105 tok/s
+about 66 tok/s
+
+
+
+The same rule explains everything else. The M2 Max runs the 16-bit version of that 7B model at about 25 tokens per second, because there are about three and a half times as many bytes to read. A 70B model at Q4_K_M (about 43 GB) on an M2 Max has a ceiling of about 9 tokens per second. A desktop CPU with common dual-channel DDR5 memory, at roughly 100 GB/s at most, tops out around 20 to 25 tokens per second on a 4 to 5 GB model. A mixture-of-experts model reads only the experts each token uses, so gpt-oss-20b, with 3.6 billion active parameters out of 21 billion (gpt-oss-20b model card), decodes much faster than a dense model of its size, even though all of it must fit in memory.
+Hybrid mode (some layers on the GPU, some on the CPU) is a compromise. When a model does not fit in VRAM, Ollama loads part of it into system memory automatically, and ollama ps shows the split, for example "48%/52% CPU/GPU". Layers left on the CPU run from system RAM, with a fraction of the GPU's bandwidth, so each one slows every token; only small activations cross the PCIe bus between the two. Plenty of system RAM matters for hybrid setups with larger models, because the operating system starts swapping to disk if you run short.
+Disk speed matters for model loading. GGUF is designed to be memory-mapped, so the OS can page in weights from the file on demand. This lets you start models larger than RAM, but once the model is running, inference speed still depends on the weights fitting in fast memory.
+The KV cache grows linearly with the number of tokens in the sequence. For a transformer with $$L$$ layers, $$H_{\text{KV}}$$ key-value heads, head size $$d_h$$, and a 16-bit KV cache, the total memory is:
+bytes = 2 × L × H_kv × d_h × context_length × 2
+The first 2 counts keys and values; the last 2 is bytes per 16-bit number. Note that it is the number of KV heads, not query heads: modern models share each KV head across several query heads (grouped-query attention, Part 2). Llama 3.1 8B has 32 layers and 8 KV heads of size 128, so one token costs $$2 \times 32 \times 8 \times 128 \times 2 = 131{,}072$$ bytes (128 KiB). That is 1 GiB at 8K tokens, 4 GiB at 32K and 16 GiB at its full 128K. Older models without grouped-query attention, such as Llama 2 7B with 32 KV heads, need four times more per token (512 KiB), or 2 GiB at their full 4K context. Code Llama 34B uses 8 KV heads across 48 layers: 192 KiB per token, about 1.5 GiB at 8K.
+This memory is allocated on top of the weights. Even if the weights fit comfortably in VRAM, a long context window can push you over the limit. Many local setups fail here: the model loads fine, but the first request with a long prompt runs out of memory.
+The standard fix is KV cache quantization. In llama.cpp you set the key and value types separately, and a quantized value cache needs Flash Attention turned on (llama-server's options):
+llama-server -m model.gguf -fa on --cache-type-k q8_0 --cache-type-v q4_0
+
+A q8_0 number takes 8.5 bits and a q4_0 number 4.5 bits, counting their shared scales, against 16 for f16. Keys at q8_0 and values at q4_0 average 6.5 bits, about 59% less memory than f16, so about 2.5 times the context fits in the same space. Ollama sets one type for both keys and values: with Flash Attention enabled (Ollama turns it on automatically where the hardware supports it, or you can set OLLAMA_FLASH_ATTENTION=1), set OLLAMA_KV_CACHE_TYPE=q8_0 to halve the cache or q4_0 to quarter it (Ollama FAQ). The split keys-at-8, values-at-4 setting needs llama.cpp directly.
+Why give keys more bits than values? Keys set the attention scores, which decide how much each earlier token counts, while values carry the information that gets mixed. The KIVI paper found that the two have different statistics: the key cache quantizes best per channel and the value cache per token (KIVI: A Tuning-Free Asymmetric 2bit Quantization for KV Cache). A community benchmark, KVSplit (May 2025, TinyLlama at 8K context on an M4 MacBook Pro), shows the effect at the same memory cost: 8-bit keys with 4-bit values raised perplexity by 0.86%, while 4-bit keys with 8-bit values raised it by 6.06%, both with the cache 59% smaller. That is one small model on one machine, so test on your own model before relying on it.
+{
+  "type": "bar",
+  "title": "Same memory, different damage: perplexity rise by KV cache split",
+  "caption": "Source: KVSplit community benchmark (May 2025), TinyLlama, 8K context, M4 MacBook Pro. Both settings make the KV cache 59% smaller than f16; values are the percent rise in perplexity.",
+  "data": [
+    {
+      "label": "K8V4 (8-bit keys, 4-bit values)",
+      "value": 0.86
+    },
+    {
+      "label": "K4V8 (4-bit keys, 8-bit values)",
+      "value": 6.06
+    }
+  ]
+}
+
+This asymmetry means you can more than double the context that fits on the same machine by keeping keys at higher precision and compressing values harder. For local inference, it is one of the most useful optimizations you can make.
+llama.cpp loads a GGUF file and executes the transformer graph on CPU, GPU, or a mix of both, with backends that include CUDA, Metal, Vulkan, HIP, SYCL and plain CPU. The GGUF format stores weights, tokenizer metadata, and hyperparameters in a single file that can be memory-mapped (GGUF specification).
+When you run ollama run llama3.2, Ollama starts a server that downloads the model (if it is not cached) and loads it with llama.cpp. It keeps the model in memory for five minutes after the last request by default, so later requests skip the load, and it listens on port 11434. Your request hits that endpoint, the prompt is tokenized, and prefill begins.
+The internal flow looks like this:
+flowchart LR
+    A[Client sends prompt via HTTP] --> B[Ollama server]
+    B --> C["Load GGUF model file (first request only)"]
+    C --> D[Memory-map weights]
+    D --> E[Tokenize prompt]
+    E --> F[Prefill: compute attention over prompt]
+    F --> G[Sample first token]
+    G --> H[Decode: token by token]
+    H --> I[Stream token to client]
+    H -->|KV cache lookups| J[KV cache in VRAM/RAM]
+During prefill, the entire prompt is processed in parallel. The graph planner in llama.cpp allocates tensor nodes and assigns them to the best available backend. Large matrix multiplications go to the GPU if present.
+Decode is a loop. At each step, the model takes the last generated token, pushes it through every layer, and attends over the cached keys and values for all previous positions. Each step must read every weight once, which is why the bandwidth rule above predicts speed so well; at long contexts, reading the KV cache adds to the bill.
+Ollama adds a layer on top. It manages the model lifecycle, exposes a REST API, and handles streaming. It also provides a CLI (command-line interface) for pulling models, setting parameters, and checking logs.
+When several people share one local server, concurrency matters. Ollama can process a few requests in parallel per model (OLLAMA_NUM_PARALLEL; the default is one), and llama-server has continuous batching and multiple parallel slots built in. For dozens of users, a dedicated serving engine such as vLLM batches far more efficiently, with the paged KV cache and continuous batching that Part 3, Batching and PagedAttention: How vLLM Serves Hundreds at Once, explains.
+TensorRT-LLM, NVIDIA's serving library, now runs on PyTorch with NVIDIA-tuned kernels; its older TensorRT engine backend has been removed (TensorRT backend removal notice). It uses CUDA Graphs to cut the CPU overhead of launching GPU kernels, and an overlap scheduler that hides CPU work behind GPU computation (TensorRT-LLM architecture overview).
+For a local team running a private RAG (retrieval-augmented generation) system, one of these serving engines can handle many simultaneous requests on a single workstation GPU. The setup is more complex than Ollama, but the total throughput is much higher.
+
+
+
+Property
+Value
+
+
+
+
+Ollama's default for an 8B model
+Q4_K_M
+
+
+Weights per billion parameters at Q4_K_M
+about 0.6 GB (4.9 bits per weight)
+
+
+Single-user decode speed
+about memory bandwidth ÷ model size, times 0.6 to 0.75
+
+
+KV cache per token, Llama 3.1 8B (f16)
+128 KiB (1 GiB at 8K tokens)
+
+
+KV cache per token, Llama 2 7B (f16, no GQA)
+512 KiB
+
+
+KV cache cut with q8_0 keys and q4_0 values
+about 59% (llama.cpp, needs Flash Attention)
+
+
+Ollama KV cache option
+
+OLLAMA_KV_CACHE_TYPE = f16, q8_0 or q4_0, one type for K and V
+
+
+Ollama default port
+11434
+
+
+Ollama keep-alive
+5 minutes by default
+
+
+
+Q: Can I run a 70B model on a laptop with 64 GB of RAM? 
+Q: Does local inference completely eliminate privacy risk? 
+Q: How do I choose between llama.cpp and Ollama? 
+Q: Why does VRAM limit context length even if the model fits? 
+Q: What's the fastest local inference setup I can assemble? 
+You want to serve Code Llama 34B at Q4_K_M (about 20 GB of weights) on a single GPU with 16 GB of VRAM, with 8K tokens of context. Can you run this setup? If not, what changes would make it work?
+Answer: Not fully on the GPU: 20 GB of weights cannot fit in 16 GB, and 8K tokens of KV cache add about 1.5 GiB more ($$2 \times 48 \times 8 \times 128 \times 2$$ bytes = 192 KiB per token). You have three ways out. Hybrid offload: keep about 14 GB of layers plus the cache on the GPU and leave about 6 GB of layers in system RAM. Those CPU layers set the pace: at roughly 100 GB/s they alone take about 60 ms per token, so expect around 10 tokens per second at best. A smaller model: a 14B model at Q4_K_M is about 9 GB and fits with plenty of room for 8K of context, at several times the speed. A harsher quantization: the 34B at Q2_K is about 14 GB, which leaves almost no room for the cache and costs noticeable quality. For most uses the 14B model is the better trade; if you need the 34B, a 24 GB card is the clean fix.
+If you want this kind of breakdown every week, how real systems actually work under the hood, subscribe to Internals Decoded at internalsdecoded.com.
+llama.cpp on GitHub
+llama-server README (llama.cpp)
+llama.cpp quantize README
+Performance of llama.cpp on Apple Silicon (llama.cpp discussion 4167)
+Performance of llama.cpp with CUDA (llama.cpp discussion 15013)
+GGUF format specification
+Ollama FAQ
+Ollama is now powered by MLX on Apple Silicon in preview (Ollama, March 2026)
+KIVI: A Tuning-Free Asymmetric 2bit Quantization for KV Cache (Liu et al. 2024)
+KVSplit (community benchmark, May 2025)
+gpt-oss-20b model card (OpenAI on Hugging Face)
+TensorRT-LLM architecture overview (NVIDIA)
+TensorRT backend removal notice (TensorRT-LLM, October 2026)
+GeForce RTX 50 series compared (NVIDIA)
+Originally published at Internals Decoded. AI internals, explained conversationally...."
+image: /img/blog/generated/unlocking-the-potential-of-local-inference-a-technical-exploration-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Unlocking the Potential of Local Inference: A Technical Exploration](/img/blog/generated/unlocking-the-potential-of-local-inference-a-technical-exploration-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### The Paradigm Shift Towards Local Inference
+
+Local inference has emerged as a pivotal alternative to traditional API-based AI model deployment, enabling developers to run models directly on their own hardware. This shift not only enhances privacy but also reduces operational costs associated with cloud-based services. By eliminating the need for network calls, local inference minimizes latency, allowing for real-time applications. However, the transition to local inference is not without its challenges, particularly in managing hardware resources effectively.
+
+### Hardware Requirements: Finding the Right Configuration
+
+The performance of AI models during local inference is heavily influenced by the underlying hardware. Key components include the CPU, GPU, and available memory. For instance, running an 8 billion parameter model like Llama 3.1 requires a GPU with at least 8 GB of VRAM. As a rule of thumb, models typically require around 0.6 GB of GPU memory per billion parameters when quantized. Therefore, a model of this size would need approximately 4.9 GB of memory, making it suitable for an 8 GB GPU or a laptop with 16 GB of RAM.
+
+For practical context, users with a mid-range NVIDIA RTX 3060 (12 GB VRAM) can efficiently run models up to 8 billion parameters with quantization. In contrast, those with lower-end GPUs, such as the GTX 1650 (4 GB VRAM), may find themselves constrained to smaller models, around 3 billion parameters, to avoid memory overflow during inference. This highlights the critical need to align hardware capabilities with model requirements.
+
+### Understanding KV Cache: The Key to Performance
+
+A crucial aspect of local inference is the KV (key-value) cache, which significantly impacts both memory usage and model performance. The cache grows linearly with the number of tokens processed, which means that longer inputs lead to increased memory demands. For example, Llama 3.1 requires approximately 128 KiB per token for its KV cache, resulting in about 1 GiB of memory usage for 8K tokens. If the cache exceeds the available VRAM, performance can be severely degraded.
+
+Consider a scenario where a developer uses Llama 3.1 for a text generation task. By limiting the input length to 512 tokens, the KV cache usage would be around 64 MiB, allowing for efficient processing even on lower-end GPUs. However, increasing the input length to 8K tokens would push the cache requirement to 1 GiB, necessitating careful planning of hardware resources. This illustrates the importance of understanding and managing the KV cache in local inference setups.
+
+### Quantization Strategies: Enhancing Efficiency
+
+Quantization is a powerful technique for optimizing model performance in local inference. By reducing the precision of model weights and caches, developers can significantly decrease memory usage without compromising performance. For instance, a quantization strategy that stores keys at 8 bits and values at 4 bits can reduce the KV cache size by over 50%. This allows for more context to fit within the same memory footprint, enhancing the model's ability to handle longer sequences efficiently.
+
+In practical terms, when configuring Ollama, developers can specify cache types for keys and values separately. For example, using the command `--cache-type-k q8_0 --cache-type-v q4_0` allows for tailored optimizations based on specific model requirements. This flexibility in quantization not only improves memory efficiency but also facilitates smoother inference on constrained hardware.
+
+### Local Inference vs. API-Based Inference: A Cost-Benefit Analysis
+
+When evaluating local inference against API-based models, several factors must be considered. API-based models offer convenience and scalability but often come with ongoing costs tied to usage. In contrast, local inference involves a one-time hardware investment and recurring electricity costs, which can be significantly lower over time. For example, a single high-end GPU running a quantized 7B or 8B model can generate millions of tokens daily without incurring incremental API charges.
+
+A compelling case study involves a startup that adopted a local inference model for customer support. By investing in a single NVIDIA A100 GPU, they saved thousands in API costs over the course of a year while ensuring that customer data remained secure on their servers. This illustrates the financial and operational advantages of local inference, particularly for organizations handling sensitive information.
+
+### Practical Implementation: Setting Up with Ollama and llama.cpp
+
+To facilitate local inference, tools like Ollama and llama.cpp provide robust solutions for running AI models on personal hardware. Ollama simplifies the process by managing model downloads and providing a REST API for interaction. For instance, executing the command `ollama run llama3.2` initiates the model loading process, enabling seamless interaction with the AI system. Meanwhile, llama.cpp serves as a powerful inference engine that can execute models across various backends, including CUDA and Metal.
+
+A practical example involves a developer setting up a local inference environment using Ollama to load a model and llama.cpp to execute it. This showcases the ease of integration and performance tuning available through these tools, allowing developers to efficiently utilize their hardware resources.
+
+### Common Pitfalls in Local Inference: Navigating Challenges
+
+Despite the numerous advantages, local inference setups can encounter several common pitfalls. One frequent issue arises from insufficient memory allocation, which can lead to out-of-memory errors during inference. This scenario often occurs when the KV cache exceeds the available VRAM, resulting in performance degradation. Developers must monitor memory usage carefully and consider employing quantization strategies to optimize cache size.
+
+For instance, using the command `llama-server -m model.gguf -fa on --cache-type-k q8_0 --cache-type-v q4_0` enables quantization of the KV cache, alleviating some memory constraints. Additionally, developers should ensure that the model and its dependencies are correctly configured to prevent runtime errors. Regularly profiling memory usage during inference can help identify bottlenecks and optimize configurations accordingly.
+
+### Real-World Use Cases: The Advantages of Local Inference
+
+Local inference has demonstrated significant benefits across various real-world applications. Organizations in regulated industries, such as healthcare, can leverage local inference to maintain compliance with data protection regulations like HIPAA. By processing sensitive information locally, these organizations mitigate the risk of data breaches associated with API calls. Furthermore, developers creating applications for environments with limited internet connectivity can benefit from local inference, ensuring that their models remain operational regardless of network conditions.
+
+For example, a financial institution utilizing local inference for fraud detection can process transactions in real-time without exposing sensitive data to external servers. This capability not only enhances user experience but also opens up new opportunities for deploying AI solutions in diverse contexts.
+
+### The Future of Local AI Model Deployment
+
+As advancements in hardware capabilities and optimization techniques continue to evolve, the future of local inference appears promising. The increasing availability of powerful GPUs and efficient quantization methods will enable more developers to deploy AI models on personal systems. The ability to leverage local resources not only enhances performance but also empowers users to maintain control over their data. As tools like Ollama and llama.cpp continue to develop, they will further streamline the process of local inference, making it an attractive option for developers and organizations alike.
+
+### Conclusion: Embracing Local Inference for AI Deployment
+
+In conclusion, local inference presents a powerful alternative to traditional API-based models, offering significant benefits in terms of cost, privacy, and performance. However, achieving optimal results requires a comprehensive understanding of hardware requirements, effective memory management, and strategic use of quantization techniques. By embracing local inference, developers can unlock new possibilities for deploying AI models, paving the way for innovative applications that prioritize user control and efficiency. With the right tools and strategies in place, local inference is poised to reshape the landscape of AI deployment, making it an essential consideration for forward-thinking developers and organizations.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/internals_decoded/local-inference-running-models-on-your-own-machine-1dnb)
+
+---
+
+<SocialShare title="Unlocking the Potential of Local Inference: A Technical Exploration" slug="unlocking-the-potential-of-local-inference-a-technical-exploration" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
