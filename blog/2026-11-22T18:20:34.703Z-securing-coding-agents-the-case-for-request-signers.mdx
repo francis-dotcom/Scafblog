@@ -1,0 +1,195 @@
+---
+slug: securing-coding-agents-the-case-for-request-signers
+title: "Securing Coding Agents: The Case for Request Signers"
+authors: [francis]
+tags: [security, devops, kubernetes, docker]
+date: 2026-11-22T18:20:34.703Z
+description: "Somewhere on public GitHub right now sits a JSON file listing, in plaintext, every database, SSH host, and cloud endpoint one developer can reach—along with the credentials that open them.
+No attacker planted it. No phishing link was clicked. The developer's own coding agent wrote it, one "Yes, and don't ask again" click at a time.
+Over the past three weeks, security researchers quantified the wreckage: 104,185 public copies of .claude/settings.local.json, 1,122 of them holding plaintext credentials (CSA / Apiiro). An independent sweep by GitGuardian expanded the lens across settings.json and history and found 31,088 secrets across 23,276 repositories (5,343 still valid at detection)—plus 613 more secrets baked straight into public Docker Hub images via COPY . ..
+It is tempting to laugh at developers who forgot .gitignore. That misses the point completely. The November leak wave is not a sloppy-dialog bug—it is what happens when the only way to give a coding agent authority is to hand it the raw secret.
+Before reaching for a smarter confirmation modal or another pre-commit hook, look at three verified numbers from this year:
+97% / 13.6%: In Anthropic's own controlled study of 1,053 testers (Anthropic), developers clicked approve on 97% of permission prompts and caught only 13.6% of planted dangerous commands (and catch rates decay even further under fatigue). Calling a confirmation modal a security boundary is like putting a "Please Don't Knock Over" sticky note on a mug sitting at the edge of a desk.
+215 invisible leaks: Out of Apiiro's 1,122 secret-bearing files (containing 1,379 distinct secrets—379 database passwords, 43 public SSH logins, 23 AWS keys), gitleaks caught 564, TruffleHog caught 643, and 215 files were missed by both. Why? Because PGPASSWORD=…, mysql -p…, and sshpass -p … sit inside ordinary shell allow-rules rather than matching high-entropy API-key regexes.
+One path in every repo: As InfoQ pointed out, .claude/settings.local.json lives at the exact same relative path in every project—making it a tidy, predictable credential index for any malware or Docker build context (COPY . .) that touches the workspace.
+Every defense that lives inside the agent's filesystem—.gitignore, output redaction, regex scanners, smarter approval dialogs—is just a filter applied to a copy of a secret that should never have been there in the first place.
+If settings-file leaks were the only crack, you could patch one CLI and call it a week. They weren't. November delivered a full taxonomy of why local-laptop agents and multi-tenant SaaS wrappers fail structurally:
+The second channel across a sandbox boundary. On November 3, researchers disclosed CVE-2026-103916 (CVSS 8.2) in Docker Sandboxes: the microVM boundary held, but sbx cp—a host-side helper running as the operator—followed workspace symlinks straight onto the host. Two days earlier, JFrog published three CVSS-9.9 escapes in Beta9 (CVE-2026-120306/7/8) where a chroot-only build shared namespaces (/proc/1/root) and a file-API traversal returned the worker's Kubernetes service-account token (agentblog). Even OpenAI's own November 18 Codex sandbox post candidly notes that repo-scoped local jails still allow broad filesystem reads (leaving ~/.aws and ~/.ssh readable) and cannot stop an agent from planting code in node_modules/prettier that your editor executes outside the sandbox.
+Instruction-file poisoning and identity hijacking. Forever Security caught a live customer incident where a malicious AGENTS.md dropped into ~/Downloads tried to steer coding agents into installing a malicious npm package—nothing to patch, because obeying AGENTS.md is the feature. And Microsoft Security demonstrated in lab testing how device-code phishing against a coding CLI hands an attacker remote session steering, memory poisoning, and private-repo access using features working completely as designed.
+Upstream inference and SaaS blast radius. On November 13, Cursor published its post-mortem: a key exposed at Fireworks led to archived agent traces containing unredacted credentials, which led to a malicious copy of the Claude Code extension served from the marketplace cache for ~11 hours to up to 5,000 users. SecurityWeek tallied at least a dozen AI developer platforms breached in a single month. And on November 20–21, Ars Technica reported HD Moore's 2-million-canary experiment: three compromised providers, AWS bait keys probed within hours, and Zero Data Retention flags ignored at the front door before a model even ran (prompting OpenRouter to pull ZDR labels from MiniMax endpoints).
+Every single one of these incidents shares the same root mistake: valuable, long-lived secrets sitting inside—or flowing uninspected out of—the same trust boundary as an untrusted loop.
+When Antonio Mika published Running coding agents without handing them my credentials this month (134 points, 118 comments on HN)—keeping keys on a laptop behind an SSH/MCP proxy (lend) with 5-minute / 3-use leases and biometric prompts—the Hacker News comment section immediately surfaced the sharpest counterargument in this entire space:
+"If a proxy will happily run gh pr merge whenever the agent asks, you didn't build a security boundary. You built a key with extra steps."
+That objection is dead right—and any security architecture that ignores it is hand-waving.
+Hiding the bytes of an API key or Git token from the agent solves exfiltration (the agent cannot dump sk-... into .claude/settings.local.json, a Docker image, or a leaky third-party prompt router). It does not solve abuse of authority unless the custody layer can also refuse.
+That is the whole distinction: a raw key can never say no. A policy-enforcing request signer can.
+
+If you assume the agent process is compromised—by a poisoned AGENTS.md, a prompt injection inside a GitHub issue, or a bad dependency—your job becomes a boring provisioning problem. Give the execution unit nothing worth stealing, and make every privileged action cross a narrow, auditable chokepoint.
+Stop running unattended or semi-attended agents against your primary workstation—the single highest-value box in the company (~/.ssh, cached prod AWS sessions, live kubeconfig, browser cookies). Run each task in a fresh, ephemeral, rootless container or Kubernetes Job:
+securityContext:
+  runAsNonRoot: true
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: ["ALL"]
+automountServiceAccountToken: false
+activeDeadlineSeconds: 1800
+
+Two details matter more than people realize:
+automountServiceAccountToken: false eliminates the exact Kubernetes token-harvesting path seen in Beta9 (CVE-2026-120307).
+Audit the second doors. Never let a host-side helper resolve workspace symlinks as the operator (sbx cp), never bind an unauthenticated control server to 0.0.0.0, and remember that MCP servers often run outside an agent's shell sandbox.
+Attach a default-deny NetworkPolicy to the task namespace and allow exactly two destinations: cluster DNS and your egress/model proxy on one port. Explicitly block cloud metadata (169.254.169.254)—and verify from inside a running pod that your CNI actually enforces NetworkPolicy, because an unenforced policy YAML is just a comment.
+Routing LLM inference through a single gateway you operate also closes the HD Moore canary gap: you pin approved providers, strip accidental secret patterns before prompts leave your network, and prevent an agent or developer config from silently fanning out to an unvetted reseller. (And run that gateway unprivileged—CISA just added LiteLLM's CVE-2026-40217 to KEV, where a guardrail sandbox escape landed straight into a default root container.)
+Inside the sandbox, the agent gets one short-lived $PROXY_TOKEN bound to the execution—never a human PAT, never a raw ANTHROPIC_API_KEY or OPENAI_API_KEY, and never a wildcard GitHub token.
+A real execution lease carries tight claims enforced at the proxy:
+Subject: agent:<repo>:<task-id> (a distinct agent identity, never impersonating a human)
+Scope: one repository, one working branch (work/<task-id>), contents:write only—never workflows:write, branch-protection bypass, or release publish
+TTL: hard ceiling (e.g., 30–60 minutes), automatically revoked the moment the Job terminates
+Policy: default-deny by host, HTTP method, and path—so even a fully hijacked agent cannot turn a branch-push lease into a merge or a force-push to main
+
+
+
+If a task goes sideways, revocation is kubectl delete job, not a Friday-evening secret-rotation fire drill across 14 SaaS dashboards.
+Remember the Cursor incident: stolen credentials poisoned a marketplace artifact cache for 11 hours, bypassing PR review entirely. And remember GitGuardian's 613 Docker Hub secrets: .gitignore does not stop COPY . ..
+Make the commit SHA the only gate that unlocks irreversible actions:
+Protect main and require human (or policy-service) approval bound to the exact candidate commit SHA and expected base ref—if anything mutates the branch, the approval invalidates.
+Put CODEOWNERS on .github/workflows/, Containerfile/Dockerfile, package.json scripts, and .claude/ / .codex/ directories.
+Ban COPY . . in Dockerfiles and add a CI check that fails the build if .claude/, .codex/, .env, or *.pem ever enters the build context (.dockerignore is a polite suggestion; a failing build step is a control).
+Mint publish credentials via per-job OIDC scoped to one package and one ref—zero long-lived registry tokens anywhere an agent can reach.
+Any post that pretends isolation is free is hiding where the mess moved. Moving agents off developer laptops into ephemeral Jobs behind a request-signing proxy has real day-two costs:
+Fidelity drops for bespoke toolchains. A Linux container will not run Xcode, an iOS simulator, or a quirky macOS GUI tool. If that is your stack, you are looking at remote macOS VMs or strict local proxy patterns like lend rather than plain Kubernetes Jobs.
+Warm caches become explicit work. Ephemeral workspaces mean you have to mount explicit read/write dependency caches (GOMODCACHE, npm, Cargo) or pay cold-build latency on every run.
+You now own a proxy. A central credential-injecting gateway is a single point of failure—if it crashes or gets misconfigured, every agent stops until you fix it.
+Those are honest engineering tradeoffs worth debating. Leaving 31,088 plaintext credentials inside .claude/settings.local.json and hoping humans catch more than 13.6% of bad commands is not a tradeoff—it is waiting for your turn in next month's post-mortem.
+A coding agent is a process, not a teammate with a badge. Give it an ephemeral workspace, a deadline, and a scoped request handle—never a raw key.
+How are you keeping ~/.ssh, .env, and provider keys out of reach of your coding agents right now—and where has sandboxing broken your workflow?..."
+image: /img/blog/generated/securing-coding-agents-the-case-for-request-signers-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Securing Coding Agents: The Case for Request Signers](/img/blog/generated/securing-coding-agents-the-case-for-request-signers-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### The Security Dilemma of Coding Agents
+
+Coding agents have emerged as essential tools in modern software development, enabling automation and streamlining workflows. However, their reliance on raw secret management poses significant security risks. The practice of embedding plaintext credentials and unencrypted API keys within codebases creates vulnerabilities that can be exploited by malicious actors. As the landscape of software development evolves, the need for robust security measures becomes paramount to safeguard sensitive information.
+
+### The Prevalence of Credential Leaks in Development Environments
+
+The statistics surrounding credential leaks are alarming. A recent survey by GitGuardian uncovered 31,088 secrets across 23,276 repositories, with 5,343 still valid at the time of detection. Similarly, Apiiro reported that out of 104,185 public configuration files, 1,122 contained plaintext credentials. These figures starkly illustrate the inadequacy of traditional secret management practices, emphasizing the urgency for developers to adopt more secure approaches.
+
+### Learning from Recent Breaches
+
+High-profile incidents underscore the dire consequences of poor secret management. For instance, the exposure of credentials in Docker Hub images has led to unauthorized access to numerous applications, while a vulnerability in a coding agent's configuration resulted in the theft of sensitive data from a major cloud provider. These breaches highlight that inadequate security practices can lead to significant financial losses and reputational damage, reinforcing the need for a paradigm shift in how developers manage secrets.
+
+### The Shortcomings of Conventional Security Measures
+
+Traditional security measures, such as `.gitignore` files and confirmation modals, have proven ineffective in preventing credential leaks. Research indicates that developers approve 97% of permission prompts without fully understanding the implications, fostering a false sense of security. Furthermore, relying on confirmation dialogs does not address the root issue: the presence of raw secrets within the coding environment. This highlights the necessity for a more comprehensive security strategy.
+
+### The Concept of Request Signers
+
+Request signers present a more secure alternative to raw secret management. By enforcing policies that define granular permissions for coding agents, request signers allow developers to generate temporary, scoped tokens that limit an agent's access to sensitive credentials. This approach not only mitigates the risk of credential leakage but also ensures that all actions taken by the agent are auditable and traceable. 
+
+For example, a request signer can issue tokens with specific claims, such as:
+
+- **Subject**: Identifies the agent (e.g., `agent:my-repo:build-123`)
+- **Scope**: Limits access to specific resources (e.g., read-only access to certain files)
+- **TTL**: Sets a time-to-live for the token (e.g., 30 minutes)
+- **Policy**: Restricts actions based on defined criteria (e.g., only POST requests to a specific endpoint)
+
+### Implementing Ephemeral Workspaces for Enhanced Security
+
+Utilizing ephemeral workspaces is a powerful strategy for improving security. By operating coding agents in isolated, temporary environments, developers can significantly reduce the attack surface. For example, Kubernetes Jobs can be configured with strict security contexts to enforce access controls. The following YAML configuration illustrates how to create a secure job:
+
+```yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: secure-job
+spec:
+  template:
+    spec:
+      containers:
+      - name: secure-container
+        image: your-image
+        securityContext:
+          runAsNonRoot: true
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+      restartPolicy: Never
+```
+
+This configuration ensures that the container runs as a non-root user, restricts privilege escalation, and enhances overall security. Additionally, using tools like `Kube-bench` can help automate security compliance checks for Kubernetes clusters.
+
+### Best Practices for Kubernetes and Docker Security
+
+To further enhance security for coding agents, it is essential to adopt best practices when configuring Kubernetes and Docker environments. Disabling the automatic mounting of service account tokens is a critical step, as this can expose sensitive credentials to compromised containers. Setting `automountServiceAccountToken: false` in Kubernetes configurations helps mitigate this risk.
+
+Additionally, implementing a default-deny NetworkPolicy can restrict network access for coding agents. By allowing only necessary egress traffic and blocking access to cloud metadata endpoints, developers can prevent unauthorized data exfiltration. Regular audits of these configurations are vital to ensure compliance with security policies and to identify potential vulnerabilities.
+
+### Navigating the Trade-offs of Request Signing Architecture
+
+Transitioning to a request signing architecture involves several trade-offs and challenges. One significant consideration is the potential impact on development speed. The introduction of policy enforcement mechanisms may require additional overhead in configuration and management. However, the long-term benefits of enhanced security and reduced risk of data breaches often outweigh these initial costs.
+
+Moreover, teams must be cognizant of the specific needs of their development environments. For example, a microservices architecture may require different token scopes compared to a monolithic application. A one-size-fits-all approach to security may not be effective across diverse programming stacks and tools. Therefore, tailoring security measures to the unique requirements of each project is essential to ensure that the implementation of request signers aligns with existing workflows.
+
+### Real-World Implementation Insights
+
+In practice, implementing request signers involves creating a proxy that handles authentication and authorization for coding agents. This proxy should generate short-lived tokens that are scoped to specific actions and resources. For example, a request signer could issue a token with the following claims:
+
+- **Subject**: `agent:<repo>:<task-id>` (distinct agent identity)
+- **Scope**: Access limited to a specific repository and working branch
+- **TTL**: A hard ceiling (e.g., 30–60 minutes) that automatically revokes the token upon job termination
+- **Policy**: Default-deny by host, HTTP method, and path to prevent unauthorized actions
+
+By implementing such a system, organizations can significantly reduce the risk of credential leakage and unauthorized access. Additionally, integrating tools like OAuth 2.0 or OpenID Connect can provide standardized methods for token issuance and validation.
+
+### The Path Forward: Prioritizing Proactive Security Measures
+
+As the landscape of software development continues to evolve, adopting proactive security measures is essential. The reliance on raw secret management is no longer tenable, as evidenced by the alarming statistics and case studies discussed. By transitioning to request signers and implementing ephemeral workspaces, developers can substantially enhance the security posture of their coding agents.
+
+The challenges associated with adopting a request signing architecture are real, but the potential for preventing unauthorized access and protecting sensitive credentials is invaluable. Organizations must prioritize security measures that align with modern development practices, ensuring that coding agents can operate safely within defined boundaries.
+
+### Conclusion: Evaluating Your Security Posture
+
+As you reflect on your current security practices, consider how you manage sensitive credentials within your coding environments. Are your coding agents equipped with the necessary safeguards to prevent unauthorized access? It is imperative to assess your existing workflows and implement actionable steps that align with the principles of request signing and ephemeral workspaces. The future of secure software development depends on our ability to adapt and innovate in the face of emerging threats. Prioritizing the transition to request signers can significantly bolster your security posture and safeguard your projects against potential breaches.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/sudokat_/your-coding-agent-doesnt-need-your-keys-it-needs-a-request-signer-3f2c)
+
+---
+
+<SocialShare title="Securing Coding Agents: The Case for Request Signers" slug="securing-coding-agents-the-case-for-request-signers" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
