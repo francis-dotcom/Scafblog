@@ -1,0 +1,270 @@
+---
+slug: advancing-wearable-technology-with-on-device-text-to-speech-solutions
+title: "Advancing Wearable Technology with On-Device Text-to-Speech Solutions"
+authors: [francis]
+tags: [ai, tts, wearables, cloud]
+date: 2026-11-23T16:45:14.512Z
+description: "This article was originally published on neuphonic.com.
+
+Glasses, earbuds, watches and phones, speaking without the cloud.
+Smart glasses, rings and watches that have to ask the cloud how to say a sentence will always answer a beat late and sound robotic. On-device text to speech for wearables removes that trip.
+The voice is generated on hardware the user carries, or the phone it’s connected to, so it keeps working in a tunnel, on a flight or on a hospital ward, and the words it speaks stay on that hardware.
+NeuTTS-2M is our device-native speech model for this job. It has 62.4M active parameters (173.6M in total), runs on the CPU alone with no GPU or NPU, speaks seven languages, clones a voice from about three seconds of audio, and scored a 0.47% word error rate on 100 Seed-TTS English sentences in our 2026 internal benchmark.
+This guide covers why device teams move speech off the cloud and the challenges it faces to be deployed on wearable hardware.
+On-device text to speech generates audio on the product’s own processor instead of a cloud server. For a wearable, that takes the network out of every spoken reply, keeps the text on the device, keeps the voice working with no connection, and swaps a per-character bill for a fixed cost per unit.
+Each of those four benefits matters more on a wearable than on a laptop or a call-centre server, because the wearable is small, mobile and personal.
+Wearables are designed to speak in short turns, a translated sentence, a navigation prompt, the answer to a question asked out loud. With cloud TTS, each turn waits for the request to leave the glasses, cross Bluetooth to the phone, travel over Wi-Fi or mobile data to a data centre, and come back as audio. Device teams we speak to report 1 to 2 seconds per turn in the field.
+On the device, the wait is compute time alone. That matters because text to speech is the last stage of a voice pipeline that also runs speech recognition and a language model. Every millisecond TTS doesn’t spend on the network goes back to those stages.
+The text a wearable reads aloud is often the most personal data it handles, a private message, a medication reminder, a translated conversation with a doctor.
+With cloud TTS, that text goes to the vendor’s servers, and a contract governs what happens to it there. In the EU that’s a data processing agreement under GDPR; in US healthcare it’s a HIPAA Business Associate Agreement.
+On-device synthesis is structurally different, because the vendor never receives the text. Without outbound speech data flows, security and privacy reviews are significantly simplified. On-device TTS doesn’t make a product compliant by itself, since other data flows still count, but it removes speech from the list of things to defend.
+Wearables are used everywhere, underground trains, flights, cold stores, mountain trails, hospital wards with poor signal. When a cloud voice loses its connection, the product either goes silent or falls back to the operating system’s built-in voice.
+On-device voice behaves the same with or without a signal. We demo NeuTTS running entirely on the CPU of a Samsung Galaxy S24 in airplane mode, with nothing going in or out of the phone.
+Most wearables are sold once. Cloud TTS charges every time the device speaks, so the voice bill grows with every active user while revenue per unit stays flat. Here’s a worked example at published rate:
+
+
+
+Input
+Value
+
+
+
+
+Fleet size
+100,000 pairs of glasses
+
+
+Speech per device per day
+3,000 characters (about 3 minutes of audio)
+
+
+Characters per year
+109.5 billion
+
+
+Cloud cost at $33 to $43 per million characters
+$3.6M to $4.7M per year, rising with usage
+
+
+On-device cost
+A licence per unit, paid once
+
+
+
+Double daily usage and the cloud line doubles. The on-device line doesn’t change.
+
+Yearly cloud TTS cost for 100,000 smart glasses at published rates.
+Wearables are limited to three things cloud TTS providers take for granted: memory, sustained compute and battery. Rings, earbuds and basic fitness bands run microcontroller-class chips. Glasses with an application processor, smartwatches and the companion phone have far more headroom. Neural voices that sound human take hundreds of megabytes to gigabytes of RAM, which is why most voice that runs on the wearable itself either sounds dated or runs on the phone in the user’s pocket.
+Every on-device TTS decision comes down to two questions, which processor in the product does the speaking, and how much of its memory and CPU time can speech have?
+
+Voice model size against total device RAM, on a log scale.
+Most wearables and edge boards are not fitted with a GPU. Many have a neural processing unit (NPU), but each chip vendor ships its own, with its own toolchain and operator support. A voice model that depends on one vendor’s NPU ties the product to that chip family for its whole hardware generation.
+The CPU is the one processor every device has. NeuTTS runs on the CPU alone, ships in GGML format, and has a C/C++ inference path. We run it on Raspberry Pi boards, NVIDIA Jetson modules, MacBooks and the Samsung Galaxy S24.
+The constraint of running on the CPU is that speech shares it with everything else. Speed per thread therefore matters as much as accuracy.
+
+
+
+Model
+Parameters
+Languages
+Size on disk
+Peak RAM
+RTF, 1 thread (lower is faster)
+WER (Seed TTS)
+Voice cloning on device
+Runs on
+
+
+
+
+NeuTTS 2M
+60M
+7
+245MB
+610MB
+0.55
+<0.5%
+Yes
+CPU
+
+
+Phonon Multilingual
+40M
+5
+74.6MB
+311MB
+0.36
+<0.5%
+No
+CPU
+
+
+Kokoro
+82M
+Single
+354MB
+687MB
+0.6
+<0.5%
+No
+CPU
+
+
+NeuTTS Max
+1.7Bn
+44
+API
+API
+<0.05
+<0.5%
+API
+GPU or Accelerator
+
+
+
+How we measured: We ran the internal benchmark on the first 100 Seed-TTS English test sentences, and scored a corpus wide word error rate using Whisper Large V3 Turbo. RTF is the mean compute time divided by audio duration on a single thread.
+On-device text to speech for wearables runs in one of two places. Either the wearable synthesises speech itself, which needs an application processor and spare memory, or the companion phone synthesises it locally and streams the audio over Bluetooth.
+Both keep the text off the cloud. NeuTTS-2M creates the voice on the phones and connects to the wearable through Bluetooth.
+Earbuds have no room for a neural TTS model, so the phone does the voice synthesis. The main requirement for on device hearables is consistency. The spoken notifications, workout cues and assistant replies have to come out in the same brand voice.
+A runner on a mountain trail wants pace and heart-rate cues without checking a screen, and often without coverage. Those cues are full of numbers, times and units, so the TTS has to read “5:42/km” and “162 bpm” correctly with no hand-written rules. Text normalisation (how the model turns numbers, times and units into spoken words) matters as much as voice quality here.
+The right deployment depends on where the text is allowed to go, whether the product must work offline, and how cost should scale. On device suits products that must work without a signal and keep speech private. On prem suits regulated organisations that need server scale throughput inside their own walls. Cloud suits products with a reliable connection that want the largest model with no hardware to manage. One NeuTTS model family covers all three, with the same API and voices.
+
+
+
+
+On-device
+On-prem
+Cloud API
+
+
+
+
+Where speech is generated
+The product’s own CPU or companion phone
+Your servers or private cloud
+Neuphonic’s servers
+
+
+Network needed
+No
+Your internal network only
+Yes
+
+
+Where the text goes
+Stays on the device
+Stays inside your infrastructure
+Sent to Neuphonic, with zero data retention
+
+
+Cost model
+Licence per unit
+Licence or platform fee
+Usage-based
+
+
+Hardware
+CPU only, about 610MB peak RAM for NeuTTS-2M
+CPU or consumer GPU; up to 50 concurrent streams on one RTX 4090
+None on your side
+
+
+Neuphonic models
+NeuTTS-2M (enterprise), NeuTTS Nano and NeuTTS Air (open weights)
+NeuTTS family
+NeuTTS-Max
+
+
+
+Many products use more than one. Glasses might speak on-device by default and hand long form reading to the cloud when a connection is available. Because the models share an API and voices, that’s one integration, not two. Our guide to on-prem vs cloud vs on-device TTS covers the trade-offs for each setup in detail.
+NeuTTS models ship as GGML/GGUF files that run on a CPU through a Python package or a C/C++ inference path, with no GPU and no network connection. The fastest way to evaluate is to run the open NeuTTS Nano or NeuTTS Air weights on your target hardware, measure peak RAM and real-time factor there, and then talk to us about NeuTTS-2M and porting to your chip.
+Formats: GGML/GGUF, with 4-bit and 8-bit quantised variants of the open models.
+Languages: Python and a C/C++ inference path for embedded builds
+Hardware we run on: Raspberry Pi, NVIDIA Jetson, Apple Silicon MacBooks and Samsung Galaxy S24, all on CPU.
+Porting support: our engineers port, tune and integrate the models on your hardware, and benchmark them against your memory and latency targets.
+An open model lets engineers stress test the numbers themselves. NeuTTS Air is released under Apache 2.0, and NeuTTS Nano under the NeuTTS Open License 1.0. Both are on Hugging Face, with code on GitHub, where the repository has 6,300 stars as of November 2026. NeuTTS-2M and NeuTTS-Max are available under an enterprise licence. Every NeuTTS output carries an inaudible Perth watermark, so generated speech can be identified. Our guide to open-source speech models and licensing explains what each licence allows in a shipped product.
+Contact Us..."
+image: /img/blog/generated/advancing-wearable-technology-with-on-device-text-to-speech-solutions-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Advancing Wearable Technology with On-Device Text-to-Speech Solutions](/img/blog/generated/advancing-wearable-technology-with-on-device-text-to-speech-solutions-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### The Imperative for Local Processing in Wearables
+
+Wearable technology has rapidly evolved, necessitating a fundamental shift in how text-to-speech (TTS) functionalities are implemented. Traditionally, TTS solutions have relied heavily on cloud-based processing, which introduces latency and raises significant privacy concerns. The advent of on-device TTS technologies, such as NeuTTS-2M, marks a transformative shift that enables immediate audio responses directly on the device. This shift not only enhances user experience but also aligns with the increasing demand for data privacy in an era where personal information is constantly at risk.
+
+### NeuTTS-2M: Technical Specifications and Capabilities
+
+NeuTTS-2M is a cutting-edge TTS model specifically designed for efficient deployment on wearable devices. With 62.4 million active parameters and a total of 173.6 million, it operates solely on the CPU, eliminating the need for GPU or NPU support. This is particularly advantageous for wearables, which often have limited processing capabilities. The model supports seven languages and can clone a voice from as little as three seconds of audio, achieving an impressive word error rate (WER) of 0.47% on benchmark tests. These specifications make NeuTTS-2M an attractive option for developers looking to integrate high-quality TTS into their wearable products.
+
+### Real-Time Processing: The Latency Advantage
+
+One of the most significant benefits of on-device TTS is the reduction in latency. Cloud-based systems typically introduce a delay of 1 to 2 seconds per spoken turn due to the need for data transmission to and from the server. In contrast, on-device solutions like NeuTTS-2M eliminate this bottleneck, relying solely on local computation time. This is crucial for wearables, where users expect instantaneous feedback, such as navigation prompts or notifications. The ability to process speech in real time not only enhances user satisfaction but also improves the overall functionality of the device.
+
+### Privacy and Security: The Case for Local Data Processing
+
+Data privacy is a paramount concern in today's digital landscape. When utilizing cloud-based TTS, sensitive information—such as personal messages or health reminders—must be transmitted to external servers, raising substantial privacy issues. On-device TTS maintains user privacy by processing all speech data locally, ensuring that sensitive information never leaves the user's device. This structural difference simplifies compliance with regulations like the General Data Protection Regulation (GDPR) in Europe and the Health Insurance Portability and Accountability Act (HIPAA) in the U.S., as the vendor does not have access to the text being processed.
+
+### Cost-Effectiveness: A Sustainable Model for Manufacturers
+
+From a financial perspective, on-device TTS offers a more sustainable model for wearable manufacturers. Cloud TTS solutions typically operate on a pay-per-use basis, which can lead to escalating costs as user engagement increases. For instance, a fleet of 100,000 wearable devices generating 3,000 characters of speech daily could incur annual costs ranging from $3.6 million to $4.7 million. In contrast, on-device solutions require a one-time licensing fee per unit, allowing manufacturers to predict costs more accurately and avoid ongoing charges. This shift not only benefits manufacturers but also enhances the affordability of wearables for consumers.
+
+### Hardware Limitations: Navigating Deployment Challenges
+
+Despite its advantages, deploying TTS on wearable devices comes with inherent challenges. Most wearables are constrained by limited memory and processing power, often relying on microcontroller-class chips. NeuTTS-2M, however, is designed to operate efficiently within these constraints, with a peak RAM requirement of just 610 MB. This allows for a real-time factor (RTF) performance of 0.55, ensuring that the model can deliver high-quality speech synthesis without compromising the device's overall functionality. Developers must navigate the trade-offs between model complexity and hardware capabilities to ensure optimal performance.
+
+### Practical Implementations: Case Studies in On-Device TTS
+
+Real-world applications of on-device TTS in wearables are diverse and impactful. For example, smart glasses equipped with NeuTTS-2M can provide navigation cues without requiring an internet connection, making them functional in remote areas or during flights. Fitness trackers can deliver real-time feedback on performance metrics, such as pace and heart rate, enhancing the user experience during workouts. These practical implementations illustrate the versatility of on-device TTS and its potential to revolutionize user interaction with wearable devices.
+
+### Future Directions: The Evolution of On-Device TTS
+
+Looking ahead, the future of on-device TTS in wearables appears promising. As artificial intelligence (AI) and machine learning technologies continue to advance, we can expect improvements in voice quality, language support, and personalization capabilities. Future iterations of models like NeuTTS may incorporate more complex neural architectures, allowing for even more nuanced speech synthesis. Additionally, as more developers recognize the benefits of on-device processing, we may see a broader range of devices adopting this technology, further embedding TTS into the fabric of everyday life.
+
+### Challenges and Limitations: Addressing Implementation Hurdles
+
+While the benefits of on-device TTS are clear, it is essential to acknowledge the challenges that come with its implementation. Developers must carefully consider the trade-offs between model complexity and hardware capabilities. For instance, while larger models may offer superior voice quality, they may also exceed the memory limits of certain devices. Ensuring consistent performance across a diverse range of hardware platforms can be a significant hurdle. Addressing these challenges requires a robust understanding of both the underlying technology and the specific constraints of the target devices.
+
+### Conclusion: Embracing On-Device TTS for Wearable Innovations
+
+As the landscape of wearable technology continues to evolve, the integration of on-device TTS solutions presents a unique opportunity for developers. By prioritizing responsiveness, privacy, and cost-effectiveness, on-device TTS can significantly enhance user experience and drive innovation in the wearable sector. Developers are encouraged to explore the capabilities of models like NeuTTS-2M and consider how on-device processing can be leveraged to create more efficient, user-friendly products. The future of wearables is here, and on-device TTS stands at the forefront of this transformation, promising to redefine how users interact with their devices in a more personal and immediate manner.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/ahmasoh/on-device-text-to-speech-for-wearables-13dj)
+
+---
+
+<SocialShare title="Advancing Wearable Technology with On-Device Text-to-Speech Solutions" slug="advancing-wearable-technology-with-on-device-text-to-speech-solutions" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
