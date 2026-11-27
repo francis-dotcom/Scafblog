@@ -1,0 +1,702 @@
+---
+slug: building-composable-ai-agents-for-enhanced-developer-productivity
+title: "Building Composable AI Agents for Enhanced Developer Productivity"
+authors: [francis]
+tags: [ai, developers, composable, agents]
+date: 2026-11-27T18:14:19.818Z
+description: "Originally published on tamiz.pro.
+Every team I've worked with over the past year has the same disease. Not a lack of AI tooling — a surplus of it. Cursor for interactive edits, Claude Code for terminal-driven tasks, GitHub Copilot for inline completions, Aider for git-aware refactors, and now a dozen MCP servers each promising to "give your agent access to" something. Each tool ships its own config format, its own prompt philosophy, its own context window, and its own failure modes. The result isn't productivity — it's chaos.
+This guide is a practical, hands-on path out of that chaos. Instead of abandoning tools or picking a single winner, you'll build a composable agent layer: a thin orchestration runtime that treats every AI tool as a pluggable, contract-driven unit and composes them into a single, predictable, auditable pipeline. By the end, you'll have a working TypeScript reference implementation you can adapt to your own repo.
+1. The Chaos Problem
+2. Architecture Overview
+3. Prerequisites
+4. Step 1 — Define Agent Contracts
+5. Step 2 — Build the Agent Registry
+6. Step 3 — Implement the Orchestration Engine
+7. Step 4 — Wire Up MCP Tools
+8. Step 5 — Context & Token Budgeting
+9. Step 6 — Observability & Tracing
+10. Step 7 — Failure Handling & HITL Gates
+11. Production Best Practices
+12. Frequently Asked Questions
+Let's quantify the mess. A typical AI-assisted engineering team today runs, per developer, something like this:
+
+
+
+Tool
+Role
+Config
+Failure Mode
+
+
+
+
+Cursor
+Interactive editing
+
+~/.cursor + project .cursor/rules
+
+Context thrashing, silent rule drift
+
+
+Claude Code
+Terminal agent
+
+CLAUDE.md + ~/.claude
+
+Token burn on long tasks, no audit trail
+
+
+Copilot
+Inline completion
+VS Code settings
+Stale context, no repo-wide reasoning
+
+
+Aider
+Git-aware refactor
+.aider.conf
+Rebase conflicts, ignores project conventions
+
+
+MCP servers
+Context providers
+
+mcp.json / .mcp
+
+Version skew, permission sprawl
+
+
+Custom scripts
+One-off automation
+ad-hoc
+Zero reuse, unmaintained
+
+
+
+Each tool has its own notion of "the codebase", its own token budget, its own prompt template, and its own output contract. When you chain them manually — run Claude Code to generate a patch, paste it into Cursor for review, ask Copilot to explain a failing test — you lose three things:
+Type safety between steps. Nothing guarantees the output of one agent satisfies the input of the next.
+Observability. You cannot trace why a change was made, which model produced it, or how many tokens it cost.
+Composability. You cannot swap one agent for another without rewriting the surrounding workflow.
+The fix is to stop thinking of agents as applications and start thinking of them as functions. A composable agent is just a function with a declared input type, a declared output type, and a set of side-effectful tools. Everything else — the model, the prompt, the MCP server, the retry policy — is an implementation detail behind that interface.
+The reference implementation in this guide has four layers:
+┌─────────────────────────────────────────────────────────────┐
+│  Orchestration Engine (Pipeline Runner)                    │
+│  - topo-sorts the agent graph                              │
+│  - executes agents in sequence / parallel                  │
+│  - enforces token budgets per node                         │
+│  - propagates typed errors                                 │
+├─────────────────────────────────────────────────────────────┤
+│  Agent Registry                                            │
+│  - discovers agents from config + code                     │
+│  - validates contracts at runtime (Zod)                    │
+│  - resolves dependencies                                   │
+├─────────────────────────────────────────────────────────────┤
+│  Agent Executors                                           │
+│  - one executor per tool: Cursor, Claude, Copilot, custom  │
+│  - each implements the same Agent interface                │
+│  - MCP client wrapper for tool calls                       │
+├─────────────────────────────────────────────────────────────┤
+│  Context & Token Manager                                   │
+│  - estimates tokens per message                            │
+│  - trims / summarizes context to fit window                │
+│  - shared context store across agents                      │
+└─────────────────────────────────────────────────────────────┘
+
+The core mental model is contract-first. You define what an agent produces and consumes before you implement what it does. This is the same discipline that makes microservices composable, applied to AI agents.
+A pipeline is a directed acyclic graph (DAG). Nodes are agents. Edges carry typed artifacts (e.g. LintReport, TestResults, Patch, ReviewDecision). The engine topologically sorts the graph, executes ready nodes (in parallel where possible), and validates every edge at runtime.
+Node.js 20+ and pnpm 9+
+
+
+TypeScript 5.5+ with strict: true
+
+
+Zod for runtime schema validation: pnpm add zod
+
+
+@modelcontextprotocol/sdk for MCP tool access: pnpm add @modelcontextprotocol/sdk
+
+
+@opentelemetry/api + @opentelemetry/sdk-trace-node for tracing: pnpm add @opentelemetry/api @opentelemetry/sdk-trace-node
+
+
+A local LLM runtime (e.g. Ollama) or API keys for your preferred models
+
+
+
+
+mkdir composable-agents && cd composable-agents
+pnpm init
+pnpm add zod @modelcontextprotocol/sdk @opentelemetry/api @opentelemetry/sdk-trace-node
+pnpm add -D typescript tsx @types/node
+
+All code in this guide is complete and runnable. I'll keep dependencies minimal so you can drop this into an existing repo.
+Every agent in the system is described by a single TypeScript interface. This is the contract that makes composition possible.
+// contracts.ts
+import { z } from "zod";
+
+// ---- Artifact schemas (what flows between agents) ----
+
+export const LintReportSchema = z.object({
+  file: z.string(),
+  issues: z.array(z.object({
+    severity: z.enum(["error", "warning", "info"]),
+    message: z.string(),
+    line: z.number().optional(),
+  })),
+});
+export type LintReport = z.infer<typeof LintReportSchema>;
+
+export const PatchSchema = z.object({
+  diff: z.string(),
+  filesChanged: z.array(z.string()),
+  summary: z.string(),
+});
+export type Patch = z.infer<typeof PatchSchema>;
+
+export const ReviewDecisionSchema = z.object({
+  approved: z.boolean(),
+  comments: z.array(z.string()),
+});
+export type ReviewDecision = z.infer<typeof ReviewDecisionSchema>;
+
+// ---- The Agent contract ----
+
+export interface AgentContext {
+  repoRoot: string;
+  branch: string;
+  shared: Record<string, unknown>;  // cross-agent shared state
+  tokenBudget: number;              // max tokens this agent may consume
+}
+
+export interface Agent<I, O> {
+  id: string;
+  description: string;
+  inputSchema: z.ZodType<I>;
+  outputSchema: z.ZodType<O>;
+  tools: string[];                  // MCP tool names this agent may call
+  execute(input: I, ctx: AgentContext): Promise<O>;
+}
+
+The key insight: inputSchema and outputSchema are runtime schemas, not just types. The orchestrator uses them to validate every edge before passing data along. If a "lint" agent outputs something that doesn't satisfy the "review" agent's input schema, the pipeline fails with a typed error — not a silent undefined.
+A registry is a discovery + validation layer. It loads agent definitions from two sources: declarative config (YAML/JSON) and code (registered executors). The registry validates that every declared agent has a matching executor and that every edge in a pipeline references an existing agent.
+// registry.ts
+import { z } from "zod";
+import type { Agent } from "./contracts";
+
+// Declarative agent definition (from config file)
+const AgentDefSchema = z.object({
+  id: z.string(),
+  input: z.string(),   // name of a registered schema
+  output: z.string(),
+  tools: z.array(z.string()).default([]),
+  model: z.string().optional(),
+  maxTokens: z.number().positive().default(4096),
+  retries: z.number().nonnegative().default(2),
+});
+export type AgentDef = z.infer<typeof AgentDefSchema>;
+
+export class AgentRegistry {
+  private agents = new Map<string, Agent<any, any>>();
+  private schemas = new Map<string, z.ZodType<any>>();
+  private defs = new Map<string, AgentDef>();
+
+  registerSchema(name: string, schema: z.ZodType<any>) {
+    this.schemas.set(name, schema);
+  }
+
+  registerAgent(agent: Agent<any, any>) {
+    this.agents.set(agent.id, agent);
+  }
+
+  loadDefs(defs: AgentDef[]) {
+    for (const def of defs) {
+      // Validate referenced schemas exist
+      if (!this.schemas.has(def.input)) {
+        throw new Error(`Agent "${def.id}" references unknown input schema "${def.input}"`);
+      }
+      if (!this.schemas.has(def.output)) {
+        throw new Error(`Agent "${def.id}" references unknown output schema "${def.output}"`);
+      }
+      this.defs.set(def.id, def);
+    }
+  }
+
+  resolve(id: string): { agent: Agent<any, any>; def: AgentDef } {
+    const agent = this.agents.get(id);
+    const def = this.defs.get(id);
+    if (!agent || !def) {
+      throw new Error(`No registered agent or definition for "${id}"`);
+    }
+    return { agent, def };
+  }
+
+  list(): string[] {
+    return [...this.defs.keys()];
+  }
+}
+
+A corresponding agents.yaml declares the pipeline topology and per-agent policies:
+# agents.yaml
+agents:
+  - id: lint
+    input: SourceInput
+    output: LintReport
+    tools: [filesystem.read, filesystem.glob]
+    maxTokens: 2048
+    retries: 1
+
+  - id: test
+    input: SourceInput
+    output: TestResults
+    tools: [shell.exec]
+    maxTokens: 4096
+    retries: 2
+
+  - id: review
+    input: LintReport
+    output: ReviewDecision
+    tools: [codebase.search]
+    maxTokens: 8192
+
+pipeline:
+  - from: source
+    to: [lint, test]
+  - from: lint
+    to: [review]
+  - from: test
+    to: [review]
+
+Config-as-code means you can version your agent topology, review it in PRs, and enforce policies (token budgets, retries, tool allowlists) without touching executor code.
+This is the heart of the system. The engine takes a pipeline definition, topologically sorts it, and executes each node while respecting parallelism and validating every edge.
+// engine.ts
+import { AgentRegistry } from "./registry";
+import type { AgentContext } from "./contracts";
+
+interface PipelineEdge {
+  from: string;
+  to: string[];
+}
+
+interface PipelineDef {
+  edges: PipelineEdge[];
+  sourceNode: string;
+}
+
+export class OrchestrationEngine {
+  constructor(private registry: AgentRegistry) {}
+
+  async run(pipeline: PipelineDef, ctx: AgentContext) {
+    const results = new Map<string, any>();
+
+    // Build adjacency and in-degree maps
+    const adj = new Map<string, string[]>();
+    const inDegree = new Map<string, number>();
+    for (const edge of pipeline.edges) {
+      adj.set(edge.from, edge.to);
+      for (const to of edge.to) {
+        inDegree.set(to, (inDegree.get(to) ?? 0) + 1);
+      }
+    }
+
+    // Topological sort (Kahn's algorithm) with parallel execution
+    const ready: string[] = [pipeline.sourceNode];
+    while (ready.length > 0) {
+      const batch = ready.splice(0);
+      await Promise.all(batch.map(async (nodeId) => {
+        const { agent, def } = this.registry.resolve(nodeId);
+        const input = results.get(nodeId) ?? ctx.shared[nodeId];
+
+        // Validate input against the agent's input schema
+        const parsed = agent.inputSchema.safeParse(input);
+        if (!parsed.success) {
+          throw new Error(`Agent "${nodeId}" received invalid input: ${parsed.error.message}`);
+        }
+
+        // Execute with a per-agent token budget
+        const output = await agent.execute(parsed.data, {
+          ...ctx,
+          tokenBudget: def.maxTokens,
+        });
+
+        // Validate output against the agent's output schema
+        const validated = agent.outputSchema.safeParse(output);
+        if (!validated.success) {
+          throw new Error(`Agent "${nodeId}" produced invalid output: ${validated.error.message}`);
+        }
+        results.set(nodeId, validated.data);
+      }));
+
+      // Decrement in-degree for downstream nodes, add newly-ready ones
+      for (const nodeId of batch) {
+        for (const downstream of adj.get(nodeId) ?? []) {
+          inDegree.set(downstream, inDegree.get(downstream)! - 1);
+          if (inDegree.get(downstream) === 0) {
+            ready.push(downstream);
+          }
+        }
+      }
+    }
+
+    return results;
+  }
+}
+
+The engine handles three concerns that ad-hoc scripting always gets wrong:
+Ordering — topological sort guarantees a node only runs after all its dependencies.
+Validation — every edge is checked against Zod schemas, so a bad artifact fails loudly.
+Parallelism — nodes with no dependency on each other run concurrently via Promise.all.
+Most agents need access to external context — files, search indexes, CI status, issue trackers. The Model Context Protocol (MCP) is the emerging standard for exposing those capabilities. Your orchestration layer should be an MCP client, not a bespoke integration.
+// mcp.ts
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+
+export class McpToolGateway {
+  private clients = new Map<string, Client>();
+
+  async connect(name: string, command: string, args: string[]) {
+    const transport = new StdioClientTransport({ command, args });
+    const client = new Client({ name: `composable-agents-${name}`, version: "1.0.0" });
+    await client.connect(transport);
+    this.clients.set(name, client);
+  }
+
+  async callTool(clientName: string, toolName: string, args: Record<string, unknown>) {
+    const client = this.clients.get(clientName);
+    if (!client) throw new Error(`MCP client "${clientName}" not connected`);
+    const result = await client.callTool({ name: toolName, arguments: args });
+    return result.content;
+  }
+
+  async listTools(clientName: string) {
+    const client = this.clients.get(clientName);
+    if (!client) throw new Error(`MCP client "${clientName}" not connected`);
+    const tools = await client.listTools();
+    return tools.tools.map(t => t.name);
+  }
+}
+
+Now an executor can enforce a tool allowlist. The contract declares which tools an agent may call; the gateway rejects anything else:
+// executor.ts
+export class ToolGuardedExecutor {
+  constructor(private gateway: McpToolGateway, private allowedTools: Set<string>) {}
+
+  async call(clientName: string, toolName: string, args: Record<string, unknown>) {
+    if (!this.allowedTools.has(toolName)) {
+      throw new Error(`Tool "${toolName}" not allowed for this agent`);
+    }
+    return this.gateway.callTool(clientName, toolName, args);
+  }
+}
+
+This is the composability win: you can swap an agent's MCP backend (e.g. from a local file server to a remote search index) without touching the agent's logic. The contract stays the same.
+Token chaos is the number-one silent cost of AI tool sprawl. Different models have different context windows, and an agent that overruns its budget either truncates context silently or fails. Your orchestration layer should own this.
+// tokens.ts
+export function estimateTokens(text: string): number {
+  // Rough heuristic: ~4 chars per token for English/code, overestimates slightly
+  return Math.ceil(text.length / 4);
+}
+
+export class ContextManager {
+  constructor(private maxContextTokens: number) {}
+
+  fit(messages: { role: string; content: string }[]): { role: string; content: string }[] {
+    let total = 0;
+    const fitted: { role: string; content: string }[] = [];
+    // Keep the system prompt, trim from the oldest non-system message
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const msg = messages[i];
+      const cost = estimateTokens(msg.content);
+      if (total + cost > this.maxContextTokens) {
+        break;
+      }
+      fitted.unshift(msg);
+      total += cost;
+    }
+    return fitted;
+  }
+
+  summarize(overflow: string, model: "fast" | "full"): string {
+    // In a real system, call a cheap model to summarize the overflow.
+    // Here we truncate and mark it, which is a safe fallback.
+    return `[summarized ${overflow.length} chars] ${overflow.slice(0, 500)}...`;
+  }
+}
+
+Two rules of thumb for production:
+Budget per agent, not per pipeline. Give each node a maxTokens in config. The engine passes it via AgentContext.
+Summarize, don't truncate. Truncation loses the beginning of context, which is usually where the task description lives. Summarize the overflow with a cheap model and prepend the summary.
+When an agent produces a wrong result, you need to know which agent, what input it saw, and how many tokens it burned. OpenTelemetry spans around each execution give you that.
+// tracing.ts
+import { trace, SpanStatusCode } from "@opentelemetry/api";
+
+export function withAgentSpan<T>(
+  agentId: string,
+  fn: (span: any) => Promise<T>
+): Promise<T> {
+  const tracer = trace.getTracer("composable-agents");
+  return tracer.startActiveSpan(`agent.${agentId}`, async (span) => {
+    try {
+      const result = await fn(span);
+      span.setStatus({ code: SpanStatusCode.OK });
+      return result;
+    } catch (err) {
+      span.recordException(err as Error);
+      span.setStatus({ code: SpanStatusCode.ERROR });
+      throw err;
+    } finally {
+      span.end();
+    }
+  });
+}
+
+Wire this into the engine by wrapping agent.execute:
+// engine.ts (modified execute path)
+const output = await withAgentSpan(nodeId, (span) => {
+  span.setAttribute("agent.input_schema", agent.inputSchema.constructor.name);
+  span.setAttribute("agent.tool_count", def.tools.length);
+  return agent.execute(parsed.data, ctx);
+});
+
+In a real deployment, export spans to Jaeger, Datadog, or any OpenTelemetry collector. You'll immediately see which agents are slow, which are burning tokens, and which are failing on specific inputs.
+Two patterns make the difference between a toy and a production system: retries with backoff and human-in-the-loop gates.
+// reliability.ts
+export async function withRetry<T>(
+  fn: () => Promise<T>,
+  { retries = 2, baseDelayMs = 500, onRetry }: {
+    retries?: number;
+    baseDelayMs?: number;
+    onRetry?: (attempt: number, err: Error) => void;
+  } = {}
+): Promise<T> {
+  let lastErr: Error | undefined;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err as Error;
+      if (attempt < retries) {
+        const delay = baseDelayMs * Math.pow(2, attempt);
+        onRetry?.(attempt, lastErr);
+        await new Promise(r => setTimeout(r, delay));
+      }
+    }
+  }
+  throw lastErr;
+}
+
+export class HumanGate {
+  async requestApproval(decision: ReviewDecision): Promise<boolean> {
+    if (decision.approved) return true;
+    // In a CLI, prompt the user. In a server, emit an event and wait.
+    console.log(`Agent requires approval. Comments: ${decision.comments.join("; ")}`);
+    return false;
+  }
+}
+
+The retry policy should come from config, not code. A lint agent might tolerate 1 retry; a review agent that calls an expensive model might tolerate 0. Putting it in agents.yaml keeps the policy visible and reviewable.
+Pin model versions. A pipeline that silently upgrades from claude-3-5-sonnet to claude-3-7-sonnet is a pipeline whose behavior you can no longer predict. Pin in config, bump deliberately.
+Make everything dry-run by default. Add a --dry-run flag that executes the pipeline but writes no patches, opens no PRs, and makes no tool calls that mutate state. This is how you test a new agent composition safely.
+Audit everything. Log agent id, model, input hash, output hash, token count, and duration for every execution. This is your forensic trail when an agent "does something weird".
+Canary new agents. Run a new agent on a small sample of PRs before promoting it to the full pipeline. Compare output quality metrics (e.g. test pass rate, lint error delta) against the incumbent.
+Keep the registry declarative. If you find yourself editing executor code to change a pipeline, you've lost the composability. Move the change to agents.yaml.
+Respect the contract. Never bypass inputSchema/outputSchema validation in an executor. The engine is the only place that should cast between types.
+Q: How is this different from just picking one AI tool?
+Q: Can this work with proprietary agents like Cursor or Copilot?
+Q: What's the performance overhead of the orchestration layer?
+Promise.all — microseconds for typical pipelines. The real cost is model inference, which you pay anyway. Validation adds a few milliseconds per edge. If you're running 50+ agents, consider caching validated artifacts by input hash.
+Want more deep dives on AI developer tooling? Check out Tamiz's Insights or explore the full tamiz.pro library...."
+image: /img/blog/generated/building-composable-ai-agents-for-enhanced-developer-productivity-cover.svg
+---
+ 
+<!--truncate-->
+ 
+import SocialShare from "@site/src/components/SocialShare";
+import GiscusComments from "@site/src/components/GiscusComments";
+import Newsletter from "@site/src/components/Newsletter";
+
+![Building Composable AI Agents for Enhanced Developer Productivity](/img/blog/generated/building-composable-ai-agents-for-enhanced-developer-productivity-cover.svg)
+
+*Photo credit: Scafblog automation*
+
+
+### The Fragmentation of AI Tools in Development
+
+In the current landscape of software development, teams are often overwhelmed by an abundance of AI tools, each with distinct functionalities and operational paradigms. This fragmentation results in a chaotic environment where developers struggle to integrate various systems into a cohesive workflow. For instance, tools like Cursor for interactive editing, Claude Code for terminal-driven tasks, and GitHub Copilot for inline completions each come with their own configuration requirements and failure modes. This disarray complicates the development process, leading to inefficiencies and obscuring traceability and accountability in workflows, ultimately stifling productivity.
+
+### The Promise of Composable Architectures
+
+To address the chaos of disparate AI tools, development teams can benefit from adopting a composable architecture. Composable agents are designed to function as modular components, akin to software functions, with clearly defined input and output types. This contract-first approach facilitates seamless integration and interchangeability of agents without necessitating extensive rewrites of surrounding workflows. By establishing standardized interfaces, teams can ensure that each agent's output aligns with the input requirements of subsequent agents, thereby maintaining type safety across the entire pipeline.
+
+### Defining Agent Contracts for Enhanced Clarity
+
+The initial step in constructing a composable AI agent framework involves defining agent contracts that outline the expected inputs and outputs. For instance, consider a linting agent that produces a `LintReport`, detailing issues identified during code analysis. This report can then serve as input for a review agent that anticipates a specific format. By leveraging a schema validation library like Zod, developers can enforce these contracts at runtime, ensuring that any discrepancies in data formats are identified early, thus preventing downstream errors.
+
+For example, a linting agent might be defined as follows:
+
+```typescript
+import { z } from "zod";
+
+// Define the output schema for the linting agent
+export const LintReportSchema = z.object({
+  file: z.string(),
+  issues: z.array(z.object({
+    severity: z.enum(["error", "warning", "info"]),
+    message: z.string(),
+    line: z.number().optional(),
+  })),
+});
+export type LintReport = z.infer<typeof LintReportSchema>;
+```
+
+This schema ensures that the linting agent's output is consistent and can be reliably consumed by subsequent agents, such as a code review agent that expects a `LintReport`.
+
+### Creating an Agent Registry for Efficient Discovery
+
+An agent registry is crucial for managing the discovery and validation of agents within the composable architecture. This registry should load agent definitions from both declarative configuration files (such as YAML or JSON) and the codebase. By validating that each declared agent has a corresponding executor and that all edges in a pipeline reference existing agents, the registry ensures robustness and maintainability. This separation of concerns allows teams to manage agent configurations independently of execution logic, thereby promoting a cleaner architecture.
+
+Here’s an example of how to define an agent registry:
+
+```typescript
+import { z } from "zod";
+import type { Agent } from "./contracts";
+
+// Define the schema for agent definitions
+const AgentDefSchema = z.object({
+  id: z.string(),
+  input: z.string(),   // name of a registered schema
+  output: z.string(),
+  tools: z.array(z.string()).default([]),
+  maxTokens: z.number().positive().default(4096),
+});
+
+export class AgentRegistry {
+  private agents = new Map<string, Agent<any, any>>();
+
+  registerAgent(agent: Agent<any, any>) {
+    this.agents.set(agent.id, agent);
+  }
+
+  resolve(id: string): Agent<any, any> {
+    const agent = this.agents.get(id);
+    if (!agent) {
+      throw new Error(`No registered agent for "${id}"`);
+    }
+    return agent;
+  }
+}
+```
+
+This registry allows for efficient management of agents, enabling teams to quickly discover and validate agents as needed.
+
+### Orchestrating Agent Execution with a Central Engine
+
+The orchestration engine serves as the core of the composable agent framework, responsible for managing the execution of agents based on a defined pipeline. This engine must be capable of topologically sorting the agent graph to determine the execution order, executing agents in parallel where feasible, and enforcing token budgets for each agent. By maintaining a clear execution flow and validating each edge against the defined schemas, the orchestration engine enhances the reliability of the overall system.
+
+For instance, the orchestration engine can be defined as follows:
+
+```typescript
+export class OrchestrationEngine {
+  constructor(private registry: AgentRegistry) {}
+
+  async run(pipeline: PipelineDef, ctx: AgentContext) {
+    // Implementation details for executing the pipeline
+    // including topological sorting and validation
+  }
+}
+```
+
+This engine must also handle the complexities of agent interactions and ensure that each agent operates within its defined constraints.
+
+### Managing Context and Token Budgets Effectively
+
+Effective context management is critical for optimizing the performance of AI agents, especially when dealing with large language models (LLMs) that impose strict token limits. The orchestration engine should implement a context manager that estimates token usage and trims or summarizes context to fit within the constraints of the models in use. This proactive approach prevents runtime errors due to exceeded token budgets, ensuring that agents operate within their defined limits.
+
+For example, a context manager could be implemented as follows:
+
+```typescript
+export function estimateTokens(text: string): number {
+  return Math.ceil(text.length / 4); // Rough estimate of tokens
+}
+
+export class ContextManager {
+  constructor(private maxContextTokens: number) {}
+
+  fit(messages: { role: string; content: string }[]): { role: string; content: string }[] {
+    // Logic to manage context fitting within token limits
+  }
+}
+```
+
+This ensures that the context remains manageable and within the limits imposed by the AI systems being utilized.
+
+### Ensuring Observability and Tracing for Debugging
+
+Observability is a vital aspect of any AI-driven system, particularly when debugging complex workflows that involve multiple agents. By integrating a tracing library such as OpenTelemetry, developers can monitor the execution of each agent, capturing critical metrics such as token consumption, execution time, and error rates. This visibility enables teams to identify bottlenecks and optimize performance, ultimately leading to more efficient workflows.
+
+Here’s how you could implement observability:
+
+```typescript
+import { trace, SpanStatusCode } from "@opentelemetry/api";
+
+export function withAgentSpan<T>(
+  agentId: string,
+  fn: (span: any) => Promise<T>
+): Promise<T> {
+  const tracer = trace.getTracer("composable-agents");
+  return tracer.startActiveSpan(`agent.${agentId}`, async (span) => {
+    try {
+      const result = await fn(span);
+      span.setStatus({ code: SpanStatusCode.OK });
+      return result;
+    } catch (err) {
+      span.recordException(err as Error);
+      span.setStatus({ code: SpanStatusCode.ERROR });
+      throw err;
+    } finally {
+      span.end();
+    }
+  });
+}
+```
+
+This approach provides critical insights into the functioning of the agents, allowing for timely interventions and optimizations.
+
+### Best Practices for Production Readiness
+
+When deploying a composable AI agent framework in a production environment, several best practices should be adhered to. These include defining clear retry policies for agents, implementing human-in-the-loop (HITL) gates for critical decision points, and ensuring that all agent interactions are logged for auditability. Furthermore, versioning agent configurations and maintaining a declarative approach to agent definitions can significantly enhance the maintainability of the system.
+
+### Conclusion: A Path Towards Enhanced Developer Productivity
+
+In conclusion, the adoption of a composable architecture for AI agents presents a compelling solution to the chaos of disparate AI tools in software development. By defining clear contracts, constructing robust registries, and implementing orchestration engines, development teams can create efficient and traceable workflows. As AI technologies continue to evolve, embracing composability will be essential to unlocking the full potential of these powerful tools, ultimately driving greater productivity and innovation in software development. Through careful implementation of these strategies, teams can navigate the complexities of AI integration and achieve a more streamlined development process.
+
+---
+
+## 📌 About This Article
+
+Enjoyed this article? Share your thoughts in the comments below. Found it useful? Subscribe for weekly technical deep-dives.
+
+**Source:** [Read the original discussion](https://dev.to/tamizuddin/taming-the-ai-tool-chaos-a-practical-guide-to-composable-developer-agents-43ip)
+
+---
+
+<SocialShare title="Building Composable AI Agents for Enhanced Developer Productivity" slug="building-composable-ai-agents-for-enhanced-developer-productivity" />
+
+---
+
+## 💬 Join the Conversation
+
+Have thoughts on this? Questions or insights to share?
+
+> 💡 **Note:** Sign in with GitHub to leave a comment. It's free and takes 10 seconds.
+
+<GiscusComments />
+
+---
+
+<Newsletter
+  title="🚀 Stay Updated"
+  description="Get weekly insights on technology and innovation delivered to your inbox"
+  buttonText="Subscribe"
+  theme="secondary"
+/>
